@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="Webmail (Gmail)">
+  <defs>
+    <linearGradient id="webmailBg" x1="0.12" y1="0" x2="0.88" y2="1">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="1" stop-color="#F1F5F9"/>
+    </linearGradient>
+  </defs>
+  <circle cx="256" cy="256" r="256" fill="url(#webmailBg)"/>
+  <circle cx="256" cy="256" r="252" fill="none" stroke="#E2E8F0" stroke-width="8"/>
+  <!-- Gmail (2020) — marca oficial do Google, uso nominativo para identificar o canal -->
+  <g transform="translate(-70.3 1.2) scale(3.4)">
+    <path fill="#4285f4" d="M58 108h14V74L52 59v43c0 3.32 2.69 6 6 6"/>
+    <path fill="#34a853" d="M120 108h14c3.32 0 6-2.69 6-6V59l-20 15"/>
+    <path fill="#fbbc04" d="M120 48v26l20-15v-8c0-7.42-8.47-11.65-14.4-7.2"/>
+    <path fill="#ea4335" d="M72 74V48l24 18 24-18v26L96 92"/>
+    <path fill="#c5221f" d="M52 51v8l20 15V48l-5.6-4.2c-5.94-4.45-14.4-.22-14.4 7.2"/>
+  </g>
+</svg>

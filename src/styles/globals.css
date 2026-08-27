@@ -1,0 +1,236 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    /* Fundo off-white: cards brancos ganham profundidade sem borda pesada */
+    --background: 240 10% 98.5%;
+    --foreground: 240 10% 3.9%;
+    --card: 0 0% 100%;
+    --card-foreground: 240 10% 3.9%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 240 10% 3.9%;
+    --primary: 240 5.9% 10%;
+    --primary-foreground: 0 0% 98%;
+    --secondary: 240 4.8% 95.9%;
+    --secondary-foreground: 240 5.9% 10%;
+    --muted: 240 4.8% 95.9%;
+    --muted-foreground: 240 3.8% 46.1%;
+    --accent: 240 5% 93.5%;
+    --accent-foreground: 240 5.9% 10%;
+    --destructive: 0 84.2% 60.2%;
+    --destructive-foreground: 0 0% 98%;
+    --success: 142 76% 36%;
+    --success-foreground: 0 0% 98%;
+    --warning: 38 92% 50%;
+    --warning-foreground: 26 83% 14%;
+    --info: 217 91% 60%;
+    --info-foreground: 0 0% 98%;
+    --border: 240 5.9% 90%;
+    --input: 240 5.9% 90%;
+    --ring: 240 5.9% 10%;
+    --radius: 0.625rem;
+
+    /* Paleta categórica p/ gráficos (consumida via hsl(var(--chart-N))) */
+    --chart-1: 220 70% 50%;
+    --chart-2: 160 60% 45%;
+    --chart-3: 30 80% 55%;
+    --chart-4: 340 65% 50%;
+    --chart-5: 270 55% 55%;
+    --chart-6: 190 65% 45%;
+    --chart-7: 50 80% 50%;
+    --chart-8: 0 65% 50%;
+    --chart-9: 140 55% 45%;
+    --chart-10: 300 50% 55%;
+
+    /* Escala de elevação própria (consumida via tailwind boxShadow) */
+    --shadow-xs: 0 1px 2px hsl(240 10% 10% / 0.05);
+    --shadow-sm: 0 1px 2px hsl(240 10% 10% / 0.06), 0 1px 3px hsl(240 10% 10% / 0.04);
+    --shadow-md: 0 2px 4px hsl(240 10% 10% / 0.05), 0 4px 12px -2px hsl(240 10% 10% / 0.08);
+    --shadow-lg: 0 4px 8px hsl(240 10% 10% / 0.05), 0 12px 28px -6px hsl(240 10% 10% / 0.14);
+
+    /* Motion tokens */
+    --ease-snappy: cubic-bezier(0.2, 0, 0, 1);
+    --ease-out-soft: cubic-bezier(0.16, 1, 0.3, 1);
+
+    --sidebar-background: 0 0% 98%;
+    --sidebar-foreground: 240 5.3% 26.1%;
+    --sidebar-primary: 240 5.9% 10%;
+    --sidebar-primary-foreground: 0 0% 98%;
+    --sidebar-accent: 240 4.8% 95.9%;
+    --sidebar-accent-foreground: 240 5.9% 10%;
+    --sidebar-border: 220 13% 91%;
+    --sidebar-ring: 240 5.9% 10%;
+
+    --font-sans: "Inter", system-ui, -apple-system, sans-serif;
+    --font-mono: "JetBrains Mono", "Fira Code", monospace;
+
+    --font-app: var(--font-sans);
+    --avatar-radius: 9999px;
+  }
+
+  :root[data-avatar-shape="rounded-square"] {
+    --avatar-radius: 0.5rem;
+  }
+
+  .dark {
+    /* Degraus de elevação: background 3.5% → card 7% → popover 9% */
+    --background: 240 10% 3.5%;
+    --foreground: 0 0% 98%;
+    --card: 240 6% 7%;
+    --card-foreground: 0 0% 98%;
+    --popover: 240 6% 9%;
+    --popover-foreground: 0 0% 98%;
+    --primary: 0 0% 98%;
+    --primary-foreground: 240 5.9% 10%;
+    --secondary: 240 3.7% 15.9%;
+    --secondary-foreground: 0 0% 98%;
+    --muted: 240 3.7% 15.9%;
+    --muted-foreground: 240 5% 64.9%;
+    --accent: 240 3.7% 15.9%;
+    --accent-foreground: 0 0% 98%;
+    /* 51% mantém texto branco AA (~4,5:1) nos botões destructive; o texto
+       text-destructive sobre o fundo escuro ganha override próprio abaixo
+       (um valor único não passa AA nos dois usos ao mesmo tempo). */
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 0 0% 98%;
+    --success: 142 76% 36%;
+    --success-foreground: 0 0% 98%;
+    --warning: 38 92% 50%;
+    --warning-foreground: 26 83% 14%;
+    --info: 217 91% 60%;
+    --info-foreground: 0 0% 98%;
+    --border: 240 3.7% 15.9%;
+    --input: 240 3.7% 15.9%;
+    --ring: 240 4.9% 83.9%;
+
+    /* Gráficos: mesmas matizes, +10-15% de luminosidade p/ fundo escuro */
+    --chart-1: 220 70% 62%;
+    --chart-2: 160 60% 57%;
+    --chart-3: 30 80% 66%;
+    --chart-4: 340 65% 62%;
+    --chart-5: 270 55% 67%;
+    --chart-6: 190 65% 57%;
+    --chart-7: 50 80% 62%;
+    --chart-8: 0 65% 62%;
+    --chart-9: 140 55% 57%;
+    --chart-10: 300 50% 66%;
+
+    /* Sombra escura não funciona em fundo escuro: reforço + highlight interno */
+    --shadow-xs: 0 1px 2px hsl(0 0% 0% / 0.3);
+    --shadow-sm: 0 1px 2px hsl(0 0% 0% / 0.35), inset 0 1px 0 hsl(0 0% 100% / 0.03);
+    --shadow-md: 0 2px 6px hsl(0 0% 0% / 0.4), inset 0 1px 0 hsl(0 0% 100% / 0.04);
+    --shadow-lg: 0 8px 28px hsl(0 0% 0% / 0.5), inset 0 1px 0 hsl(0 0% 100% / 0.05);
+
+    --sidebar-background: 240 5.9% 10%;
+    --sidebar-foreground: 240 4.8% 95.9%;
+    --sidebar-primary: 224.3 76.3% 48%;
+    --sidebar-primary-foreground: 0 0% 100%;
+    --sidebar-accent: 240 3.7% 15.9%;
+    --sidebar-accent-foreground: 240 4.8% 95.9%;
+    --sidebar-border: 240 3.7% 15.9%;
+    --sidebar-ring: 240 4.9% 83.9%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  html {
+    /* Prevent horizontal scroll globally — important for PWA */
+    overflow-x: hidden;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+    font-family: var(--font-app, var(--font-sans));
+    font-feature-settings: "rlig" 1, "calt" 1;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    /* PWA: prevent overscroll bounce on iOS */
+    overscroll-behavior: none;
+  }
+
+  /* Custom scrollbar */
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    @apply bg-muted-foreground/20 rounded-full;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    @apply bg-muted-foreground/40;
+  }
+
+  /* Acessibilidade: respeita preferência do SO por menos movimento */
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    ::before,
+    ::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+}
+
+@layer utilities {
+  /* Dissociação texto/fundo do destructive no dark: o token 0 72% 51% passa AA
+     como FUNDO de botão (texto branco), mas como TEXTO sobre o bg escuro fica
+     ~3,2:1 — este override sobe o texto para vermelho claro (~7:1). */
+  .dark .text-destructive {
+    color: hsl(0 91% 71%);
+  }
+  .glass {
+    @apply backdrop-blur-md bg-background/80 border border-border/50;
+  }
+  .text-gradient {
+    @apply bg-clip-text text-transparent bg-gradient-to-r from-primary to-info;
+  }
+  /* Hide scrollbar while keeping scroll functionality — used for horizontal nav strips */
+  .scrollbar-none {
+    scrollbar-width: none; /* Firefox */
+    -ms-overflow-style: none; /* IE/Edge */
+  }
+  .scrollbar-none::-webkit-scrollbar {
+    display: none; /* Chrome/Safari */
+  }
+
+  /* Live presentation mode — blur de dados sensíveis durante apresentações.
+     Não é segurança: é ofuscação visual. DOM continua expondo os dados.
+     Ativado por NEXT_PUBLIC_LIVE_MODE_ENABLED + toggle do operador. */
+  .live-blur {
+    filter: blur(7px);
+    user-select: none;
+    transition: filter 180ms ease-out;
+  }
+  .live-blur-strong {
+    filter: blur(12px);
+    user-select: none;
+    transition: filter 180ms ease-out;
+  }
+  .live-blur-text {
+    filter: blur(5px);
+    user-select: none;
+    transition: filter 180ms ease-out;
+  }
+
+  /* Quoted message scroll-to highlight */
+  @keyframes msg-highlight-fade {
+    0%   { box-shadow: 0 0 0 3px hsl(var(--primary) / 0.6); background-color: hsl(var(--primary) / 0.08); }
+    80%  { box-shadow: 0 0 0 3px hsl(var(--primary) / 0.3); background-color: hsl(var(--primary) / 0.04); }
+    100% { box-shadow: none; background-color: transparent; }
+  }
+  .msg-highlight {
+    border-radius: 0.5rem;
+    animation: msg-highlight-fade 1.8s ease-out forwards;
+  }
+}

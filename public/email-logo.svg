@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="Email">
+  <defs>
+    <linearGradient id="emailBg" x1="0.12" y1="0" x2="0.88" y2="1">
+      <stop offset="0" stop-color="#6366F1"/>
+      <stop offset="1" stop-color="#4338CA"/>
+    </linearGradient>
+    <radialGradient id="emailGloss" cx="0.5" cy="0.02" r="0.85">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.16"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="emailPaper" x1="0.18" y1="0" x2="0.82" y2="1">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="1" stop-color="#E6E9FA"/>
+    </linearGradient>
+    <mask id="emailFold">
+      <rect x="112" y="152" width="288" height="208" rx="28" fill="#FFFFFF"/>
+      <path d="M141 187 L256 282 L371 187" fill="none" stroke="#000000" stroke-width="26" stroke-linecap="round" stroke-linejoin="round"/>
+    </mask>
+  </defs>
+  <circle cx="256" cy="256" r="256" fill="url(#emailBg)"/>
+  <circle cx="256" cy="256" r="256" fill="url(#emailGloss)"/>
+  <rect x="112" y="152" width="288" height="208" rx="28" fill="url(#emailPaper)" mask="url(#emailFold)"/>
+</svg>

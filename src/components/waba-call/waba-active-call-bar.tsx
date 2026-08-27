@@ -1,0 +1,101 @@
+"use client"
+
+import { useEffect, useState } from "react"
+import { Mic, MicOff, PhoneOff } from "lucide-react"
+import { useTranslations } from "next-intl"
+import { useWabaCallStore } from "@/stores/waba-call-store"
+import { useWabaCallActions } from "./waba-call-provider"
+import { getWabaRtc } from "./waba-call-provider"
+
+function formatDuration(seconds: number): string {
+  const m = Math.floor(seconds / 60).toString().padStart(2, '0')
+  const s = (seconds % 60).toString().padStart(2, '0')
+  return `${m}:${s}`
+}
+
+export function WabaActiveCallBar() {
+  const t = useTranslations("wabaCalls")
+  const { state, callInfo, isMuted, setMuted } = useWabaCallStore()
+  const { hangup } = useWabaCallActions()
+  const [seconds, setSeconds] = useState(0)
+
+  const isVisible = state === 'active' || state === 'pre_accepting'
+
+  // Timer local — não depende do webphone-store
+  useEffect(() => {
+    if (!isVisible) { setSeconds(0); return }
+    setSeconds(0)
+    const interval = setInterval(() => setSeconds(s => s + 1), 1000)
+    return () => clearInterval(interval)
+  }, [isVisible])
+
+  function toggleMute() {
+    const next = !isMuted
+    setMuted(next)
+    try { getWabaRtc().setMuted(next) } catch {}
+  }
+
+  if (!isVisible || !callInfo) return null
+
+  const displayName = callInfo.contactName || callInfo.from
+
+  return (
+    <div
+      role="region"
+      aria-label={t("active")}
+      className="fixed bottom-0 left-0 right-0 md:left-64 z-40 bg-card border-t border-border px-4 py-3 flex items-center gap-3"
+    >
+      {/* Avatar pequeno */}
+      {callInfo.contactPic ? (
+        <img
+          src={callInfo.contactPic}
+          alt={displayName}
+          className="w-8 h-8 rounded-full object-cover flex-shrink-0"
+        />
+      ) : (
+        <div className="w-8 h-8 rounded-full bg-muted flex items-center justify-center flex-shrink-0">
+          <span className="text-foreground text-sm font-semibold">
+            {displayName.charAt(0).toUpperCase()}
+          </span>
+        </div>
+      )}
+
+      {/* Nome + status */}
+      <div className="flex-1 min-w-0">
+        <p className="text-foreground text-sm font-medium truncate">{displayName}</p>
+        <p className="text-muted-foreground text-xs">
+          {state === 'pre_accepting' ? t("connecting") : t("active")}
+        </p>
+      </div>
+
+      {/* Timer */}
+      {state === 'active' && (
+        <span className="text-success text-sm font-mono tabular-nums">
+          {formatDuration(seconds)}
+        </span>
+      )}
+
+      {/* Controles */}
+      <button
+        type="button"
+        onClick={toggleMute}
+        className="w-9 h-9 rounded-full bg-muted hover:bg-muted/80 flex items-center justify-center transition-colors"
+        aria-label={isMuted ? t("unmute") : t("mute")}
+      >
+        {isMuted
+          ? <MicOff className="w-4 h-4 text-destructive" />
+          : <Mic className="w-4 h-4 text-foreground" />
+        }
+      </button>
+
+      <button
+        type="button"
+        onClick={hangup}
+        className="w-9 h-9 rounded-full bg-destructive hover:bg-destructive/90 flex items-center justify-center transition-colors"
+        aria-label={t("hangup")}
+      >
+        <PhoneOff className="w-4 h-4 text-destructive-foreground" />
+      </button>
+    </div>
+  )
+}
