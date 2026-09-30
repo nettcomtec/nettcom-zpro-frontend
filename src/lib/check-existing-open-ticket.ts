@@ -65,7 +65,7 @@ function digitsOnly(value: string | null | undefined): string {
  * DIFERENTE do alvo ainda eh retornado (para avisar da conversa cross-canal).
  * Devolve null quando o ticket eh do proprio operador NO MESMO canal, ou se nao ha.
  *
- * Espelha `abrirAtendimentoExistente` do Vue (MainLayout.vue:2076-2129).
+ * Espelha `abrirAtendimentoExistente` do front legado.
  */
 export async function findExistingOpenTicket(opts: {
   number: string;
@@ -146,6 +146,82 @@ function siblingToExistingOpenTicket(s: CrossChannelSibling): ExistingOpenTicket
  *
  * Nunca lança (best-effort: qualquer erro devolve null e a ação prossegue).
  */
+/**
+ * Pré-check da TROCA DE CANAL de um ticket: devolve o atendimento open/pending do
+ * mesmo contato que JÁ vive no canal de DESTINO (duplicata direta pós-transferência),
+ * ou null quando não há motivo para avisar. Passa o canal de destino como
+ * `whatsappId` do item — o backend classifica `sameChannel` contra o valor enviado,
+ * então "mesmo canal" aqui significa "no canal de destino". NÃO é gated pela flag
+ * cross-canal (duplicata direta, espelho do gatilho da reabertura).
+ * Nunca lança (best-effort: erro devolve null e a transferência segue).
+ */
+export async function findOpenTicketOnTargetChannel(opts: {
+  ticketId: number;
+  number: string | null | undefined;
+  targetWhatsappId: number | null | undefined;
+}): Promise<ExistingOpenTicket | null> {
+  try {
+    const ticketId = Number(opts.ticketId);
+    const wid = Number(opts.targetWhatsappId ?? 0);
+    const num = digitsOnly(opts.number);
+    if (!ticketId || !num || !(wid > 0)) return null;
+
+    const { data } = await fetchCrossChannelSiblings(
+      [{ ticketId, number: num, whatsappId: wid }],
+      { includeSameChannel: true }
+    );
+    const list = data?.siblings?.[ticketId] || [];
+    // Gatilho: só o irmão que JÁ está no canal de destino avisa; os demais entram
+    // apenas como informação na lista do dialog (quando a flag cross os devolve).
+    if (!list.some((s) => s.sameChannel === true)) return null;
+
+    const ordered = [...list].sort((a, b) => {
+      const av = a.sameChannel === true ? 1 : 0;
+      const bv = b.sameChannel === true ? 1 : 0;
+      return bv - av;
+    });
+    const [primary, ...rest] = ordered.map(siblingToExistingOpenTicket);
+    if (rest.length) primary.siblings = rest;
+    return primary;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Variante BATELADA do pré-check de troca de canal (transferência em massa):
+ * devolve Map ticketId -> atendimento já aberto no canal de destino, apenas para
+ * os tickets em conflito. Nunca lança (erro devolve o que já coletou).
+ */
+export async function findOpenTicketsOnTargetChannelBulk(
+  items: Array<{ ticketId: number; number: string | null | undefined }>,
+  targetWhatsappId: number
+): Promise<Map<number, ExistingOpenTicket>> {
+  const out = new Map<number, ExistingOpenTicket>();
+  try {
+    const wid = Number(targetWhatsappId ?? 0);
+    if (!(wid > 0)) return out;
+    const valid = items
+      .map((i) => ({ ticketId: Number(i.ticketId), number: digitsOnly(i.number), whatsappId: wid }))
+      .filter((i) => i.ticketId > 0 && !!i.number);
+    if (!valid.length) return out;
+    // O backend corta em 50 itens por request: fatia para cobrir seleções maiores.
+    for (let i = 0; i < valid.length; i += 50) {
+      const { data } = await fetchCrossChannelSiblings(valid.slice(i, i + 50), {
+        includeSameChannel: true,
+      });
+      const map = data?.siblings || {};
+      Object.entries(map).forEach(([tid, list]) => {
+        const hit = (list || []).find((s) => s.sameChannel === true);
+        if (hit) out.set(Number(tid), siblingToExistingOpenTicket(hit));
+      });
+    }
+    return out;
+  } catch {
+    return out;
+  }
+}
+
 export async function findCrossChannelSiblingForTicket(opts: {
   ticketId: number;
   number: string | null | undefined;

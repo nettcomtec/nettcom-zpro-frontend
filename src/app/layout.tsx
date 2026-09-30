@@ -39,9 +39,29 @@ export async function generateMetadata(): Promise<Metadata> {
   // favicon.ico padrão do build. O favicon por-tenant continua sendo aplicado no
   // client após o login (dashboard layout), pois o SSR não conhece o tenant.
   const faviconUrl = `${apiBase}/publicFavicon`;
+  // Open Graph explícito. Sem og:image, WhatsApp/Telegram/iMessage escolhem "alguma"
+  // imagem da página — na prática o maior apple-touch-icon —, e em instalação cujo
+  // conjunto custom não tinha o 1024 isso mostrava a marca padrão ao compartilhar o
+  // link. O 512 existe em todo conjunto custom já gerado (inclusive os anteriores ao
+  // 1024) e atende o mínimo de 300px de largura do WhatsApp para o card grande.
+  const description = "Sistema de atendimento multicanal";
+  const ogImage = `${apiBase}/publicPwaIcon/icon-512x512.png${t}`;
   return {
     title: appName,
-    description: "Sistema de atendimento multicanal",
+    description,
+    openGraph: {
+      title: appName,
+      description,
+      siteName: appName,
+      type: "website",
+      images: [{ url: ogImage, width: 512, height: 512, alt: appName }],
+    },
+    twitter: {
+      card: "summary",
+      title: appName,
+      description,
+      images: [ogImage],
+    },
     icons: {
       icon: faviconUrl,
       apple: [

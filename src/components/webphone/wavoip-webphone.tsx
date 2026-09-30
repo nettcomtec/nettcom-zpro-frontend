@@ -88,7 +88,7 @@ export function WaVoIPWebphone({ tokens }: WaVoIPWebphoneProps) {
       })
       .catch(() => {});
 
-    // Cria nota de ligação no ticket (como Vue's CriarNota), se chamada originada de um ticket
+ // Cria nota de ligação no ticket (como the legacy front's CriarNota), se chamada originada de um ticket
     if (meta?.ticketId != null) {
       createCallNote({
         notes: JSON.stringify({ title: "Ligação de voz", subtitle: "Registro de ligação no seu celular." }),

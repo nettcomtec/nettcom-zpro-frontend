@@ -18,6 +18,9 @@ interface AppRocketChat {
   id: number;
   serverUrl?: string;
   adminUserId?: string;
+  // Backend atual não devolve as credenciais a quem não é superadmin, só se existem.
+  hasAdminUserId?: boolean;
+  hasAdminAuthToken?: boolean;
   autoCreateUsers?: boolean;
   isActive?: boolean;
   description?: string;
@@ -132,14 +135,14 @@ export default function ConfigRocketChatPage() {
               <User className="h-4 w-4 text-muted-foreground shrink-0" />
               <div>
                 <p className="text-xs text-muted-foreground">{t("adminUserIdLabel")}</p>
-                <p className="font-mono text-xs">{config.adminUserId ? "••••••••" : "---"}</p>
+                <p className="font-mono text-xs">{(config.hasAdminUserId ?? !!config.adminUserId) ? "••••••••" : "---"}</p>
               </div>
             </div>
             <div className="flex items-center gap-3 text-sm">
               <Key className="h-4 w-4 text-muted-foreground shrink-0" />
               <div>
                 <p className="text-xs text-muted-foreground">{t("authTokenLabel")}</p>
-                <p className="font-mono text-xs">••••••••</p>
+                <p className="font-mono text-xs">{config.hasAdminAuthToken === false ? "---" : "••••••••"}</p>
               </div>
             </div>
             <div className="flex items-center gap-2 pt-1">

@@ -13,10 +13,10 @@ function parsePosition(left?: string, top?: string) {
   };
 }
 
-// ─── Vue → React compatibility layer ────────────────────────────────────────
-// The Vue flow builder uses PascalCase "XxxField" type names and a different
+// ─── legado → React compatibility layer ────────────────────────────────────────
+// The legacy flow builder uses PascalCase "XxxField" type names and a different
 // condition structure. This normaliser converts old format to the React format
-// transparently so flows exported from the Vue app can be opened in the React app.
+// transparently so flows exported from the legacy app can be opened in the React app.
 
 const VUE_INTERACTION_TYPE_MAP: Record<string, FlowInteraction["type"]> = {
   MessageField: "message",
@@ -24,6 +24,7 @@ const VUE_INTERACTION_TYPE_MAP: Record<string, FlowInteraction["type"]> = {
   DelayField: "delay",
   ChatGPTField: "chatgpt",
   ChatgptField: "chatgpt",
+  AgentField: "agent",
   TypebotField: "typebot",
   N8nField: "n8n",
   TagField: "tag",
@@ -34,7 +35,7 @@ const VUE_INTERACTION_TYPE_MAP: Record<string, FlowInteraction["type"]> = {
   // Sub-fluxo: aceitar as DUAS grafias. O export (REACT_INTERACTION_TYPE_MAP)
   // grava "ChatFlowField" (F maiúsculo); sem esta entrada o round-trip
   // salvar→reabrir não re-normaliza e o campo degrada para o input "Valor"
-  // genérico. "ChatflowField" (f minúsculo) mantido para dados legados do Vue.
+ // genérico. "ChatflowField" (f minúsculo) mantido para dados legados do front legado.
   // Backend confirma ambas em BuildSendMessageService (msg.type === "ChatFlowField" || "ChatflowField").
   ChatFlowField: "chatflow",
   ChatflowField: "chatflow",
@@ -75,10 +76,10 @@ function normaliseInteraction(raw: Record<string, unknown>): FlowInteraction {
 }
 
 function normaliseCondition(raw: Record<string, unknown>): FlowCondition {
-  // Vue stores the comparison operator in `comparisonType` and the routing type
+ // The legacy front stores the comparison operator in `comparisonType` and the routing type
   // in `type` ("R" = reply-based, "US" = any reply).
   // React collapses both into a single `type` field and stores the match value
-  // as a string (Vue uses an array called `condition`).
+ // as a string (front legado uses an array called `condition`).
   const vueType = (raw.type as string) ?? "US";
   const comparisonType = (raw.comparisonType as string) ?? "";
   const conditionArr = Array.isArray(raw.condition) ? (raw.condition as string[]) : [];
@@ -87,7 +88,7 @@ function normaliseCondition(raw: Record<string, unknown>): FlowCondition {
   if (vueType === "US") {
     type = "US";
   } else if (vueType === "R") {
-    // Map Vue comparisonType → React condition type
+ // Map legacy comparisonType → React condition type
     const mapping: Record<string, FlowCondition["type"]> = {
       equals: "equals",
       contains: "contains",
@@ -114,7 +115,7 @@ function normaliseCondition(raw: Record<string, unknown>): FlowCondition {
     condition: conditionArr,
     value: conditionArr.join(",") || ((raw.value as string) ?? ""),
     comparisonType: comparisonType || undefined,
-    // timeTable (type "T") fields — preservados no round-trip Vue/React
+ // timeTable (type "T") fields — preservados no round-trip legado/React
     weekdays: Array.isArray(raw.weekdays) ? (raw.weekdays as number[]) : undefined,
     startTime: (raw.startTime as string) || undefined,
     endTime: (raw.endTime as string) || undefined,
@@ -122,8 +123,8 @@ function normaliseCondition(raw: Record<string, unknown>): FlowCondition {
   };
 }
 
-// ─── React → Vue compatibility layer (for saving) ───────────────────────────
-// When saving, we must produce the Vue/backend format so existing backend logic
+// ─── React → legacy compatibility layer (for saving) ───────────────────────────
+// When saving, we must produce the legacy/backend format so existing backend logic
 // continues to work unchanged.
 
 const REACT_INTERACTION_TYPE_MAP: Record<string, string> = {
@@ -131,6 +132,7 @@ const REACT_INTERACTION_TYPE_MAP: Record<string, string> = {
   media: "MediaField",
   delay: "DelayField",
   chatgpt: "ChatGPTField",
+  agent: "AgentField",
   typebot: "TypebotField",
   n8n: "N8nField",
   tag: "TagField",
@@ -162,7 +164,7 @@ const REACT_INTERACTION_TYPE_MAP: Record<string, string> = {
   SwitchChannel: "SwitchChannel",
 };
 
-// Comparison types that map to Vue type "R"
+// Comparison types that map to legacy type "R"
 const COMPARISON_TYPES = new Set(["equals", "contains", "startsWith", "endsWith", "regex"]);
 
 function denormaliseInteraction(i: FlowInteraction): Record<string, unknown> {
@@ -197,18 +199,18 @@ function denormaliseCondition(c: FlowCondition): Record<string, unknown> {
     };
   }
 
-  // React "US" → Vue type "US", condition []
+ // React "US" → legacy type "US", condition []
   if (c.type === "US") {
     return { ...base, type: "US", comparisonType: "", condition: [], value: c.value };
   }
 
-  // Automático (auto-avanço) → Vue type "A"; condition [] garante que canais
+ // Automático (auto-avanço) → front legado type "A"; condition [] garante que canais
   // sem plumb do resolver não quebrem no matcher legado (que itera o array)
   if (c.type === "A") {
     return { ...base, type: "A", comparisonType: "", condition: [], value: "" };
   }
 
-  // React comparison types → Vue type "R" + comparisonType
+ // React comparison types → legacy type "R" + comparisonType
   if (COMPARISON_TYPES.has(c.type)) {
     const condArr = c.condition?.length ? c.condition : (c.value ? c.value.split(",") : []);
     return {
@@ -220,7 +222,7 @@ function denormaliseCondition(c: FlowCondition): Record<string, unknown> {
     };
   }
 
-  // Already in Vue "R" format or unknown type — pass through
+ // Already in the legacy front "R" format or unknown type — pass through
   const condArr = c.condition?.length ? c.condition : (c.value ? c.value.split(",") : []);
   return {
     ...base,
@@ -232,15 +234,15 @@ function denormaliseCondition(c: FlowCondition): Record<string, unknown> {
 }
 
 /**
- * Denormalise a FlowData object from React format back to the Vue/backend
+ * Denormalise a FlowData object from React format back to the legacy/backend
  * format (PascalCase interaction types, condition array, etc.) before saving.
  */
 export function denormaliseFlowData(flowData: FlowData): FlowData {
   return {
     ...flowData,
     nodeList: (flowData.nodeList ?? []).map((node) => {
-      // start and configurations nodes don't have interactions/conditions/actions in Vue format.
-      // We strip them here so the saved JSON matches the Vue ccFlowBuilder output exactly.
+ // start and configurations nodes don't have interactions/conditions/actions in legacy format.
+ // We strip them here so the saved JSON matches the legacy ccFlowBuilder output exactly.
       if (node.type === "start" || node.type === "configurations") {
         // eslint-disable-next-line @typescript-eslint/no-unused-vars
         const { interactions: _i, conditions: _c, actions: _a, ...rest } = node;
@@ -271,7 +273,7 @@ export function denormaliseFlowData(flowData: FlowData): FlowData {
 }
 
 /**
- * Normalise a raw FlowData object that may have been exported from the Vue
+ * Normalise a raw FlowData object that may have been exported from the legacy front
  * flow builder, converting interaction types and condition shapes to the React
  * format expected by node-form and flow-adapter.
  */

@@ -36,6 +36,7 @@ import { getNuvemshopProxyCallbackUrl } from "@/config/oauth-proxy";
 import { useOAuthProxyDomain } from "@/hooks/use-oauth-proxy-domain";
 import { useAuthStore } from "@/stores/auth-store";
 import api from "@/lib/api";
+import { channelCreateErrorKey } from "@/lib/channel-create-error";
 
 interface AppNuvemshop {
   id: number;
@@ -79,6 +80,7 @@ function PasswordInput({ value, onChange, placeholder }: { value: string; onChan
 export default function AppNuvemshopPage() {
   const t = useTranslations("appNuvemshopPage");
   const tCommon = useTranslations("common");
+  const tSess = useTranslations("sessoesPage");
   const { customDomain: oauthCustomDomain } = useOAuthProxyDomain();
   const user = useAuthStore((s) => s.user);
   const isSuperadmin = user?.profile === "superadmin";
@@ -294,7 +296,9 @@ export default function AppNuvemshopPage() {
         const msg    = String(data?.error || data?.message || err?.message || "");
         // Sequelize unique violation -> tenta proximo nome
         if ((status === 400 || status === 409) && /exist|duplic|unique|já/i.test(msg)) continue;
-        toast.error(t("pipelineErrorChannel", { error: msg || "" }));
+        // Limite de conexões / por tipo / tipo fora do plano: mesmo texto da tela de conexões
+        const limitKey = channelCreateErrorKey(msg);
+        toast.error(t("pipelineErrorChannel", { error: limitKey ? tSess(limitKey) : msg || "" }));
         return;
       }
     }

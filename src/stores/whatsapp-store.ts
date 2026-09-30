@@ -24,6 +24,12 @@ export interface WhatsApp {
   /** Modo híbrido (coexistence/two_numbers/disabled) e canal vinculado */
   hybridMode?: string;
   linkedChannelId?: number | null;
+  /** Coexistência: botões/listas nativos pela API oficial (não degradam p/ menu numerado) */
+  hybridNativeInteractive?: boolean;
+  /** Mercado Livre: trata reclamações (claims) e pedidos (orders_v2) além de mensagens/perguntas */
+  mlEventsEnabled?: boolean;
+  /** Instagram: comentário abre atendimento (default true; false = só DM) */
+  igCommentsCreateTickets?: boolean;
 }
 
 interface WhatsAppState {

@@ -36,7 +36,14 @@ export interface InstagramAutomationLog {
   mediaId: string | null;
   triggerType: string;
   triggerText: string | null;
-  actionsTaken: { replyPublic?: string; replyDm?: string; replyDmMedia?: string; chatFlowId?: number; errors?: string[] };
+  actionsTaken: {
+    replyPublic?: string;
+    replyDm?: string;
+    replyDmMedia?: string;
+    replyDmMediaPending?: string;
+    chatFlowId?: number;
+    errors?: string[];
+  };
   followUpStatus: string | null;
   createdAt: string;
   automation?: { id: number; name: string; triggerType: string };

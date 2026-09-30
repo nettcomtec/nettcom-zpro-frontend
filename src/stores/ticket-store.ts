@@ -56,6 +56,9 @@ export interface Message {
   /** Transporte real da mensagem no modo híbrido: 'linked_baileys' = enviada roteada pela
    *  conexão vinculada (sem cobrança por mensagem da Meta) — exibe selo na bolha. */
   sentVia?: string | null;
+  /** Origem do envio gravada pelo backend. 'API'/'externalApi' = disparo da API externa
+   *  (ou envio automatico que usa a mesma marca) — o chat mostra "Sistema" como autor. */
+  sendType?: string | null;
   /** Resposta ao seu status WABA (context.from sem context.id) — exibe badge "Resposta ao seu status" na bolha */
   isStatusReply?: boolean;
   edition?: string;
@@ -113,6 +116,8 @@ export interface Contact {
   pushname?: string;
   lid?: string;
   isLid?: boolean;
+  // Identificador WABA de contato sem telefone (username privado)
+  bsuid?: string | null;
   instagramPK?: string | number;
   messengerId?: string | number;
   email?: string;
@@ -123,6 +128,13 @@ export interface Contact {
   firstName?: string;
   lastName?: string;
   businessName?: string;
+  cep?: string;
+  logradouro?: string;
+  numeroEndereco?: string;
+  complemento?: string;
+  bairro?: string;
+  cidade?: string;
+  estado?: string;
   extraInfo?: { name: string; value: string }[];
   tags?: { id: number; name: string; color: string }[];
   wallets?: { id: number; name: string }[];
@@ -139,6 +151,8 @@ export interface Ticket {
   isGroup: boolean;
   channel?: string;
   chatbot?: boolean;
+  /** Agente de IA armado no ticket (efetivo só com chatgptStatus ligado — ver lib/ticket-automations) */
+  aiAgentId?: number | null;
   autoClose?: boolean;
   typebotStatus?: string;
   dialogflowStatus?: string;

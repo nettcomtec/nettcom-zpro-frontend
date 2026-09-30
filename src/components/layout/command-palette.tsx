@@ -25,6 +25,7 @@ import { useAuthStore } from "@/stores/auth-store";
 import {
   buildNavEntriesForProfile,
   performLogout,
+  useAiCreditsNavVisible,
   type NavCategory,
   type NavItem,
   type ProfileType,
@@ -57,8 +58,10 @@ export function CommandPalette() {
   const tCommon = useTranslations("common");
   const { theme, setTheme } = useTheme();
 
-  const { user, menuVisibility, isRestrictedUser, paymentOverdue, canViewPayments, planFeatures } = useAuthStore();
+  const { user, menuVisibility, tenantMenuVisibility, isRestrictedUser, paymentOverdue, canViewPayments, planFeatures } = useAuthStore();
   const wavoipEnabled = useAuthStore((s) => s.isWavoipEnabled());
+  // Mesmo gate da sidebar (fail-closed): sem ele o builder esconde "Créditos de IA".
+  const aiCreditsVisible = useAiCreditsNavVisible();
   const profile = (user?.profile || "user") as ProfileType;
   const isRestricted = isRestrictedUser();
   const isSuperAdmin = profile === "superadmin";
@@ -78,10 +81,13 @@ export function CommandPalette() {
         paymentOverdue,
         showPayments,
         mustChangePassword: !!user?.mustChangePassword,
+        resellerTermsPending: !!user?.resellerTermsPending,
         wavoipEnabled,
+        tenantMenuVisibility: tenantMenuVisibility || {},
+        aiCreditsVisible,
       }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [profile, menuVisibility, isRestricted, planFeatures, paymentOverdue, showPayments, user?.mustChangePassword, wavoipEnabled]
+    [profile, menuVisibility, tenantMenuVisibility, isRestricted, planFeatures, paymentOverdue, showPayments, user?.mustChangePassword, user?.resellerTermsPending, wavoipEnabled, aiCreditsVisible]
   );
 
   // Hub /configuracoes indexado no palette — MESMO gate do layout do hub
@@ -89,8 +95,12 @@ export function CommandPalette() {
   // lockdown. Links asaasOnly (Pagamentos) são OMITIDOS: o estado asaas do
   // tenant não está disponível aqui, então omitir é o seguro (o link segue
   // acessível pela própria tela /configuracoes quando o gate passa).
+  // Bloqueios de página única (termos pendentes / troca de senha) também zeram o
+  // hub: a sidebar já fica vazia pelo builder e o backend nega essas rotas.
   const configLinks = useMemo(() => {
-    if (lockdown || profile !== "admin") return [] as { name: string; href: string; icon: React.ElementType; tabLabel: string }[];
+    if (lockdown || profile !== "admin" || user?.resellerTermsPending || user?.mustChangePassword) {
+      return [] as { name: string; href: string; icon: React.ElementType; tabLabel: string }[];
+    }
     return CONFIG_TAB_GROUPS.flatMap((g) =>
       g.links
         .filter((l) => !l.asaasOnly)
@@ -102,7 +112,7 @@ export function CommandPalette() {
         }))
     );
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [lockdown, profile]);
+  }, [lockdown, profile, user?.resellerTermsPending, user?.mustChangePassword]);
 
   // Conjunto de rotas listáveis HOJE para este usuário (nav gated + hub) —
   // usado para gatear os Recentes: recente que aponta p/ rota oculta não aparece.

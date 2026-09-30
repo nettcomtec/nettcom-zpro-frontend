@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { useTranslations } from "next-intl";
 import { PageHeader } from "@/components/layout/page-header";
 import { Button } from "@/components/ui/button";
@@ -27,7 +27,14 @@ import { Plus, MoreVertical, Pencil, Trash2, Package, Eye, EyeOff, Globe, Credit
 import { toast } from "sonner";
 import { fetchPlans, createPlan, updatePlan, deletePlan, type Plan } from "@/services/plans";
 import { PLAN_CAPABILITIES, CAPABILITY_CATEGORIES } from "@/lib/plan-capabilities";
-import { CHANNEL_TYPES } from "@/lib/channel-types";
+import {
+  CHANNEL_TYPES,
+  CHANNEL_LIMIT_TYPES,
+  canonicalChannelType,
+  getEffectiveTypeLimit,
+  setTypeLimit,
+  limitsSumForTypes,
+} from "@/lib/channel-types";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
   fetchTenants,
@@ -40,6 +47,11 @@ import {
 const EMPTY: Partial<Plan> = { name: "", value: 0, connections: 3, users: 5, trial: "disabled", trialPeriod: 3, isPublic: false, highlight: false, displayOrder: 0, description: "" };
 
 type Gateway = "asaas" | "stripe" | "pagarme" | "mercadopago";
+
+// Novas tentativas silenciosas de carregar a configuração global quando a 1ª falha
+// (reinício do servidor, oscilação de rede). Poucas e espaçadas; esgotadas, a volta
+// do foco à janela tenta de novo.
+const GLOBAL_CONFIG_RETRY_DELAYS_MS = [3000, 10000, 30000];
 
 interface TenantOption {
   id: number;
@@ -58,6 +70,7 @@ function TokenInput({
   onChange,
   onGenerate,
   generateLabel,
+  disabled,
 }: {
   label: string;
   placeholder: string;
@@ -65,6 +78,7 @@ function TokenInput({
   onChange: (v: string) => void;
   onGenerate?: () => void;
   generateLabel?: string;
+  disabled?: boolean;
 }) {
   const [show, setShow] = useState(false);
   return (
@@ -75,7 +89,8 @@ function TokenInput({
           <button
             type="button"
             onClick={onGenerate}
-            className="flex items-center gap-1 text-xs text-primary hover:underline"
+            disabled={disabled}
+            className="flex items-center gap-1 text-xs text-primary hover:underline disabled:pointer-events-none disabled:opacity-50"
             title={generateLabel}
           >
             <RefreshCw className="h-3 w-3" />
@@ -89,6 +104,7 @@ function TokenInput({
           value={value}
           onChange={(e) => onChange(e.target.value)}
           placeholder={placeholder}
+          disabled={disabled}
           className="pr-10 font-mono text-sm"
         />
         <button
@@ -142,6 +158,18 @@ export default function PlanosPage() {
   const [globalFirstChargeDueDays, setGlobalFirstChargeDueDays] = useState<number>(30);
   const [globalRequirePaymentBeforeAccess, setGlobalRequirePaymentBeforeAccess] = useState(false);
   const [savingGlobal, setSavingGlobal] = useState(false);
+  // Só vira true quando a configuração global chegou do servidor. Os campos de chave e
+  // de segredo de webhook nascem vazios: salvar antes disso (ou depois de o carregamento
+  // falhar) gravaria vazio por cima do que o servidor guarda — e a chave vazia ainda é
+  // copiada para todas as empresas. Trava os dois salvamentos que dependem desse GET.
+  const [globalConfigLoaded, setGlobalConfigLoaded] = useState(false);
+  // Espelhos em ref: o efeito de montagem e os listeners de foco guardam o closure do
+  // 1º render e não enxergariam o estado atualizado.
+  const globalConfigLoadedRef = useRef(false);
+  const globalConfigLoadingRef = useRef(false);
+  // Recusa definitiva do servidor (4xx, fora 408/429): tentar de novo não muda a resposta
+  // e cada 403 dispara o aviso global de "sem permissão".
+  const globalConfigRetryBlockedRef = useRef(false);
 
   // ── Webhook secrets (superadmin-only, stored in payment-config.json) ──────
   const [asaasWebhookToken, setAsaasWebhookToken] = useState("");
@@ -192,16 +220,20 @@ export default function PlanosPage() {
     finally { setLoading(false); }
   }
 
-  useEffect(() => {
-    load();
-
-    fetchTenants().then((res) => {
-      const list: TenantOption[] = Array.isArray(res.data) ? res.data : res.data?.tenants || [];
-      setTenants(list);
-    }).catch(() => { toast.error(tErrors("loadFailed")); });
-
-    fetchPaymentGatewayGlobalConfig().then((res) => {
-      const cfg = res.data || {};
+  // Devolve true quando a configuração global está carregada. Não dispara 2º request
+  // com um em andamento (foco e visibilitychange chegam juntos ao voltar para a aba).
+  async function loadGlobalConfig(showError: boolean): Promise<boolean> {
+    if (globalConfigLoadedRef.current) return true;
+    if (globalConfigLoadingRef.current || globalConfigRetryBlockedRef.current) return false;
+    globalConfigLoadingRef.current = true;
+    try {
+      const res = await fetchPaymentGatewayGlobalConfig();
+      // 200 que não traz o objeto de configuração (corpo vazio, HTML de um proxy no
+      // caminho) conta como falha: liberaria o salvar com todos os campos vazios.
+      if (!res.data || typeof res.data !== "object" || Array.isArray(res.data)) {
+        throw new Error("invalid global config payload");
+      }
+      const cfg = res.data;
       setGlobalGateway((cfg.gateway as Gateway) || "asaas");
       setGlobalAsaasToken(cfg.asaasToken || "");
       setGlobalStripeToken(cfg.stripeToken || "");
@@ -213,7 +245,60 @@ export default function PlanosPage() {
       setStripeWebhookSecret(cfg.stripeWebhookSecret || "");
       setPagarmeWebhookBasic(cfg.pagarmeWebhookBasic || "");
       setMercadopagoWebhookSecret(cfg.mercadopagoWebhookSecret || "");
+      globalConfigLoadedRef.current = true;
+      setGlobalConfigLoaded(true);
+      return true;
+    } catch (err) {
+      // O catch recebe o RESPONSE (o interceptor rejeita com error.response || error),
+      // então o status se lê nos dois formatos.
+      const e = err as { status?: number; response?: { status?: number } } | null;
+      const status = e?.status ?? e?.response?.status;
+      if (typeof status === "number" && status >= 400 && status < 500 && status !== 408 && status !== 429) {
+        globalConfigRetryBlockedRef.current = true;
+      }
+      if (showError) toast.error(tErrors("loadFailed"));
+      return false;
+    } finally {
+      globalConfigLoadingRef.current = false;
+    }
+  }
+
+  useEffect(() => {
+    load();
+
+    fetchTenants().then((res) => {
+      const list: TenantOption[] = Array.isArray(res.data) ? res.data : res.data?.tenants || [];
+      setTenants(list);
     }).catch(() => { toast.error(tErrors("loadFailed")); });
+
+    // Carregamento da configuração global: o aviso de erro sai só na 1ª falha; as novas
+    // tentativas são mudas. Sem elas, uma falha passageira deixaria os dois salvamentos
+    // travados até recarregar a página.
+    let cancelled = false;
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
+    let attempt = 0;
+    const tryLoadGlobalConfig = async (showError: boolean) => {
+      const ok = await loadGlobalConfig(showError);
+      if (ok || cancelled || globalConfigRetryBlockedRef.current) return;
+      if (attempt >= GLOBAL_CONFIG_RETRY_DELAYS_MS.length) return;
+      retryTimer = setTimeout(() => { void tryLoadGlobalConfig(false); }, GLOBAL_CONFIG_RETRY_DELAYS_MS[attempt]);
+      attempt += 1;
+    };
+    void tryLoadGlobalConfig(true);
+
+    const retryOnReturn = () => {
+      if (document.visibilityState !== "visible") return;
+      void loadGlobalConfig(false);
+    };
+    window.addEventListener("focus", retryOnReturn);
+    document.addEventListener("visibilitychange", retryOnReturn);
+
+    return () => {
+      cancelled = true;
+      if (retryTimer) clearTimeout(retryTimer);
+      window.removeEventListener("focus", retryOnReturn);
+      document.removeEventListener("visibilitychange", retryOnReturn);
+    };
   }, []);
 
   // When tenant selection changes, populate fields with that tenant's data
@@ -261,7 +346,7 @@ export default function PlanosPage() {
         // Tipos não selecionados ficam de fora => bloqueados pelo guard do backend.
         limits.allowedChannels = planChannels;
         limits.channelConnectionLimits = Object.fromEntries(
-          planChannels.map((c) => [c, planChannelLimits[c] || 0])
+          planChannels.map((c) => [c, getEffectiveTypeLimit(planChannelLimits, canonicalChannelType(c))])
         );
       } else {
         // Sem restrição de canais neste plano (herda o default do tenant — sem regressão).
@@ -290,6 +375,8 @@ export default function PlanosPage() {
   }
 
   async function handleSaveGlobal() {
+    // Mesma trava do botão: desabilitado na tela não garante que o handler não rode.
+    if (!globalConfigLoaded) { toast.error(tErrors("loadFailed")); return; }
     setSavingGlobal(true);
     try {
       await updatePaymentGatewayGlobalConfig({
@@ -307,6 +394,9 @@ export default function PlanosPage() {
   }
 
   async function handleSaveWebhooks() {
+    // Os segredos vêm do mesmo carregamento: sem ele iriam os 4 vazios, e segredo vazio
+    // faz o servidor aceitar aviso de pagamento sem conferir a assinatura.
+    if (!globalConfigLoaded) { toast.error(tErrors("loadFailed")); return; }
     setSavingWebhooks(true);
     try {
       await updatePaymentGatewayGlobalConfig({
@@ -365,7 +455,7 @@ export default function PlanosPage() {
   // Aviso de inconsistência: a soma dos limites por tipo não pode exceder o teto geral (Conexões).
   const planMaxConn = Number(editing.connections) || 0;
   const planChannelSum = channelRestrict
-    ? planChannels.reduce((acc, c) => acc + (Number(planChannelLimits[c]) > 0 ? Number(planChannelLimits[c]) : 0), 0)
+    ? limitsSumForTypes(planChannelLimits, planChannels.map(canonicalChannelType))
     : 0;
   const showPlanChannelOverflow = channelRestrict && planMaxConn > 0 && planChannelSum > planMaxConn;
 
@@ -380,6 +470,7 @@ export default function PlanosPage() {
             { title: t("helpS0T"), items: [t("helpS0I0"), t("helpS0I1"), t("helpS0I2")] },
             { title: t("helpS1T"), items: [t("helpS1I0"), t("helpS1I1")] },
             { title: t("helpS2T"), items: [t("helpS2I0"), t("helpS2I1"), t("helpS2I2"), t("helpS2I3"), t("helpS2I4")] },
+            { title: t("helpS3T"), items: [t("helpS3I0")] },
           ],
         }}
       >
@@ -470,7 +561,9 @@ export default function PlanosPage() {
 
           <div className="space-y-1.5">
             <Label>{t("labelGateway")}</Label>
-            <Select value={globalGateway} onValueChange={(v) => setGlobalGateway(v as Gateway)}>
+            {/* Campos da configuração global ficam inativos até ela chegar do servidor:
+                o que fosse digitado antes seria trocado, sem aviso, pelo valor carregado. */}
+            <Select value={globalGateway} onValueChange={(v) => setGlobalGateway(v as Gateway)} disabled={!globalConfigLoaded}>
               <SelectTrigger className="w-full sm:w-64">
                 <SelectValue />
               </SelectTrigger>
@@ -489,6 +582,7 @@ export default function PlanosPage() {
               placeholder={t("asaasTokenPlaceholder")}
               value={globalAsaasToken}
               onChange={setGlobalAsaasToken}
+              disabled={!globalConfigLoaded}
             />
           )}
           {globalGateway === "stripe" && (
@@ -497,6 +591,7 @@ export default function PlanosPage() {
               placeholder={t("stripeTokenPlaceholder")}
               value={globalStripeToken}
               onChange={setGlobalStripeToken}
+              disabled={!globalConfigLoaded}
             />
           )}
           {globalGateway === "pagarme" && (
@@ -505,6 +600,7 @@ export default function PlanosPage() {
               placeholder={t("pagarmeTokenPlaceholder")}
               value={globalPagarmeToken}
               onChange={setGlobalPagarmeToken}
+              disabled={!globalConfigLoaded}
             />
           )}
           {globalGateway === "mercadopago" && (
@@ -513,6 +609,7 @@ export default function PlanosPage() {
               placeholder={t("mercadopagoTokenPlaceholder")}
               value={globalMercadopagoToken}
               onChange={setGlobalMercadopagoToken}
+              disabled={!globalConfigLoaded}
             />
           )}
 
@@ -526,6 +623,7 @@ export default function PlanosPage() {
               className="w-full sm:w-64"
               value={globalFirstChargeDueDays}
               onChange={(e) => setGlobalFirstChargeDueDays(Math.min(365, Math.max(0, Number(e.target.value) || 0)))}
+              disabled={!globalConfigLoaded}
             />
             <p className="text-xs text-muted-foreground">{t("firstChargeDueDaysHelp")}</p>
           </div>
@@ -538,10 +636,11 @@ export default function PlanosPage() {
             <Switch
               checked={globalRequirePaymentBeforeAccess}
               onCheckedChange={setGlobalRequirePaymentBeforeAccess}
+              disabled={!globalConfigLoaded}
             />
           </div>
 
-          <Button onClick={handleSaveGlobal} disabled={savingGlobal}>
+          <Button onClick={handleSaveGlobal} disabled={savingGlobal || !globalConfigLoaded}>
             {savingGlobal ? t("saving") : t("saveGlobalConfig")}
           </Button>
         </CardContent>
@@ -592,6 +691,7 @@ export default function PlanosPage() {
                     placeholder={t("webhookAsaasTokenPlaceholder")}
                     value={asaasWebhookToken}
                     onChange={setAsaasWebhookToken}
+                    disabled={!globalConfigLoaded}
                     generateLabel={t("generateToken")}
                     onGenerate={() => {
                       setAsaasWebhookToken(randomHex(16));
@@ -606,6 +706,7 @@ export default function PlanosPage() {
                       placeholder={t("webhookStripeSecretPlaceholder")}
                       value={stripeWebhookSecret}
                       onChange={setStripeWebhookSecret}
+                      disabled={!globalConfigLoaded}
                     />
                     <p className="text-[11px] text-muted-foreground">{t("webhookStripeNote")}</p>
                   </>
@@ -616,6 +717,7 @@ export default function PlanosPage() {
                     placeholder={t("webhookPagarmeBasicPlaceholder")}
                     value={pagarmeWebhookBasic}
                     onChange={setPagarmeWebhookBasic}
+                    disabled={!globalConfigLoaded}
                     generateLabel={t("generateToken")}
                     onGenerate={() => {
                       setPagarmeWebhookBasic(generateBasicPair());
@@ -630,6 +732,7 @@ export default function PlanosPage() {
                       placeholder={t("webhookMpSecretPlaceholder")}
                       value={mercadopagoWebhookSecret}
                       onChange={setMercadopagoWebhookSecret}
+                      disabled={!globalConfigLoaded}
                     />
                     <p className="text-[11px] text-muted-foreground">{t("webhookMpNote")}</p>
                   </>
@@ -638,7 +741,7 @@ export default function PlanosPage() {
             ))}
           </div>
 
-          <Button onClick={handleSaveWebhooks} disabled={savingWebhooks}>
+          <Button onClick={handleSaveWebhooks} disabled={savingWebhooks || !globalConfigLoaded}>
             {savingWebhooks ? t("saving") : t("saveWebhookSecrets")}
           </Button>
         </CardContent>
@@ -892,8 +995,6 @@ export default function PlanosPage() {
                   <div className="space-y-0.5">
                   {CHANNEL_TYPES.map((ch) => {
                     const included = planChannels.includes(ch.value);
-                    const limit = Number(planChannelLimits[ch.value]) || 0;
-                    const unlimited = limit <= 0; // 0/ausente = ilimitado
                     return (
                       <div key={ch.value} className="flex items-center gap-3 rounded-md px-1 py-1 hover:bg-muted/40">
                         <Checkbox
@@ -907,35 +1008,47 @@ export default function PlanosPage() {
                         >
                           {tt(ch.labelKey as Parameters<typeof tt>[0])}
                         </span>
-                        {included && (
-                          <div className="flex shrink-0 items-center gap-2">
-                            <label className="flex cursor-pointer items-center gap-1.5 text-xs text-muted-foreground">
-                              <Checkbox
-                                checked={unlimited}
-                                onCheckedChange={(v) =>
-                                  setPlanChannelLimits((prev) => ({ ...prev, [ch.value]: v ? 0 : 1 }))
-                                }
-                              />
-                              {t("channelQtyUnlimited")}
-                            </label>
-                            <Input
-                              type="number"
-                              min={1}
-                              disabled={unlimited}
-                              value={unlimited ? "" : limit}
-                              placeholder="—"
-                              onChange={(e) => {
-                                const val = Math.max(1, Number(e.target.value) || 1);
-                                setPlanChannelLimits((prev) => ({ ...prev, [ch.value]: val }));
-                              }}
-                              className="h-7 w-16 text-sm"
-                            />
-                          </div>
-                        )}
                       </div>
                     );
                   })}
                   </div>
+                  {/* Limites por tipo REAL: uma linha por tipo incluído (WhatsApp Oficial manual + via login = uma linha só). */}
+                  {planChannels.length > 0 && (
+                    <div className="grid grid-cols-2 gap-x-4 gap-y-2 border-t pt-3">
+                      {CHANNEL_LIMIT_TYPES.filter((c) => planChannels.some((p) => canonicalChannelType(p) === c.value)).map((ch) => {
+                        const limit = getEffectiveTypeLimit(planChannelLimits, ch.value);
+                        const unlimited = limit <= 0; // 0/ausente = ilimitado
+                        return (
+                          <div key={ch.value} className="space-y-1">
+                            <Label className="text-xs">{tt(ch.labelKey as Parameters<typeof tt>[0])}</Label>
+                            <div className="flex items-center gap-2">
+                              <label className="flex cursor-pointer items-center gap-1.5 text-xs text-muted-foreground">
+                                <Checkbox
+                                  checked={unlimited}
+                                  onCheckedChange={(v) =>
+                                    setPlanChannelLimits((prev) => setTypeLimit(prev, ch.value, v ? 0 : 1))
+                                  }
+                                />
+                                {t("channelQtyUnlimited")}
+                              </label>
+                              <Input
+                                type="number"
+                                min={1}
+                                disabled={unlimited}
+                                value={unlimited ? "" : limit}
+                                placeholder="—"
+                                onChange={(e) => {
+                                  const val = Math.max(1, Number(e.target.value) || 1);
+                                  setPlanChannelLimits((prev) => setTypeLimit(prev, ch.value, val));
+                                }}
+                                className="h-7 w-16 text-sm"
+                              />
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
                 </div>
               )}
             </div>

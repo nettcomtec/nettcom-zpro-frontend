@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
+import { useRouter } from "next/navigation";
 import { displayContactIdentity } from "@/lib/contact-identity";
 import { cn, isValidHttpUrl } from "@/lib/utils";
 import { isTicketAccessDenied } from "@/lib/ticket-access-denied";
@@ -30,7 +31,7 @@ import {
 import {
   Plus, RefreshCw, Trash2, ChevronLeft, ChevronRight, ChevronDown,
   User, Phone, Mail, Calendar, Search, X, MessageCircle, Paperclip,
-  Images, Loader2, Download, Eye, MessagesSquare,
+  Images, Loader2, Download, Eye, MessagesSquare, UserRound,
 } from "lucide-react";
 import { ContactAvatar } from "@/components/contact-avatar";
 import { ContactConversationDialog } from "@/components/atendimento/contact-conversation-dialog";
@@ -140,6 +141,20 @@ function formatDateUTC(dateStr?: string) {
   const month = String(d.getUTCMonth() + 1).padStart(2, "0");
   const year = d.getUTCFullYear();
   return `${day}/${month}/${year}`;
+}
+
+function csvEscape(value: unknown) {
+  if (value === null || value === undefined) return '""';
+  const raw = typeof value === "object" ? JSON.stringify(value) : String(value);
+  return `"${raw.replace(/"/g, '""')}"`;
+}
+
+// O Excel le uma sequencia longa de digitos como numero e mostra 5,54796E+11 no
+// lugar do telefone. `="..."` obriga a celula a ser texto. So entra em valor de
+// telefone (digitos/sinais) para nunca transformar texto do usuario em formula.
+function csvPhoneCell(value: string) {
+  if (!value) return "";
+  return /^[+\d][\d\s().+-]*$/.test(value) ? `="${value}"` : value;
 }
 
 function convertBRToISO(br: string) {
@@ -1348,6 +1363,11 @@ interface OpportunityCardProps {
 
 function OpportunityCardComp({ opp, onClick, onDelete, onSendMessage, onSendEmail, onOpenCrm }: OpportunityCardProps) {
   const t = useTranslations("funilKanbanPage");
+  const tCrm = useTranslations("contactCrm");
+  const router = useRouter();
+  const isRestricted = useAuthStore((s) => s.isRestrictedUser());
+  // PLANO_CRM_CONTATO F1 (D16): perfil do contato a partir do card; restrito nao tem acesso ao perfil
+  const profileContactId = opp.contact?.id ?? opp.contactId;
   const { isLiveMode } = useLiveMode();
   return (
     <Card
@@ -1401,6 +1421,17 @@ function OpportunityCardComp({ opp, onClick, onDelete, onSendMessage, onSendEmai
                 title={t("openCrmDialog")}
               >
                 <MessagesSquare className="h-3.5 w-3.5" />
+              </button>
+            )}
+            {!!profileContactId && !isRestricted && (
+              <button
+                type="button"
+                className="text-muted-foreground hover:text-primary transition-colors"
+                onClick={e => { e.stopPropagation(); router.push(`/contatos/${profileContactId}`); }}
+                title={tCrm("viewProfile")}
+                aria-label={tCrm("viewProfile")}
+              >
+                <UserRound className="h-3.5 w-3.5" />
               </button>
             )}
             <button
@@ -1769,10 +1800,17 @@ const DEFAULT_FILTERS: Filters = {
 const DEFAULT_PAGINATION: Pagination = { page: 1, limit: 100, total: 0 };
 
 export default function FunilKanbanPage() {
-  const t = useTranslations("funilKanbanPage");
-  const tCommon = useTranslations("common");
+  // Gate isolado num wrapper: sair com `return` no meio dos hooks do conteúdo
+  // quebrava o React ("Rendered fewer hooks than expected") quando a permissão
+  // caía com a página montada — o teto do tenant chega após o 1º render.
   const allowed = usePageAccess("funil", { alsoAccept: ["kanban"] });
   if (!allowed) return <AccessDenied />;
+  return <FunilKanbanPageContent />;
+}
+
+function FunilKanbanPageContent() {
+  const t = useTranslations("funilKanbanPage");
+  const tCommon = useTranslations("common");
   const { user, supervisorAdmin } = useAuthStore();
   const [loading, setLoading] = useState(true);
   const [pipelines, setPipelines] = useState<Pipeline[]>([]);
@@ -1978,16 +2016,56 @@ export default function FunilKanbanPage() {
   }
 
   function handleExportCSV() {
-    let dados: object[] = [];
-    if (exportTipo === "oportunidades") dados = opportunities;
-    if (exportTipo === "pipelines") dados = pipelines;
-    if (exportTipo === "etapas") dados = stages;
-    if (!dados.length) { toast.warning(t("exportNoData")); return; }
-    const keys = Object.keys(dados[0]);
-    const rows = [
-      keys.join(","),
-      ...dados.map(obj => keys.map(k => `"${String((obj as Record<string, unknown>)[k] ?? "").replace(/"/g, '""')}"`).join(",")),
-    ];
+    let headers: string[] = [];
+    let linhas: string[][] = [];
+
+    if (exportTipo === "oportunidades") {
+      if (!opportunities.length) { toast.warning(t("exportNoData")); return; }
+      // Colunas legiveis: o contato e um objeto aninhado (virava "[object Object]")
+      // e funil/etapa/responsavel chegam como id \u2014 resolvidos aqui pelas listas ja
+      // carregadas na tela, sem consulta extra.
+      headers = [
+        "id", "name", "value", "description", "status",
+        "pipeline", "stage", "responsible",
+        "contactName", "contactNumber", "contactEmail",
+        "closingForecast", "createdAt", "updatedAt",
+      ];
+      linhas = opportunities.map(o => {
+        const pipeline = pipelines.find(p => String(p.id) === String(o.pipelineId));
+        const stage = stages.find(s => String(s.id) === String(o.stageId));
+        const responsavel = responsaveis.find(r => String(r.value) === String(o.responsibleId));
+        return [
+          String(o.id),
+          o.name ?? "",
+          Number(o.value ?? 0).toFixed(2).replace(".", ","),
+          o.description ?? "",
+          statusLabel(o.status, t),
+          pipeline?.name ?? (o.pipelineId ? String(o.pipelineId) : ""),
+          stage?.name ?? (o.stageId ? String(o.stageId) : ""),
+          responsavel?.label ?? (o.responsibleId ? String(o.responsibleId) : ""),
+          o.contact?.name ?? "",
+          csvPhoneCell(displayContactIdentity(o.contact)),
+          o.contact?.email ?? "",
+          formatDateUTC(o.closingForecast),
+          formatDateUTC(o.createdAt),
+          formatDateUTC(o.updatedAt),
+        ];
+      });
+    } else if (exportTipo === "pipelines" || exportTipo === "etapas") {
+      const dados = (exportTipo === "pipelines" ? pipelines : stages) as unknown as Record<string, unknown>[];
+      if (!dados.length) { toast.warning(t("exportNoData")); return; }
+      // Uniao das chaves: campo ausente na 1a linha deixava a coluna de fora do arquivo.
+      headers = Array.from(new Set(dados.flatMap(d => Object.keys(d))));
+      linhas = dados.map(d => headers.map(k => {
+        const v = d[k];
+        if (v === null || v === undefined) return "";
+        return typeof v === "object" ? JSON.stringify(v) : String(v);
+      }));
+    } else {
+      return;
+    }
+
+    const rows = [headers.join(","), ...linhas.map(l => l.map(csvEscape).join(","))];
     const blob = new Blob(["\uFEFF" + rows.join("\n")], { type: "text/csv;charset=utf-8;" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");

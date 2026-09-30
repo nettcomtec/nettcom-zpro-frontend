@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import type { TicketVisibilityData } from "@/lib/can-user-see-ticket";
 
 export interface Notification {
   id: number;
@@ -9,6 +10,12 @@ export interface Notification {
   ticketId?: number;
   /** true = ticket de grupo; redireciona para /atendimento?ticketId=&tab=groups */
   ticketIsGroup?: boolean;
+  /**
+   * Retrato dos campos de visibilidade do ticket (dono, fila, canal, convite...). Mantido pelos
+   * hooks de socket a cada ticket:update para a entrada poder ser REVOGADA quando o usuário deixa
+   * de poder ver o atendimento — ver lib/ticket-notification-visibility.ts.
+   */
+  visibility?: TicketVisibilityData;
   ticket?: unknown;
   contact?: unknown;
   /** Para notificação interna: ao clicar abre conversa no chat-privado (userId do remetente) */
@@ -37,6 +44,11 @@ interface NotificationState {
   /** Marcar apenas notificações de atendimentos (tickets) como lidas */
   markAllTicketAsRead: () => void;
   removeNotification: (id: number) => void;
+  /**
+   * Remove a entrada de ATENDIMENTO de um ticket. Casa por `ticketId` (e não por `id`) porque a
+   * lista também recebe avisos internos, cujo id pode coincidir com o id de um ticket.
+   */
+  removeTicketNotification: (ticketId: number) => void;
   clearAll: () => void;
 }
 
@@ -128,7 +140,18 @@ export const useNotificationStore = create<NotificationState>((set, get) => ({
       const n = state.notifications.find((x) => x.id === id);
       return {
         notifications: state.notifications.filter((x) => x.id !== id),
-        unreadCount: n && !n.read ? state.unreadCount - 1 : state.unreadCount,
+        unreadCount: n && !n.read ? Math.max(0, state.unreadCount - 1) : state.unreadCount,
+      };
+    }),
+
+  removeTicketNotification: (ticketId) =>
+    set((state) => {
+      const removed = state.notifications.filter((x) => x.ticketId === ticketId);
+      if (removed.length === 0) return state;
+      const removedUnread = removed.filter((x) => !x.read).length;
+      return {
+        notifications: state.notifications.filter((x) => x.ticketId !== ticketId),
+        unreadCount: Math.max(0, state.unreadCount - removedUnread),
       };
     }),
 

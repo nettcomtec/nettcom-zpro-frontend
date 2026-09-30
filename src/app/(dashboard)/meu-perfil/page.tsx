@@ -19,6 +19,7 @@ import { updateUser, uploadUserProfilePicture, changeOwnPassword } from "@/servi
 import { getInitials } from "@/lib/utils";
 import { useInstallPWA } from "@/hooks/use-install-pwa";
 import { ImageCropModal } from "@/components/ui/image-crop-modal";
+import { ResellerTermsCard } from "@/components/profile/reseller-terms-card";
 
 export default function MeuPerfilPage() {
   const router = useRouter();
@@ -226,6 +227,7 @@ function ProfileForm() {
           sections: [
             { title: t("helpS0T"), items: [t("helpS0I0"), t("helpS0I1"), t("helpS0I2")] },
             { title: t("helpS1T"), items: [t("helpS1I0"), t("helpS1I1")] },
+            ...(user?.profile === "admin" && Number(user?.tenantId) !== 1 ? [{ title: t("helpS2T"), items: [t("helpS2I0")] }] : []),
           ],
         }}
       />
@@ -465,6 +467,7 @@ function ProfileForm() {
             </div>
           </CardContent>
         </Card>
+        <ResellerTermsCard />
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2">

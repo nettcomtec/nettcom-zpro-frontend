@@ -371,12 +371,20 @@ const STATUS_COLORS: Record<string, string> = {
 };
 
 export default function AgendaPage() {
+  // Gate isolado num wrapper: o conteúdo abaixo tem dezenas de hooks, e sair
+  // com `return` no meio deles quebrava o React ("Rendered fewer hooks than
+  // expected") quando a permissão caía com a página já montada — o que
+  // acontece de rotina, porque o teto do tenant só chega depois do 1º render.
+  const allowed = usePageAccess("agenda", { alsoAccept: ["kanban"] });
+  if (!allowed) return <AccessDenied />;
+  return <AgendaPageContent />;
+}
+
+function AgendaPageContent() {
   const t = useTranslations("agendaPage");
   const tErrors = useTranslations("errors");
   const tOrder = useTranslations("orderDetails");
   const { isLiveMode } = useLiveMode();
-  const allowed = usePageAccess("agenda", { alsoAccept: ["kanban"] });
-  if (!allowed) return <AccessDenied />;
 
   // ---- shared state ----
   const [tab, setTab] = useState("appointments");

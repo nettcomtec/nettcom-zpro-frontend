@@ -1,5 +1,6 @@
 import { toast } from "sonner";
 import { useTicketStore } from "@/stores/ticket-store";
+import { useNotificationStore } from "@/stores/notification-store";
 
 /**
  * Detecta o 403 ERR_NO_TICKET_ACCESS do guard de acesso a ticket de fila alheia
@@ -39,6 +40,9 @@ export function handleTicketAccessDenied(
   const store = useTicketStore.getState();
   if (store.currentTicket?.id === ticketId) store.setCurrentTicket(null);
   store.setTickets(store.tickets.filter((t) => t.id !== ticketId));
+  // O backend negou o acesso: a entrada desse atendimento no sino também sai, senão o mesmo
+  // clique continuaria disponível até o F5.
+  useNotificationStore.getState().removeTicketNotification(ticketId);
   toast.error(message);
   return true;
 }

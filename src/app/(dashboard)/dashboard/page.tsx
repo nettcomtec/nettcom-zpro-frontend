@@ -70,7 +70,7 @@ import {
   type RawReasonByQueue,
 } from "@/services/dashboard";
 
-// ─── Channel labels mapping (mirrors Vue) ─────────────────────────────────────
+// ─── Channel labels mapping (mirrors the legacy front) ─────────────────────────────────────
 const CHANNEL_LABELS: Record<string, string> = {
   zapi: "Z-API",
   uazapi: "Uazapi",

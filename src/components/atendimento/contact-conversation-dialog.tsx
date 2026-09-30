@@ -12,7 +12,8 @@ import { Textarea } from "@/components/ui/textarea";
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
-import { Loader2, Send, X, MessageSquare, ArrowRightLeft, BellRing, Tag as TagIcon } from "lucide-react";
+import { Loader2, Send, X, MessageSquare, ArrowRightLeft, BellRing, Tag as TagIcon, UserRound } from "lucide-react";
+import Link from "next/link";
 import { useTranslations } from "next-intl";
 import { toast } from "sonner";
 import {
@@ -26,6 +27,7 @@ import { sendPrivateMessage } from "@/services/private-chat";
 import { fetchContact, updateContactTags } from "@/services/contacts";
 import { fetchTags, type Tag } from "@/services/tags";
 import { useAuthStore } from "@/stores/auth-store";
+import { isTicketAccessDenied } from "@/lib/ticket-access-denied";
 
 export interface ConversationContact {
   id: number;
@@ -63,7 +65,10 @@ export function ContactConversationDialog({
   onChanged,
 }: ContactConversationDialogProps) {
   const t = useTranslations("contactConversationDialog");
-  const { user } = useAuthStore();
+  const tCrm = useTranslations("contactCrm");
+  // "Você não tem acesso a este atendimento" — mesma mensagem do guard de acesso da tela
+  const tAtdChat = useTranslations("atendimentoChat");
+  const { user, isRestrictedUser } = useAuthStore();
 
   const handleError = useCallback(() => {
     // Mantém o dialog aberto: as abas de etiquetas/notificação funcionam sem histórico
@@ -128,8 +133,10 @@ export function ContactConversationDialog({
       appendMessage({ body, fromMe: true, createdAt: new Date().toISOString(), ticketId: lastTicket.id });
       setReplyText("");
       toast.success(t("sentSuccess"));
-    } catch {
-      toast.error(t("sendError"));
+    } catch (err) {
+      // Atendimento de outro atendente (backend nega o acesso): diz o motivo real em vez do
+      // erro genérico de envio.
+      toast.error(isTicketAccessDenied(err) ? tAtdChat("noTicketAccess") : t("sendError"));
     } finally {
       setSending(false);
     }
@@ -277,6 +284,17 @@ export function ContactConversationDialog({
         <DialogHeader className="sr-only">
           <DialogTitle>{contact?.name ?? ""}</DialogTitle>
         </DialogHeader>
+        {/* PLANO_CRM_CONTATO F1 (D16): atalho para o perfil do contato; restrito nao tem acesso ao perfil */}
+        {!!contact?.id && !isRestrictedUser() && (
+          <div className="flex items-center px-3 pt-3 pr-12 shrink-0">
+            <Button asChild variant="ghost" size="sm" className="h-7 gap-1.5 px-2 text-xs">
+              <Link href={`/contatos/${contact.id}`} onClick={() => onOpenChange(false)}>
+                <UserRound className="h-3.5 w-3.5" />
+                {tCrm("viewProfile")}
+              </Link>
+            </Button>
+          </div>
+        )}
         <Tabs defaultValue="conversa" className="flex flex-col flex-1 min-h-0">
           <TabsList className="mx-3 mt-3 grid grid-cols-4 shrink-0">
             <TabsTrigger value="conversa" className="gap-1.5">

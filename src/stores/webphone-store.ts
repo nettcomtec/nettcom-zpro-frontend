@@ -37,6 +37,13 @@ interface WebphoneState {
    * e limpar este campo após consumir. Usado por componentes externos (ex: TicketDetail).
    */
   pendingWavoipCall: { phone: string; token: string; ticketId?: number; contactName?: string; contactPic?: string; inboxName?: string } | null;
+  /**
+   * Pedido de discagem SIP vindo de fora do webphone (ex: botão SIP do contato).
+   * O AsteriskWebphone consome, limpa e disca de fato (Inviter + INVITE).
+   * `requestedAt` protege contra pedido velho: se o modal não montar na hora
+   * (config SIP incompleta), o pedido não pode discar sozinho minutos depois.
+   */
+  pendingSipCall: { phone: string; tag?: string; requestedAt: number } | null;
 
   toggleVisibility: (visible?: boolean) => void;
   setCallStatus: (status: CallStatus) => void;
@@ -50,6 +57,8 @@ interface WebphoneState {
   removeWavoipToken: (key: string) => void;
   requestWavoipCall: (info: WebphoneState["pendingWavoipCall"]) => void;
   clearPendingWavoipCall: () => void;
+  requestSipCall: (info: { phone: string; tag?: string }) => void;
+  clearPendingSipCall: () => void;
   reset: () => void;
 }
 
@@ -63,6 +72,7 @@ export const useWebphoneStore = create<WebphoneState>((set) => ({
   sipRegistered: false,
   wavoipTokens: {},
   pendingWavoipCall: null,
+  pendingSipCall: null,
 
   toggleVisibility: (visible) =>
     set((state) => ({ isVisible: visible ?? !state.isVisible })),
@@ -106,5 +116,11 @@ export const useWebphoneStore = create<WebphoneState>((set) => ({
 
   clearPendingWavoipCall: () =>
     set({ pendingWavoipCall: null }),
-  reset: () => set({ isVisible: false, callStatus: "idle", callInfo: null, callDuration: 0, isMuted: false, isOnHold: false, sipRegistered: false, wavoipTokens: {}, pendingWavoipCall: null }),
+
+  requestSipCall: (info) =>
+    set({ pendingSipCall: { ...info, requestedAt: Date.now() }, isVisible: true }),
+
+  clearPendingSipCall: () =>
+    set({ pendingSipCall: null }),
+  reset: () => set({ isVisible: false, callStatus: "idle", callInfo: null, callDuration: 0, isMuted: false, isOnHold: false, sipRegistered: false, wavoipTokens: {}, pendingWavoipCall: null, pendingSipCall: null }),
 }));

@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { X, ChevronRight, ChevronLeft } from "lucide-react";
 import { useAuthStore } from "@/stores/auth-store";
 import { useUIStore } from "@/stores/ui-store";
+import { persistTourDone } from "@/services/users";
 
 export const TOUR_KEY = "zpro-tour-v1";
 export const TOUR_RESTART_EVENT = "zpro:restart-tour";
@@ -91,19 +92,37 @@ export function AppTour() {
     });
   }, [user?.profile]);
 
-  // Show on first access after a short delay (never for superadmin)
+  // Show on first access after a short delay (never for superadmin).
+  // Dismiss vive em 2 lugares — localStorage (síncrono) e User.configs.tourDone
+  // (servidor, vale entre aparelhos) — e cada um cura o outro aqui.
   useEffect(() => {
     if (user?.profile === "superadmin") return;
+    // Página de bloqueio (termos pendentes / troca de senha): o tour cobriria o
+    // aceite e seria "gasto" sem o menu existir. Abre depois, na home liberada.
+    if (user?.resellerTermsPending || user?.mustChangePassword) return;
     try {
-      if (localStorage.getItem(TOUR_KEY) === "done") return;
+      if (localStorage.getItem(TOUR_KEY) === "done") {
+        // Heal reverso: dispensa local feita antes do deploy ainda não está no
+        // servidor — propaga (fire-and-forget, best-effort)
+        if (!user?.configs?.tourDone && user?.userId) {
+          persistTourDone(user.userId).catch(() => {});
+        }
+        return;
+      }
     } catch { return; }
+    if (user?.configs?.tourDone) {
+      // Seed local: dismiss veio do servidor (outro aparelho) — mantém coerentes
+      // os leitores síncronos do TOUR_KEY (ex.: header)
+      try { localStorage.setItem(TOUR_KEY, "done"); } catch { /* empty */ }
+      return;
+    }
     const timer = setTimeout(() => {
       setSteps(buildSteps());
       setStep(0);
       setVisible(true);
     }, 1200);
     return () => clearTimeout(timer);
-  }, [user?.profile, buildSteps]);
+  }, [user?.profile, user?.userId, user?.configs?.tourDone, user?.resellerTermsPending, user?.mustChangePassword, buildSteps]);
 
   // Listen for manual restart (triggered by meu-perfil replay button)
   useEffect(() => {
@@ -159,6 +178,10 @@ export function AppTour() {
 
   const finish = useCallback(() => {
     try { localStorage.setItem(TOUR_KEY, "done"); } catch {}
+    // Persiste no servidor (best-effort) — store lido imperativamente para não
+    // mudar as deps do callback
+    const u = useAuthStore.getState().user;
+    if (u?.userId) persistTourDone(u.userId).catch(() => {});
     setVisible(false);
   }, []);
 

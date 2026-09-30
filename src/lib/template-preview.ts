@@ -63,6 +63,52 @@ const safeParseJson = (s: string): any => {
 };
 
 /**
+ * Resposta de WhatsApp Flow (nfm_reply / interactive_nfm_reply): o corpo da
+ * mensagem é o `response_json` do formulário. Chaves de protocolo (flow_token,
+ * ids, envelope) são descartadas e o nome técnico do campo vira rótulo legível
+ * (`screen_0_Nome_1` → "Nome"). Fonte única de parse — usada pela bolha do chat
+ * e pelo preview de `lastMessage`.
+ * Devolve null quando o body não é JSON ou não sobra nenhum campo real.
+ */
+const NFM_IGNORE_KEYS = new Set([
+  "flow_token","body","name","response_json","Sent","sent","token","tokenApi",
+  "id","ticketId","messageId","whatsapp","from","to","timestamp","type",
+  "interactive","context",
+]);
+
+export const parseNfmEntries = (
+  raw: string | null | undefined
+): { label: string; answer: string }[] | null => {
+  if (!raw || typeof raw !== "string") return null;
+  try {
+    let body = raw;
+    if (body.startsWith('"{')) {
+      body = body.replace(/^"|"$/g, "").replace(/\\"/g, '"');
+    }
+    const data = JSON.parse(body) as Record<string, unknown>;
+    if (!data || typeof data !== "object" || Array.isArray(data)) return null;
+    const entries = Object.entries(data)
+      .filter(([k]) => !NFM_IGNORE_KEYS.has(k))
+      .map(([k, v]) => {
+        const label = k
+          .replace(/^screen_\d+_/, "")
+          .replace(/_\d+$/, "")
+          .replace(/_/g, " ")
+          .replace(/\b\w/g, (c) => c.toUpperCase());
+        let answer = String(v ?? "");
+        if (answer.includes("_")) {
+          answer = answer.split("_").slice(1).join(" ");
+          answer = answer.charAt(0).toUpperCase() + answer.slice(1).toLowerCase();
+        }
+        return { label, answer };
+      });
+    return entries.length ? entries : null;
+  } catch {
+    return null;
+  }
+};
+
+/**
  * Cobrança (template ORDER_DETAILS) — PLANO_TEMPLATE_ORDER_DETAILS.md F3.4.
  * Chave i18n do namespace `atendimentoChatExtra`; o literal só entra quando o
  * caller não passa `t` (rotas que ainda chamam o preview sem tradutor).
@@ -219,6 +265,14 @@ export const getTicketLastMessagePreview = (
 
   if (TEMPLATE_BAILEYS_MARKERS.some((m) => raw.includes(m))) {
     return stripTemplateBaileysMarkers(raw);
+  }
+
+  // Resposta de WhatsApp Flow: o `response_json` da Meta SEMPRE traz `flow_token`,
+  // então o gate de string é barato e evita parse extra. Mostra o primeiro campo
+  // real preenchido pelo cliente em vez do JSON cru.
+  if (raw.includes("flow_token")) {
+    const nfm = parseNfmEntries(raw);
+    if (nfm?.length) return `${nfm[0].label}: ${nfm[0].answer}`;
   }
 
   const trimmed = raw.trim();

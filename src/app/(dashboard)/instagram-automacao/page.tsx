@@ -3,7 +3,6 @@
 import React, { useState, useEffect, useCallback } from "react";
 import { PageHeader } from "@/components/layout/page-header";
 import { Card, CardContent } from "@/components/ui/card";
-import { Alert, AlertTitle, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -23,7 +22,7 @@ import {
 import { TextareaWithVars } from "@/components/shared/variable-picker";
 import {
   Plus, Pencil, Trash2, X, Check, ChevronRight, Film, Instagram, Zap, History,
-  ShieldCheck, Loader2, Minus, RefreshCw, CalendarClock, FileText, Send, LayoutGrid, Upload, Info, Cloud, Home,
+  ShieldCheck, Loader2, Minus, RefreshCw, CalendarClock, FileText, Send, LayoutGrid, Upload, Cloud, Home,
 } from "lucide-react";
 import { Textarea } from "@/components/ui/textarea";
 import { toast } from "sonner";
@@ -63,6 +62,8 @@ const MATCH_OPTIONS: { value: KeywordMatch; key: string }[] = [
   { value: "regex", key: "matchRegex" },
 ];
 const WEEKDAYS = [0, 1, 2, 3, 4, 5, 6];
+// Mesmo prazo do backend: a imagem guardada no gatilho de comentário vale 7 dias
+const PENDING_MEDIA_MAX_AGE_MS = 7 * 24 * 3_600_000;
 
 interface FormState {
   name: string;
@@ -453,12 +454,13 @@ export default function InstagramAutomacaoPage() {
   const update = (patch: Partial<FormState>) => setForm((prev) => ({ ...prev, ...patch }));
 
   const selectedConn = connections.find((c) => String(c.id) === selectedConnection);
-  // Banner só faz sentido para canal via OAuth (Tech Provider). App próprio já tem as permissões.
-  const showOauthLimit = !selectedConn || isOAuthChannel(selectedConn);
 
   const needsMediaStep = form.triggerType === "comment" || form.triggerType === "live_comment";
   const allowsPublicReply = needsMediaStep;
   const allowsDm = form.triggerType !== "live_comment";
+  const isCommentTrigger = form.triggerType === "comment";
+  const isCommentDmMediaWithoutText =
+    isCommentTrigger && form.replyDmEnabled && !!form.replyDmMediaUrl.trim() && !form.replyDmText.trim();
   const stepIds = needsMediaStep ? [1, 2, 3, 4] : [1, 3, 4];
   const stepLabels: Record<number, string> = {
     1: t("stepTrigger"),
@@ -618,6 +620,12 @@ export default function InstagramAutomacaoPage() {
       setStep(1);
       return;
     }
+    // Comentário: a imagem só sai depois que o contato responder à DM de texto
+    if (isCommentDmMediaWithoutText) {
+      toast.error(t("replyDmMediaNeedsText"));
+      setStep(4);
+      return;
+    }
     setSaving(true);
     const payload: Partial<InstagramAutomation> = {
       whatsappId: Number(selectedConnection),
@@ -702,6 +710,13 @@ export default function InstagramAutomacaoPage() {
       <div className="flex flex-wrap gap-1">
         {a.replyPublic && <Badge variant="secondary" className="text-[10px]">Reply</Badge>}
         {(a.replyDm || a.replyDmMedia) && <Badge variant="secondary" className="text-[10px]">DM</Badge>}
+        {a.replyDmMediaPending && (
+          <Badge variant="outline" className="text-[10px]">
+            {Date.now() - new Date(log.createdAt).getTime() <= PENDING_MEDIA_MAX_AGE_MS
+              ? t("historyMediaPending")
+              : t("historyMediaExpired")}
+          </Badge>
+        )}
         {a.chatFlowId && <Badge variant="info-soft" className="text-[10px]">Flow</Badge>}
         {a.errors && a.errors.length > 0 && (
           <Badge variant="destructive" className="text-[10px]" title={a.errors.join("; ")}>
@@ -743,14 +758,6 @@ export default function InstagramAutomacaoPage() {
           { title: t("helpS2T"), items: [t("helpS2I0"), t("helpS2I1")] },
         ],
       }} />
-
-      {showOauthLimit && (
-        <Alert variant="warning">
-          <Info className="h-4 w-4" />
-          <AlertTitle>{t("oauthLimitTitle")}</AlertTitle>
-          <AlertDescription>{t("oauthLimitDescription")}</AlertDescription>
-        </Alert>
-      )}
 
       {connections.length === 0 ? (
         <Card>
@@ -1365,6 +1372,11 @@ export default function InstagramAutomacaoPage() {
                             <LayoutGrid className="mr-2 h-4 w-4" />{t("replyDmMediaPick")}
                           </Button>
                         )}
+                        {isCommentTrigger && (
+                          <p className={`text-xs ${isCommentDmMediaWithoutText ? "text-destructive" : "text-muted-foreground"}`}>
+                            {t("replyDmMediaCommentHint")}
+                          </p>
+                        )}
                       </div>
                     </div>
                   )}
@@ -1393,7 +1405,9 @@ export default function InstagramAutomacaoPage() {
                 <div className="flex items-start justify-between gap-3">
                   <div className="space-y-0.5">
                     <Label htmlFor="ia-follow-up" className="cursor-pointer">{t("followUpToggle")}</Label>
-                    <p className="text-xs text-muted-foreground">{t("followUpHint")}</p>
+                    <p className="text-xs text-muted-foreground">
+                      {t(isCommentTrigger ? "followUpHintComment" : "followUpHint")}
+                    </p>
                   </div>
                   <Switch
                     id="ia-follow-up"

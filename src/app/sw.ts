@@ -207,6 +207,44 @@ self.addEventListener("notificationclick", (event: any) => {
   );
 });
 
+// O navegador rotacionou/expirou a assinatura de push: refaz com a MESMA chave
+// VAPID e avisa as janelas abertas. O SW não tem token para salvar no servidor;
+// quem re-salva é o hook usePushNotifications (na mensagem abaixo com o app
+// aberto, ou no próximo boot do PWA, que compara o endpoint com a flag).
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+self.addEventListener("pushsubscriptionchange", (event: any) => {
+  const notifyClients = () =>
+    (self as any).clients
+      .matchAll({ type: "window", includeUncontrolled: true })
+      .then((clientList: any[]) => {
+        clientList.forEach((client) => {
+          try {
+            client.postMessage({ type: "PUSH_SUBSCRIPTION_CHANGED" });
+          } catch {
+            // noop
+          }
+        });
+      });
+
+  const resubscribe = () => {
+    if (event.newSubscription) return Promise.resolve();
+    const key = event.oldSubscription?.options?.applicationServerKey;
+    if (!key) return Promise.resolve();
+    return (self as any).registration.pushManager.subscribe({
+      userVisibleOnly: true,
+      applicationServerKey: key,
+    });
+  };
+
+  event.waitUntil(
+    Promise.resolve()
+      .then(resubscribe)
+      .catch(() => undefined)
+      .then(notifyClients)
+      .catch(() => undefined)
+  );
+});
+
 // Permite que o cliente envie SKIP_WAITING para ativar nova versão do SW
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 self.addEventListener("message", (event: any) => {

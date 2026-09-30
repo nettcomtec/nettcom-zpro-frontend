@@ -1,4 +1,4 @@
-import axios, { AxiosError, InternalAxiosRequestConfig } from "axios";
+import axios, { AxiosError, CanceledError, InternalAxiosRequestConfig } from "axios";
 import { toast } from "sonner";
 import { useAuthStore } from "@/stores/auth-store";
 import { logger } from "./logger";
@@ -20,6 +20,14 @@ declare module "axios" {
      * NÃO devem usar isto: ali o toast é o feedback correto.
      */
     skipFeatureToast?: boolean;
+    /**
+     * Suprime o toast global "sem permissão" para um 403 ERR_NO_PERMISSION desta
+     * request. Uso restrito a gravações best-effort de preferência pessoal contra
+     * backend possivelmente desatualizado (ex.: dismiss do tour de boas-vindas,
+     * cuja chave nova a allowlist antiga recusa) — o usuário não pediu nada, o
+     * aviso seria ruído. Ações iniciadas pelo usuário NÃO devem usar isto.
+     */
+    skipNoPermissionToast?: boolean;
   }
 }
 
@@ -176,8 +184,21 @@ function redirectToLogin(reason?: LogoutReason): void {
   window.location.href = "/login";
 }
 
+// Pagamento e licença vêm ANTES dos termos no backend: com um deles bloqueando,
+// o flag de termos gravado (billingState não é persistido) faria a guarda
+// devolver a /aceite-termos a cada recarga — vaivém entre as páginas de bloqueio.
+function clearResellerTermsFlag(): void {
+  try {
+    const state = useAuthStore.getState();
+    if (state.user?.resellerTermsPending) state.patchUser({ resellerTermsPending: false });
+  } catch {
+    // noop
+  }
+}
+
 function redirectToPaymentBlocked(): void {
   if (typeof window === "undefined") return;
+  clearResellerTermsFlag();
   try {
     useAuthStore.getState().setBillingState("blocked");
     useAuthStore.getState().setPaymentOverdue(true);
@@ -191,6 +212,7 @@ function redirectToPaymentBlocked(): void {
 
 function redirectToLicenseRecovery(): void {
   if (typeof window === "undefined") return;
+  clearResellerTermsFlag();
   if (window.location.pathname !== "/license-recovery") {
     window.location.href = "/license-recovery";
   }
@@ -208,9 +230,80 @@ function redirectToForcePasswordChange(): void {
   }
 }
 
+// Termos do revendedor pendentes (gate do isAuth, só admin de tenant ≠ 1).
+// Ordem pagamento → senha → termos: com senha obrigatória ou inadimplência o
+// bloqueio anterior manda e isto é no-op (sem vaivém entre páginas de bloqueio).
+function redirectToResellerTermsAcceptance(): void {
+  if (typeof window === "undefined") return;
+  try {
+    const state = useAuthStore.getState();
+    if (state.user?.mustChangePassword) return;
+    if (state.billingState === "blocked" || state.paymentOverdue) return;
+    state.patchUser({ resellerTermsPending: true });
+  } catch {
+    // noop
+  }
+  if (window.location.pathname !== "/aceite-termos") {
+    window.location.href = "/aceite-termos";
+  }
+}
+
+// Com os termos pendentes o servidor recusa (403) toda chamada autenticada fora
+// da allowlist do gate, e cada recusa lá custa consultas ao banco — numa VPS
+// foram 4.869 recusas num minuto. Na página de aceite o layout do painel segue
+// montado (boot + pollings), então ALI a recusa sai daqui mesmo. Só ali, de
+// propósito: fora dela a chamada vai ao servidor como sempre (o 403 real traz
+// para cá), e nenhuma outra tela — login, recuperação de licença, bloqueio por
+// pagamento, redefinição de senha — pode ser barrada por um flag gravado.
+// O flag só liga com um 403 real ou com o /reseller-terms/me, que a página
+// consulta a cada 30 s e que o corrige se a exigência cair. Passam: o próprio
+// gate, login/refresh/logout e as rotas sem isAuth que o front chama.
+const TERMS_LOCK_PAGE = "/aceite-termos";
+const TERMS_LOCK_PASSTHROUGH =
+  /^\/(reseller-terms\/|auth\/|logout|public|health|license\/|mobile\/|plan(\/|$)|password-reset|reset-password|asaas\/client)/;
+const TERMS_LOCK_REJECT_DELAY_MS = 300;
+
+function isResellerTermsLocked(): boolean {
+  try {
+    if (typeof window === "undefined" || window.location.pathname !== TERMS_LOCK_PAGE) return false;
+    const state = useAuthStore.getState();
+    if (state.user?.resellerTermsPending !== true) return false;
+    // Mesma ordem do redirect: senha obrigatória ou inadimplência mandam antes.
+    if (state.user?.mustChangePassword) return false;
+    if (state.billingState === "blocked" || state.paymentOverdue) return false;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function requestPath(config: InternalAxiosRequestConfig): string {
+  const raw = String(config.url || "");
+  try {
+    return new URL(raw, "http://x").pathname;
+  } catch {
+    return raw.split("?")[0];
+  }
+}
+
 api.defaults.headers.common["X-Requested-With"] = "XMLHttpRequest";
 
-api.interceptors.request.use((config: InternalAxiosRequestConfig) => {
+api.interceptors.request.use(async (config: InternalAxiosRequestConfig) => {
+  if (isResellerTermsLocked() && !TERMS_LOCK_PASSTHROUGH.test(requestPath(config))) {
+    // O atraso imita a rede: componente que repete na falha não vira laço
+    // síncrono dentro da aba. Cancelamento continua sendo cancelamento.
+    if (config.signal?.aborted) throw new CanceledError(undefined, undefined, config);
+    await new Promise((resolve) => setTimeout(resolve, TERMS_LOCK_REJECT_DELAY_MS));
+    if (config.signal?.aborted) throw new CanceledError(undefined, undefined, config);
+    const response = {
+      data: { error: "ERR_RESELLER_TERMS_PENDING" },
+      status: 403,
+      statusText: "Forbidden",
+      headers: {},
+      config,
+    };
+    throw new AxiosError("ERR_RESELLER_TERMS_PENDING", AxiosError.ERR_BAD_REQUEST, config, undefined, response as never);
+  }
   try {
     const raw = localStorage.getItem("token");
     const token = raw ? JSON.parse(raw) : null;
@@ -354,19 +447,43 @@ api.interceptors.response.use(
       redirectToForcePasswordChange();
     }
 
+    // Termos do revendedor pendentes (gate do isAuth): mesmo molde da troca de
+    // senha — cobre a exigência ligada com a sessão do admin já aberta.
+    if (status === 403 && !isAuthCall && errorCode === "ERR_RESELLER_TERMS_PENDING") {
+      redirectToResellerTermsAcceptance();
+    }
+
     // Permissão negada (requirePermission / ERR_NO_PERMISSION): sem feedback global
     // esse 403 caía em catches silenciosos e virava "botão que não faz nada".
     // Avisa via evento (toast i18n no layout) e deixa o erro seguir pro chamador.
-    if (status === 403 && !isAuthCall && !isAuthError && errorCode === "ERR_NO_PERMISSION") {
+    if (
+      status === 403 &&
+      !isAuthCall &&
+      !isAuthError &&
+      errorCode === "ERR_NO_PERMISSION" &&
+      !originalRequest?.skipNoPermissionToast
+    ) {
       if (typeof window !== "undefined") {
         window.dispatchEvent(new CustomEvent("zpro:no-permission"));
       }
     }
 
     if (status === 402) {
-      if (errorCode === "LICENSE_BLOCKED") {
+      // Download com responseType "blob" traz o corpo do erro como Blob: sem ler o código,
+      // "recurso fora do plano" caía no redirecionamento de inadimplência.
+      let code402 = errorCode;
+      const rawData = error.response?.data;
+      if (!code402 && typeof Blob !== "undefined" && rawData instanceof Blob) {
+        try {
+          const parsed = JSON.parse(await rawData.text()) as { error?: string; message?: string };
+          code402 = parsed?.error ?? parsed?.message ?? "";
+        } catch {
+          code402 = "";
+        }
+      }
+      if (code402 === "LICENSE_BLOCKED") {
         redirectToLicenseRecovery();
-      } else if (errorCode === "ERR_FEATURE_NOT_IN_PLAN") {
+      } else if (code402 === "ERR_FEATURE_NOT_IN_PLAN") {
         // Recurso fora do plano contratado — NÃO é bloqueio de pagamento. Avisa via
         // evento (toast i18n no layout) e deixa o erro seguir pro chamador, sem redirect.
         // Requests automáticas (skipFeatureToast) ficam mudas: o toast só faz sentido

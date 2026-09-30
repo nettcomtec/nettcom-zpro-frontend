@@ -21,6 +21,8 @@ import { toast } from "sonner";
 import { fetchReportContacts } from "@/services/reports";
 import { printReportTable } from "@/lib/print-report";
 import { fetchAllUsers } from "@/services/users";
+import { fetchTags, type Tag } from "@/services/tags";
+import { TagMultiFilter, type TagMatch } from "@/components/contatos/tag-multi-filter";
 import { usePageAccess } from "@/hooks/use-page-access";
 import { useLiveMode } from "@/hooks/use-live-mode";
 import { cn } from "@/lib/utils";
@@ -39,6 +41,7 @@ interface ContactRow {
   number: string;
   email?: string;
   contactWallets?: Array<{ walletId: number }>;
+  tags?: Array<{ tag?: string; name?: string }>;
 }
 
 export default function RelatorioContatosCarteiraPage() {
@@ -50,6 +53,9 @@ export default function RelatorioContatosCarteiraPage() {
   const [loadingUsers, setLoadingUsers] = useState(false);
   const [users, setUsers] = useState<UserOption[]>([]);
   const [selectedWallets, setSelectedWallets] = useState<number[]>([]);
+  const [tags, setTags] = useState<Tag[]>([]);
+  const [selectedTags, setSelectedTags] = useState<number[]>([]);
+  const [tagMatch, setTagMatch] = useState<TagMatch>("any");
   const [data, setData] = useState<ContactRow[]>([]);
 
   // walletId corresponds to a user id; map it back to the user's name so the
@@ -80,7 +86,19 @@ export default function RelatorioContatosCarteiraPage() {
     loadUsers();
   }, [loadUsers]);
 
+  // Etiquetas são filtro opcional: falha ao carregar só deixa o seletor vazio.
+  useEffect(() => {
+    fetchTags()
+      .then(({ data: list }) => setTags(Array.isArray(list) ? list : []))
+      .catch(() => setTags([]));
+  }, []);
+
   if (!allowed) return <AccessDenied />;
+
+  const tagsLabel = (d: ContactRow) =>
+    d.tags && d.tags.length > 0
+      ? d.tags.map((tag) => tag.tag ?? tag.name ?? "").filter(Boolean).join(", ")
+      : t("semEtiquetas");
 
   const handleFilter = async () => {
     if (selectedWallets.length === 0) {
@@ -89,7 +107,11 @@ export default function RelatorioContatosCarteiraPage() {
     }
     setLoading(true);
     try {
-      const res = await fetchReportContacts({ wallets: selectedWallets });
+      const res = await fetchReportContacts({
+        wallets: selectedWallets,
+        includeTags: true,
+        ...(selectedTags.length > 0 ? { tags: selectedTags, tagMatch } : {}),
+      });
       const raw = res.data as { contacts?: ContactRow[] } | ContactRow[];
       const result: ContactRow[] = Array.isArray(raw)
         ? raw
@@ -118,6 +140,7 @@ export default function RelatorioContatosCarteiraPage() {
         [t("colCarteiras")]: d.contactWallets && d.contactWallets.length > 0
           ? d.contactWallets.map((w) => walletLabel(w.walletId)).join(", ")
           : t("semCarteiras"),
+        [t("colEtiquetas")]: tagsLabel(d),
       }));
       const ws = XLSX.utils.json_to_sheet(exportData);
       const wb = XLSX.utils.book_new();
@@ -138,7 +161,7 @@ export default function RelatorioContatosCarteiraPage() {
       toast.error(t("toastNoData"));
       return;
     }
-    const headers = [t("colNome"), t("colWhatsApp"), t("colEmail"), t("colCarteiras")];
+    const headers = [t("colNome"), t("colWhatsApp"), t("colEmail"), t("colCarteiras"), t("colEtiquetas")];
     const rows = data.map((d) => [
       d.name ?? "N/A",
       d.number ?? "N/A",
@@ -146,6 +169,7 @@ export default function RelatorioContatosCarteiraPage() {
       d.contactWallets && d.contactWallets.length > 0
         ? d.contactWallets.map((w) => walletLabel(w.walletId)).join(", ")
         : t("semCarteiras"),
+      tagsLabel(d),
     ]);
     if (!printReportTable({ title: t("title"), headers, rows })) {
       toast.error(t("toastExportError"));
@@ -157,7 +181,7 @@ export default function RelatorioContatosCarteiraPage() {
       toast.error(t("toastNoData"));
       return;
     }
-    const headers = [t("colNome"), t("colWhatsApp"), t("colEmail"), t("colCarteiras")];
+    const headers = [t("colNome"), t("colWhatsApp"), t("colEmail"), t("colCarteiras"), t("colEtiquetas")];
     const rows = data.map((d) => [
       d.name ?? "N/A",
       d.number ?? "N/A",
@@ -165,6 +189,7 @@ export default function RelatorioContatosCarteiraPage() {
       d.contactWallets && d.contactWallets.length > 0
         ? d.contactWallets.map((w) => walletLabel(w.walletId)).join(", ")
         : t("semCarteiras"),
+      tagsLabel(d),
     ]);
     const csv = [headers, ...rows]
       .map((r) => r.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(","))
@@ -183,8 +208,8 @@ export default function RelatorioContatosCarteiraPage() {
       <PageHeader title={t("title")} description={t("description")} help={{
         description: t("helpDesc"),
         sections: [
-          { title: t("helpS0T"), items: [t("helpS0I0"), t("helpS0I1"), t("helpS0I2")] },
-          { title: t("helpS1T"), items: [t("helpS1I0"), t("helpS1I1")] },
+          { title: t("helpS0T"), items: [t("helpS0I0"), t("helpS0I3"), t("helpS0I1"), t("helpS0I2")] },
+          { title: t("helpS1T"), items: [t("helpS1I0"), t("helpS1I1"), t("helpS1I3")] },
         ],
       }} />
       <Card>
@@ -248,6 +273,18 @@ export default function RelatorioContatosCarteiraPage() {
               </div>
             )}
 
+            <div className="grid gap-2">
+              <Label>{t("labelEtiquetas")}</Label>
+              <TagMultiFilter
+                tags={tags}
+                value={selectedTags}
+                onValueChange={setSelectedTags}
+                match={tagMatch}
+                onMatchChange={setTagMatch}
+                className="w-full sm:w-[220px]"
+              />
+            </div>
+
             <Button onClick={handleFilter} disabled={loading || selectedWallets.length === 0}>
               {loading ? <RefreshCw className="mr-2 h-4 w-4 animate-spin" /> : null}
               {t("btnGerar")}
@@ -289,6 +326,7 @@ export default function RelatorioContatosCarteiraPage() {
                     <TableHead>{t("colWhatsApp")}</TableHead>
                     <TableHead>{t("colEmail")}</TableHead>
                     <TableHead>{t("colCarteiras")}</TableHead>
+                    <TableHead>{t("colEtiquetas")}</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -302,6 +340,7 @@ export default function RelatorioContatosCarteiraPage() {
                           ? d.contactWallets.map((w) => walletLabel(w.walletId)).join(", ")
                           : t("semCarteiras")}
                       </TableCell>
+                      <TableCell className="text-xs">{tagsLabel(d)}</TableCell>
                     </TableRow>
                   ))}
                 </TableBody>

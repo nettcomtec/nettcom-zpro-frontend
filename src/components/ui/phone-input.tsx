@@ -225,14 +225,14 @@ export function PhoneInput({
   const displayValue = formatLocal(localNumber);
 
   return (
-    <div className={cn("flex h-9 rounded-md border border-input bg-background shadow-xs transition-[border-color,box-shadow] duration-150 hover:border-ring/40 focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/20", className)}>
+    <div className={cn("flex h-9 min-w-0 rounded-md border border-input bg-background shadow-xs transition-[border-color,box-shadow] duration-150 hover:border-ring/40 focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/20", className)}>
       {/* Country selector */}
       <Popover open={open} onOpenChange={setOpen}>
         <PopoverTrigger asChild>
           <button
             type="button"
             disabled={disabled}
-            className="flex items-center gap-1.5 pl-3 pr-2 text-sm border-r border-input hover:bg-accent transition-colors rounded-l-md focus:outline-none disabled:cursor-not-allowed disabled:opacity-50"
+            className="flex shrink-0 items-center gap-1.5 pl-3 pr-2 text-sm border-r border-input hover:bg-accent transition-colors rounded-l-md focus:outline-none disabled:cursor-not-allowed disabled:opacity-50"
           >
             <span className="text-base leading-none">{flagEmoji(selectedCountry[0])}</span>
             <span className="text-muted-foreground tabular-nums">+{selectedCountry[1]}</span>
@@ -283,7 +283,7 @@ export function PhoneInput({
         value={displayValue}
         onChange={handleLocalChange}
         placeholder={placeholder ?? "11 99999-9999"}
-        className="flex-1 bg-transparent px-3 text-sm outline-none placeholder:text-muted-foreground disabled:cursor-not-allowed disabled:opacity-50 rounded-r-md"
+        className="min-w-0 flex-1 bg-transparent px-3 text-sm outline-none placeholder:text-muted-foreground disabled:cursor-not-allowed disabled:opacity-50 rounded-r-md"
       />
     </div>
   );

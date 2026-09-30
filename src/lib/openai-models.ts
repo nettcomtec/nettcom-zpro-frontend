@@ -129,19 +129,24 @@ export const GROK_MODELS: ReadonlyArray<string> = [
   "grok-beta",
 ];
 
-/** Modelos Google Gemini (generativelanguage.googleapis.com). */
+/**
+ * Modelos Google Gemini (generativelanguage.googleapis.com).
+ * O Google DESLIGA modelos antigos (1.5 e 1.0 respondem 404; a 2.0 caiu em
+ * 01/06/2026) — nunca listar modelo aposentado: quem o escolhe fica com a IA
+ * parada. Conferir https://ai.google.dev/gemini-api/docs/deprecations.
+ */
 export const GEMINI_MODELS: ReadonlyArray<string> = [
-  "gemini-2.0-flash-001",
-  "gemini-2.0-flash-exp",
-  "gemini-2.0-pro-exp-02-05",
-  "gemini-1.5-pro",
-  "gemini-1.5-pro-002",
-  "gemini-1.5-flash",
-  "gemini-1.5-flash-002",
-  "gemini-1.5-flash-8b",
-  "gemini-exp-1206",
-  "gemini-pro",
-  "gemini-pro-vision",
+  "gemini-2.5-flash",
+  "gemini-2.5-flash-lite",
+  "gemini-2.5-pro",
+  "gemini-3.8-flash",
+  "gemini-3.7-flash",
+  "gemini-3.6-flash",
+  "gemini-3.5-flash",
+  "gemini-3.5-flash-lite",
+  "gemini-3.1-flash-lite",
+  "gemini-3.1-pro-preview",
+  "gemini-flash-latest",
 ];
 
 /** Modelos DeepSeek (api.deepseek.com/v1). */

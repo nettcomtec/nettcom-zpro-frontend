@@ -3,6 +3,8 @@ import { persist } from "zustand/middleware";
 import { disconnectSocket } from "@/lib/socket";
 import { resetAllStores } from "./reset-all-stores";
 import { safeJsonParse } from "@/lib/safe-json-parse";
+import { clearStoredPushFlags } from "@/lib/push-subscription";
+import { clearAllEmailTemplateDrafts } from "@/lib/email-template-draft";
 import {
   type CustomProfileSummary,
   type ICustomPermissions,
@@ -67,6 +69,7 @@ export interface UserData {
   // SIP — flat fields returned by backend login
   sipEnabled?: boolean;
   sipServer?: string;
+  sipDomain?: string;
   sipPort?: number;
   sipUsername?: string;
   sipPassword?: string;
@@ -81,10 +84,12 @@ export interface UserData {
     pinnedTickets?: number[];
     supervisorViewDept?: string;
     dashboardLayout?: DashboardLayout;
+    tourDone?: string; // "v1" = tour de boas-vindas dispensado (persistido no servidor)
   };
   // Constructed from flat SIP fields in setAuth
   sipConfig?: {
     server: string;
+    domain?: string;
     port: number;
     username: string;
     password: string;
@@ -99,6 +104,9 @@ export interface UserData {
   customProfileEnabled?: boolean;
   // Troca de senha obrigatória (modo forceChange do tenant)
   mustChangePassword?: boolean;
+  // Termos do revendedor pendentes (só admin de tenant ≠ 1). Ligado pelo 403
+  // ERR_RESELLER_TERMS_PENDING do interceptor e limpo pela página /aceite-termos.
+  resellerTermsPending?: boolean;
 }
 
 export interface Configuracao {
@@ -113,6 +121,14 @@ interface AuthState {
   isSuporte: boolean;
   isAuthenticated: boolean;
   menuVisibility: Record<string, boolean>;
+  /**
+   * Mapa de visibilidade do TENANT (Tenant.menuVisibility[0]) guardado à parte:
+   * `menuVisibility` acima é sobrescrito/substituído pelo menuPermissions do
+   * próprio usuário (user/super/custom) no boot e no refresh de 30s, então não
+   * serve de teto. Este mapa só é escrito no fetch do tenant e vale como teto
+   * (AND) na sidebar, no command palette, no usePageAccess e no useAuthGuard.
+   */
+  tenantMenuVisibility: Record<string, boolean>;
   blockedRoutes: string[];
   configuracoes: Configuracao[];
   supervisorAdmin: string; // 'enabled' | 'disabled'
@@ -129,6 +145,7 @@ interface AuthState {
   setAuth: (data: UserData) => void;
   clearAuth: () => void;
   setMenuVisibility: (visibility: Record<string, boolean>) => void;
+  setTenantMenuVisibility: (visibility: Record<string, boolean>) => void;
   setBlockedRoutes: (routes: string[]) => void;
   setConfiguracoes: (configuracoes: Configuracao[]) => void;
   /** Merges tenant-level key-value pairs into configuracoes (they are not in the Settings table) */
@@ -140,7 +157,7 @@ interface AuthState {
   isSupervisorAdmin: () => boolean;
   /** LGPD: tenant pode esconder dados de pagamento de usuários comuns. Default = enabled (esconde) */
   canViewPayments: () => boolean;
-  /** Syncs SIP and other fields updated by Vue's atualizarUsuario() into the store */
+ /** Syncs SIP and other fields updated by the legacy front's atualizarUsuario() into the store */
   syncUserFromLocalStorage: () => void;
   /** Merges partial fields into user (used by refreshUser to update SIP config) */
   patchUser: (fields: Partial<UserData>) => void;
@@ -161,6 +178,10 @@ interface AuthState {
   isWavoipEnabled: () => boolean;
   /** Gate ÚNICO do envio de cobrança (template ORDER_DETAILS). Espelha o backend. */
   canSendCharge: () => boolean;
+  /** Gate ÚNICO dos Créditos de IA no tenant: plano (teto) AND interruptor. Fail-closed. */
+  isAiCreditsEnabled: () => boolean;
+  /** Quem gerencia os Créditos de IA: admin, ou custom com `ai_credits_manage`. */
+  canManageAiCredits: () => boolean;
 }
 
 const DEFAULT_FILTERS = {
@@ -194,6 +215,7 @@ export const useAuthStore = create<AuthState>()(
       isSuporte: false,
       isAuthenticated: false,
       menuVisibility: {},
+      tenantMenuVisibility: {},
       blockedRoutes: [],
       configuracoes: [],
       supervisorAdmin: "disabled",
@@ -217,6 +239,7 @@ export const useAuthStore = create<AuthState>()(
           data.sipEnabled && data.sipServer && data.sipUsername && data.sipPassword
             ? {
                 server: data.sipServer,
+                domain: data.sipDomain || undefined,
                 port: data.sipPort ?? 5060,
                 username: data.sipUsername,
                 password: data.sipPassword,
@@ -276,12 +299,26 @@ export const useAuthStore = create<AuthState>()(
           localStorage.removeItem("whatsappAllowed");
           localStorage.removeItem("filtrosAtendimento");
           localStorage.removeItem("menuVisibility");
+          // Sem esta remoção, o merge do boot e o fallback do usePageAccess do
+          // PRÓXIMO login (mesmo navegador) leriam as permissões do usuário
+          // anterior até o primeiro refreshUser responder.
+          localStorage.removeItem("menuPermissions");
           localStorage.removeItem("dashboardChartPanels");
           localStorage.removeItem("dashboardLayout");
           localStorage.removeItem("configuracoes");
           localStorage.removeItem("supervisorAdmin");
           localStorage.removeItem("sipConfig");
           localStorage.removeItem("sipRegistration");
+          // Flag de Web Push (subscriptionData_<tenant>): sem ela, o próximo
+          // login neste aparelho não confia na assinatura que encontrar e a
+          // rotaciona — o usuário anterior deixa de receber aqui. A assinatura
+          // do navegador em si só é desfeita no logout EXPLÍCITO
+          // (unsubscribePush); num logout forçado o push continua chegando até
+          // a pessoa entrar de novo.
+          clearStoredPushFlags();
+          // Rascunhos do editor de modelo de e-mail (PLANO_EMAIL_EDITOR_VISUAL D17)
+          // são por usuário — o próximo login neste navegador não pode vê-los.
+          clearAllEmailTemplateDrafts();
           // Clear tenantId from IndexedDB so the service worker stops showing push notifications for this tenant
           clearCurrentTenantFromDB();
         }
@@ -292,6 +329,7 @@ export const useAuthStore = create<AuthState>()(
           isSuporte: false,
           isAuthenticated: false,
           menuVisibility: {},
+          tenantMenuVisibility: {},
           blockedRoutes: [],
           configuracoes: [],
           supervisorAdmin: "disabled",
@@ -304,6 +342,7 @@ export const useAuthStore = create<AuthState>()(
       },
 
       setMenuVisibility: (visibility) => set({ menuVisibility: visibility }),
+      setTenantMenuVisibility: (visibility) => set({ tenantMenuVisibility: visibility }),
       setBlockedRoutes: (routes) => set({ blockedRoutes: routes }),
 
       setConfiguracoes: (configuracoes) => {
@@ -421,6 +460,7 @@ export const useAuthStore = create<AuthState>()(
             local.sipEnabled && local.sipServer && local.sipUsername && local.sipPassword
               ? {
                   server: local.sipServer as string,
+                  domain: (local.sipDomain as string) || undefined,
                   port: (local.sipPort as number) ?? 5060,
                   username: local.sipUsername as string,
                   password: local.sipPassword as string,
@@ -526,6 +566,36 @@ export const useAuthStore = create<AuthState>()(
         if (!tenantConfigsLoaded) return false;
         return get().getConfigValue("userPaymentsEnabled") === "enabled";
       },
+
+      /**
+       * Gate ÚNICO dos Créditos de IA (IA da plataforma) no tenant. Vem ANTES de
+       * qualquer request a `/ai-credits/*`: tenant sem o recurso não paga nenhuma
+       * chamada (seletores, faixa do topo, item de menu).
+       *
+       * FAIL-CLOSED, ao contrário do WaVoIP: só `"enabled"` explícito liga. Backend
+       * antigo não manda `aiCreditsEnabled` na carga do tenant e o recurso fica oculto.
+       * Superadmin não consome crédito (opera fora de tenant) — quem configura a
+       * plataforma é a página própria dele.
+       */
+      isAiCreditsEnabled: (): boolean => {
+        const { user, tenantConfigsLoaded } = get();
+        if (!user || user.profile === "superadmin") return false;
+        if (!tenantConfigsLoaded) return false;
+        if (!get().hasFeature("aiCredits")) return false;
+        return get().getConfigValue("aiCreditsEnabled") === "enabled";
+      },
+
+      /**
+       * Quem vê saldo, extrato e recarga. NÃO usar `hasPermission` sozinho: ele devolve
+       * true para todo perfil não-custom e liberaria `super` e `user`, que o backend
+       * recusa com 403.
+       */
+      canManageAiCredits: (): boolean => {
+        const profile = get().user?.profile;
+        if (profile === "admin") return true;
+        if (profile === "custom") return get().hasPermission("ai_credits_manage");
+        return false;
+      },
     }),
     {
       name: "zpro-auth",
@@ -546,6 +616,7 @@ export const useAuthStore = create<AuthState>()(
           configuracoes: state.configuracoes,
           supervisorAdmin: state.supervisorAdmin,
           menuVisibility: state.menuVisibility,
+          tenantMenuVisibility: state.tenantMenuVisibility,
           tenantConfigsLoaded: state.tenantConfigsLoaded,
           planFeatures: state.planFeatures,
         };

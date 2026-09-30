@@ -27,6 +27,15 @@ function getContext(): AudioContext | null {
   return ctx;
 }
 
+/**
+ * Contexto compartilhado do app. Exposto para o toque de chamada
+ * (`call-ringtone.ts`) reaproveitar o mesmo contexto — e nunca fechá-lo, o que
+ * silenciaria os sons de notificação pelo resto da sessão.
+ */
+export function getSharedAudioContext(): AudioContext | null {
+  return getContext();
+}
+
 /** Chamar no primeiro gesto do usuário para desbloquear o AudioContext. */
 export function unlockAudioContext(): void {
   const context = getContext();

@@ -16,6 +16,10 @@ import { CONFIG_TAB_GROUPS, type ConfigTabKey } from "@/lib/config-links";
 
 type TabKey = ConfigTabKey;
 
+// Tipos de relacionamento (PLANO_CRM_CONTATO D26): única subrota que abre também
+// para quem gerencia relacionamento sem ter acesso ao restante das configurações.
+const RELATIONSHIP_SETTINGS_PATH = "/configuracoes/relacionamento";
+
 interface ConfigLink {
   name: string;
   href: string;
@@ -55,7 +59,7 @@ export default function ConfiguracoesLayout({ children }: { children: React.Reac
   const tSearch = useTranslations("searchableSelect");
   const pathname = usePathname();
   const router = useRouter();
-  const { user, hasPermission } = useAuthStore();
+  const { user, hasPermission, isSupervisorAdmin, tenantConfigsLoaded } = useAuthStore();
   const TAB_GROUPS = buildTabGroups(t);
   const [activeTab, setActiveTab] = useState<TabKey>(() => getTabForPath(pathname, TAB_GROUPS));
   const [asaasEnabled, setAsaasEnabled] = useState(false);
@@ -70,11 +74,29 @@ export default function ConfiguracoesLayout({ children }: { children: React.Reac
     user.profile === "admin" ||
     (user.profile === "custom" && hasPermission("settings_general"));
 
+  // Exceção D26, só para /configuracoes/relacionamento: admin, superadmin, supervisor
+  // com acesso de admin e custom com relationship_manage. `isSupervisorAdmin()` true
+  // = supervisor LIMITADO. O valor só é confiável depois do fetch do tenant — antes
+  // dele o default ("disabled") liberaria um supervisor limitado por um instante, então
+  // o supervisor espera (sem redirecionar) até `tenantConfigsLoaded`.
+  const isRelationshipRoute = pathname === RELATIONSHIP_SETTINGS_PATH;
+  const relationshipCheckPending =
+    isRelationshipRoute && !canOpenSettings && user?.profile === "super" && !tenantConfigsLoaded;
+  const canManageRelationship =
+    !!user &&
+    (user.profile === "admin" ||
+      user.profile === "superadmin" ||
+      (user.profile === "super" && !isSupervisorAdmin()) ||
+      (user.profile === "custom" && hasPermission("relationship_manage")));
+  // Entrou SÓ pela exceção: vê a página sem as abas/links das demais configurações.
+  const relationshipOnlyAccess =
+    isRelationshipRoute && !!user && !canOpenSettings && !relationshipCheckPending && canManageRelationship;
+
   useEffect(() => {
-    if (user && !canOpenSettings) {
+    if (user && !canOpenSettings && !relationshipOnlyAccess && !relationshipCheckPending) {
       router.replace("/home");
     }
-  }, [user, canOpenSettings, router]);
+  }, [user, canOpenSettings, relationshipOnlyAccess, relationshipCheckPending, router]);
 
   // Verificar se Asaas está habilitado para o tenant
   useEffect(() => {
@@ -97,6 +119,8 @@ export default function ConfiguracoesLayout({ children }: { children: React.Reac
   useEffect(() => {
     setSearch("");
   }, [activeTab]);
+
+  if (relationshipOnlyAccess) return <>{children}</>;
 
   if (!user || !canOpenSettings) return null;
 

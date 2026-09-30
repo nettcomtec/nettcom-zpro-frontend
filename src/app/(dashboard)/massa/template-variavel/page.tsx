@@ -52,7 +52,7 @@ import { useAuthStore } from "@/stores/auth-store";
 import { fetchContacts, createContact } from "@/services/contacts";
 import { fetchQueues, type Queue } from "@/services/queues";
 import { fetchWallets } from "@/services/wallets";
-import { createTicket, updateTicket } from "@/services/tickets";
+import { createTicket, fetchTicket, updateTicket } from "@/services/tickets";
 import { sendWabaTemplateComponents, sendWabaTemplateMarketingComponents } from "@/services/messages";
 import { usePageAccess } from "@/hooks/use-page-access";
 import { AccessDenied } from "@/components/layout/access-denied";
@@ -365,7 +365,8 @@ export default function MassaTemplateVariavelPage() {
   const loadAssignQueues = useCallback(async () => {
     try {
       const res = await fetchQueues();
-      const sorted = [...(res.data || [])].sort((a, b) =>
+      // Fila desativada recusa o ticket (400 ERR_QUEUE_INACTIVE) em toda linha do disparo.
+      const sorted = [...(res.data || [])].filter((q) => q.isActive !== false).sort((a, b) =>
         (a.name || "").toLowerCase().localeCompare((b.name || "").toLowerCase())
       );
       setQueues(sorted);
@@ -536,22 +537,56 @@ export default function MassaTemplateVariavelPage() {
     throw new Error(`Não foi possível criar contato: ${number}`);
   };
 
-  /** Cria ou obtém ticket existente (trata 409); retorna o id */
-  const findOrCreateTicketId = async (contactId: number, whatsappId: number): Promise<number> => {
+  /** Cria ou obtém ticket existente (trata 409); `created` = nasceu neste disparo.
+   *  O ticket nasce com quem dispara como dono (como Nova Conversa, Contatos e
+   *  Kanban): sem dono e sem fila, o guard de acesso do envio barrava com 403
+   *  ERR_NO_TICKET_ACCESS o atendente, o supervisor por departamento e o usuário
+   *  com canais restritos — e o ticket ficava aberto, sem template e sem destino. */
+  const findOrCreateTicketId = async (
+    contactId: number,
+    whatsappId: number,
+    senderUserId: number | null
+  ): Promise<{ id: number; created: boolean }> => {
     try {
-      const res = await createTicket({ contactId, isActiveDemand: true, channel: "waba", channelId: whatsappId, status: "open" });
-      if (res.data?.id) return res.data.id;
+      const res = await createTicket({
+        contactId,
+        isActiveDemand: true,
+        channel: "waba",
+        channelId: whatsappId,
+        status: "open",
+        ...(senderUserId ? { userId: senderUserId } : {}),
+      });
+      if (res.data?.id) return { id: res.data.id, created: true };
     } catch (err: unknown) {
       // O interceptor do axios rejeita com error.response diretamente,
       // então err já é o objeto response: { status, data, ... }
       const d = (err as { data?: { ticket?: { id: number }; error?: unknown } })?.data;
-      if (d?.ticket?.id) return d.ticket.id;
+      if (d?.ticket?.id) return { id: d.ticket.id, created: false };
       if (d?.error) {
         const t = typeof d.error === "string" ? JSON.parse(d.error) : d.error;
-        if ((t as { id?: number })?.id) return (t as { id: number }).id;
+        if ((t as { id?: number })?.id) return { id: (t as { id: number }).id, created: false };
       }
     }
     throw new Error(`Não foi possível criar ticket para contato ${contactId}`);
+  };
+
+  /** Aplica o destino pós-envio (pendente/fila/usuário). Plano B: se falhar num
+   *  ticket criado pelo disparo, solta para pendente sem dono — senão ele ficaria
+   *  aberto com quem disparou, contando no limite de atendimentos dele. */
+  const applyTicketDestination = async (
+    ticketId: number,
+    updates: Record<string, unknown>,
+    createdByDispatch: boolean
+  ) => {
+    try {
+      await updateTicket(ticketId, updates);
+    } catch {
+      if (!createdByDispatch) return;
+      const isAlreadyFallback =
+        updates.status === "pending" && updates.userId === null && updates.queueId === undefined;
+      if (isAlreadyFallback) return;
+      await updateTicket(ticketId, { status: "pending", userId: null }).catch(() => {});
+    }
   };
 
   /** Monta o array de components para o payload WABA a partir das variáveis da linha */
@@ -678,6 +713,30 @@ export default function MassaTemplateVariavelPage() {
     // envio da linha 1 seria auto-bloqueio. Bloqueado NÃO memoiza: re-checa a cada
     // linha (cada chamada reconcilia 1 falha no dispatch e re-verifica o ticket).
     const approvedNumbers = new Set<string>();
+    const senderUserId = useAuthStore.getState().user?.userId ?? null;
+    // Mesmo número em várias linhas: a linha seguinte reaproveita (409) o ticket da
+    // anterior. Aplicar o destino (pendente/fila/usuário) já na 1ª linha tiraria o
+    // ticket de quem dispara, e a trava de acesso barraria as seguintes (403). Com
+    // "Fechar ticket" desligado, o destino de ticket criado pelo disparo só é
+    // aplicado depois da ÚLTIMA linha do número; o que sobrar adiado (última linha
+    // pulada ou com erro de setup) é aplicado no fim do disparo.
+    const phoneKey = (n: string) => getBrPhoneVariants(n).sort()[0] || n.replace(/\D/g, "");
+    const lastLineByPhone = new Map<string, number>();
+    lines.forEach((l, idx) => lastLineByPhone.set(phoneKey(l.number), idx));
+    const ticketsCreatedInRun = new Set<number>();
+    const deferredDestinations = new Map<number, Record<string, unknown>>();
+    // Destino adiado só vale se o ticket AINDA está aberto com quem disparou: se um
+    // colega assumiu ou fechou no meio do disparo, aplicar agora desfaria a ação dele.
+    const applyDeferredDestination = async (deferredTicketId: number, deferredUpdates: Record<string, unknown>) => {
+      try {
+        const { data } = await fetchTicket(deferredTicketId);
+        const current = data as { status?: string; userId?: number | null };
+        if (current?.status !== "open" || Number(current?.userId) !== Number(senderUserId)) return;
+      } catch {
+        return;
+      }
+      await applyTicketDestination(deferredTicketId, deferredUpdates, true);
+    };
 
     // Cria registro de tracking
     let bulkDispatchId: number | null = null;
@@ -740,9 +799,12 @@ export default function MassaTemplateVariavelPage() {
 
       let contactId: number;
       let ticketId: number;
+      let ticketCreatedNow = false;
       try {
         contactId = await findOrCreateContactId(number);
-        ticketId = await findOrCreateTicketId(contactId, selectedConnection.id);
+        const ticketRef = await findOrCreateTicketId(contactId, selectedConnection.id, senderUserId);
+        ticketId = ticketRef.id;
+        ticketCreatedNow = ticketRef.created;
       } catch (err) {
         logger.error(`Erro de setup para ${number} (ignorado):`, err);
         setFailedCount((c) => c + 1);
@@ -758,6 +820,9 @@ export default function MassaTemplateVariavelPage() {
         if (i < lines.length - 1) await new Promise((r) => setTimeout(r, randomDelay));
         continue;
       }
+      if (ticketCreatedNow) ticketsCreatedInRun.add(ticketId);
+      const createdByDispatch = ticketsCreatedInRun.has(ticketId);
+      const hasLaterLine = (lastLineByPhone.get(phoneKey(number)) ?? i) > i;
 
       const components = buildComponentsFromVars(lineVars);
       const payload: Record<string, unknown> = {
@@ -833,8 +898,20 @@ export default function MassaTemplateVariavelPage() {
           const willAssignUser = assignUser && selectedAssignUserId;
           const updates: Record<string, unknown> = { status: willAssignUser ? "open" : "pending" };
           if (assignQueue && selectedAssignQueueId) updates.queueId = Number(selectedAssignQueueId);
-          if (willAssignUser) updates.userId = Number(selectedAssignUserId);
-          await updateTicket(ticketId, updates).catch(() => {});
+          if (willAssignUser) {
+            updates.userId = Number(selectedAssignUserId);
+          } else if (createdByDispatch) {
+            // Ticket deste disparo nasce com quem disparou como dono; o retorno a
+            // pendente só solta o dono com forcePendingUser desligado. Ticket
+            // reaproveitado de fora do disparo (409) segue com o payload de sempre.
+            updates.userId = null;
+          }
+          if (createdByDispatch && hasLaterLine && senderUserId) {
+            deferredDestinations.set(ticketId, updates);
+          } else {
+            deferredDestinations.delete(ticketId);
+            await applyTicketDestination(ticketId, updates, createdByDispatch);
+          }
         }
         setSentCount((c) => c + 1);
         setSendSuccessLog((prev) => [...prev, { number, timestamp: new Date() }]);
@@ -842,12 +919,31 @@ export default function MassaTemplateVariavelPage() {
         logger.error(`Erro ao enviar template variável para ${number}:`, err);
         setFailedCount((c) => c + 1);
         setSendErrorLog((prev) => [...prev, { number, error: formatBulkSendError(err), timestamp: new Date() }]);
+        // Envio falhou: o ticket que ESTA linha criou fecha sem despedida (mesmo
+        // efeito de "Fechar ticket após envio") em vez de ficar aberto sem template.
+        // Ticket reaproveitado (409) já tem conversa e não é fechado.
+        if (ticketCreatedNow) {
+          await updateTicket(ticketId, { status: "closed", userId: null, skipFarewell: true }).catch(() => {});
+        }
+      }
+
+      // Última linha do número falhou no envio: aplica o destino que ficou adiado
+      // pelas linhas anteriores (que chegaram a enviar).
+      const deferredUpdates = hasLaterLine ? undefined : deferredDestinations.get(ticketId);
+      if (deferredUpdates) {
+        deferredDestinations.delete(ticketId);
+        await applyDeferredDestination(ticketId, deferredUpdates);
       }
 
       if (i < lines.length - 1) {
         await new Promise((r) => setTimeout(r, randomDelay));
       }
     }
+
+    for (const [deferredTicketId, deferredUpdates] of Array.from(deferredDestinations.entries())) {
+      await applyDeferredDestination(deferredTicketId, deferredUpdates);
+    }
+    deferredDestinations.clear();
 
     setSending(false);
     sendingRef.current = false;

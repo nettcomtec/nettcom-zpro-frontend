@@ -16,6 +16,12 @@ import { playNotificationSound } from "@/lib/notification-audio";
 import { canUserSeeTicket, isTicketInBotFlow, type TicketVisibilityData } from "@/lib/can-user-see-ticket";
 import { useTicketFilterStore } from "@/stores/ticket-filter-store";
 import { matchesActiveFilter, type MatchesFilterTicket } from "@/lib/matches-active-filter";
+import { getTicketLastMessagePreview } from "@/lib/template-preview";
+import {
+  ensurePendingTicketNotification,
+  pickTicketVisibilityPatch,
+  syncTicketNotificationVisibility,
+} from "@/lib/ticket-notification-visibility";
 
 function passesActiveUiFilterOtm(ticket: MatchesFilterTicket): boolean {
   const filter = useTicketFilterStore.getState();
@@ -210,7 +216,7 @@ export function useSocketTicketsOtm() {
           setNotifications(
             allTicketNotifications.map((tk: { id: number; contact?: { name?: string }; lastMessage?: string; updatedAt: string; unreadMessages?: number }) => ({
               id: tk.id,
-              message: `${tk.contact?.name || contactLabel}: ${tk.lastMessage || newMsgLabel}`,
+              message: `${tk.contact?.name || contactLabel}: ${getTicketLastMessagePreview(tk.lastMessage) || newMsgLabel}`,
               read: readIds.has(tk.id) || (tk.unreadMessages ?? 0) === 0,
               createdAt: tk.updatedAt ?? new Date().toISOString(),
               ticketId: tk.id,
@@ -256,10 +262,27 @@ export function useSocketTicketsOtm() {
           dataJson?: string;
           mediaType?: string;
           sentVia?: string | null;
+          ticketLastMessage?: string;
         };
         const currentTicket = useTicketStore.getState().currentTicket;
         const msgTicketId = payload.ticketId;
         const isForCurrentTicket = !msgTicketId || (currentTicket && msgTicketId === currentTicket.id);
+
+        // Edicao de mensagem: o backend so manda ticketLastMessage quando a mensagem
+        // editada era a ULTIMA do atendimento e o preview ja foi corrigido no banco.
+        // Fica FORA do bloco do ticket aberto — edicao em atendimento que nao esta na
+        // tela tambem precisa corrigir o card da lista. Patch magro de proposito: sem
+        // updatedAt, senao cada edicao jogaria o atendimento pro topo da lista.
+        if (
+          data.type === "chat:update" &&
+          payload.edition != null &&
+          typeof payload.ticketLastMessage === "string"
+        ) {
+          const editedTicketId = Number(payload.ticketId);
+          if (Number.isFinite(editedTicketId) && editedTicketId > 0) {
+            updateTicket({ id: editedTicketId, lastMessage: payload.ticketLastMessage });
+          }
+        }
 
         if (isForCurrentTicket) {
           const { messages, setMessages } = useTicketStore.getState();
@@ -344,11 +367,27 @@ export function useSocketTicketsOtm() {
         const tkDelete = data.payload as { id?: number };
         if (tkDelete?.id != null) {
           removeTicket(tkDelete.id);
+          // Atendimento removido: a entrada do sino desse ticket sai junto.
+          useNotificationStore.getState().removeTicketNotification(tkDelete.id);
         }
         return;
       }
 
       if (data.type === "ticket:update" || data.type === "ticket:create") {
+        // Sino: mantém o retrato de visibilidade da entrada deste ticket e a REVOGA quando o
+        // usuário deixa de poder vê-lo (aceito/transferido para outro atendente, fila alheia).
+        // Fica ANTES do filtro ticketsRain, que descarta justamente o evento do ticket que o
+        // usuário não pode ver — o caso que precisa limpar o sino.
+        if (data.type === "ticket:update") {
+          syncTicketNotificationVisibility(data.payload);
+          // Devolvido à fila / transferido para fila: volta ao sino de quem pode ver (o evento
+          // `notification:new` do backend só toca som). Usa o estado ANTERIOR do store, por isso
+          // roda antes de o evento ser aplicado.
+          ensurePendingTicketNotification(data.payload, {
+            contactFallback: t("contactFallback"),
+            newMessageFallback: t("newMessageFallback"),
+          });
+        }
         const ticketsRainEnabled = safeJsonParse(localStorage.getItem("ticketsRain"), null) === "enabled";
         // O backend emite payload: ticket diretamente (não aninhado em { ticket: ... })
         if (ticketsRainEnabled) {
@@ -403,6 +442,7 @@ export function useSocketTicketsOtm() {
                     read: false,
                     createdAt: (tkCreate as { createdAt?: string }).createdAt ?? new Date().toISOString(),
                     ticketId: tkCreate.id!,
+                    visibility: pickTicketVisibilityPatch(tkCreate),
                   });
                 }
                 // Popup nativo do navegador para ticket novo em "pendentes" (paridade com chat:create
@@ -592,6 +632,7 @@ export function useSocketTicketsOtm() {
           ack?: number;
           isForwarded?: boolean;
           isStatusReply?: boolean;
+          sendType?: string | null;
           user?: { id: number; name: string; profilePicture?: string };
           contact?: { id: number; name: string; number?: string; profilePicUrl?: string };
           ticket?: { id?: number; contact?: { name?: string }; userId?: number; userIdArray?: number[] };
@@ -605,7 +646,7 @@ export function useSocketTicketsOtm() {
         };
 
         // ticketsRain — filtro de socket: ignora mensagens de tickets que o usuário não pode ver.
-        // O gate portado do Vue (socketInitial.js:457-463) comparava apenas `ticket.userId === eu`,
+ // O gate portado do front legado (socketInitial.js:457-463) comparava apenas `ticket.userId === eu`,
         // o que descartava TODO ticket pendente (userId null) para quem não é admin: som, popup do
         // SO, prévia do card e até a renderização em tempo real da mensagem. Como o badge de não
         // lidas vem por ticket:update (que já usa canUserSeeTicket), o contador subia com o alerta
@@ -623,7 +664,12 @@ export function useSocketTicketsOtm() {
               useAuthStore.getState().user,
               buildVisibilityConfigOtm(),
             );
-            if (!canSeeRainChat) return;
+            if (!canSeeRainChat) {
+              // O filtro de socket descarta a mensagem, mas a entrada que o sino ainda tiver
+              // desse atendimento precisa sair (ver lib/ticket-notification-visibility.ts).
+              syncTicketNotificationVisibility(payload.ticket);
+              return;
+            }
           }
         }
         const currentTicket = useTicketStore.getState().currentTicket;
@@ -649,6 +695,7 @@ export function useSocketTicketsOtm() {
             ack: payload.ack,
             isForwarded: payload.isForwarded ?? false,
             isStatusReply: payload.isStatusReply ?? false,
+            sendType: payload.sendType,
             user: payload.user,
             contact: payload.contact,
             emailMetadata: payload.emailMetadata ?? undefined,
@@ -735,7 +782,7 @@ export function useSocketTicketsOtm() {
             hasNestedTicketOtm(payload.ticket) &&
             canUserSeeTicket(ticketForSoundOtm, currentUserForSoundOtm, buildVisibilityConfigOtm());
           if (canSeeForSoundOtm) {
-            // notificationSilenced — Vue: "enabled" = som LIGADO (nome enganoso); toca quando === "enabled"
+ // notificationSilenced — front legado: "enabled" = som LIGADO (nome enganoso); toca quando === "enabled"
             const notificationSilenced = useAuthStore.getState().getConfigValue("notificationSilenced") === "enabled";
             // notifyOnlyHumanTickets (flag tenant): não alertar enquanto o ticket está no chatbot
             // (chatFlowId setado, sem fila/atendente). Só quando cair em pendentes para humano.
@@ -855,10 +902,19 @@ export function useSocketTicketsOtm() {
             const msgBody = payload.body || t("newMessageFallback");
             const { notifications: prevNotifs, setNotifications } = useNotificationStore.getState();
             const existingNotif = prevNotifs.find((n) => n.ticketId === messageTicketId);
+            // Retrato de visibilidade da entrada (ver lib/ticket-notification-visibility.ts): o
+            // ticket aninhado do chat:create é a linha completa, então atualiza o que já havia.
+            const visibilityPatchOtm = pickTicketVisibilityPatch(payload.ticket);
             if (existingNotif) {
               setNotifications(prevNotifs.map((n) =>
                 n.ticketId === messageTicketId
-                  ? { ...n, read: false, message: `${contactName}: ${msgBody}`, createdAt: new Date().toISOString() }
+                  ? {
+                      ...n,
+                      read: false,
+                      message: `${contactName}: ${msgBody}`,
+                      createdAt: new Date().toISOString(),
+                      visibility: { ...(n.visibility ?? {}), ...visibilityPatchOtm },
+                    }
                   : n
               ));
             } else {
@@ -868,15 +924,21 @@ export function useSocketTicketsOtm() {
                 read: false,
                 createdAt: new Date().toISOString(),
                 ticketId: messageTicketId,
+                visibility: visibilityPatchOtm,
               });
             }
+          } else if (hasNestedTicketOtm(payload.ticket)) {
+            // Mensagem de atendimento que o usuário NÃO pode ver e que ainda tem entrada no sino
+            // (ticket:update perdido em queda de conexão): o ticket aninhado é a linha completa,
+            // então serve para revogar a entrada agora.
+            syncTicketNotificationVisibility(payload.ticket);
           }
         }
         return;
       }
 
       if (data.type === "notification:new") {
-        // Vue MainLayout.vue:956-960 — toca áudio ao receber novo atendimento pendente
+ // Front legado — toca áudio ao receber novo atendimento pendente
         // notificationSilenced === "enabled" significa som LIGADO (nome enganoso, mantido por compatibilidade)
         // Nota: não adicionamos ao notification store aqui pois ticket:create/chat:create
         // já atualizam o badge com o ID correto do ticket, evitando entradas fantasmas.

@@ -10,6 +10,12 @@ export function middleware(req: NextRequest): NextResponse {
     return NextResponse.next();
   }
 
+  // Contrato público do revendedor: igualdade exata (ou subcaminho), nunca prefixo
+  // solto — senão uma rota futura como /contratos ficaria pública.
+  if (pathname === "/contrato" || pathname.startsWith("/contrato/")) {
+    return NextResponse.next();
+  }
+
   if (PUBLIC_PATHS.some((p) => pathname.startsWith(p))) {
     return NextResponse.next();
   }

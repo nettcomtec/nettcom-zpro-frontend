@@ -34,8 +34,10 @@ import { PrivateCallIncomingModal } from "@/components/private-call/private-call
 import { PrivateCallActiveModal } from "@/components/private-call/private-call-active-modal";
 import dynamic from "next/dynamic";
 import { BillingAlertBanner } from "@/components/layout/billing-alert-banner";
+import { AiCreditsBanner } from "@/components/layout/ai-credits-banner";
 import { MetaRestrictionBanner } from "@/components/layout/meta-restriction-banner";
 import { MetaBannedBanner } from "@/components/layout/meta-banned-banner";
+import { MetaSendHealthBanner } from "@/components/layout/meta-send-health-banner";
 import { AcceptTermsModal } from "@/components/layout/accept-terms-modal";
 import { cn } from "@/lib/utils";
 import { type PlanFeatures } from "@/lib/plan-capabilities";
@@ -91,6 +93,9 @@ function applyTypographyFromPayload(p: { fontFamily?: string; fontWeights?: stri
 
 function trackRecentPage(pathname: string, pathLabels: Record<string, string>, userId: number | string) {
   if (pathname === "/" || pathname === "/home") return;
+  // Perfil do contato (/contatos/<id>) não entra em "Páginas recentes": sem rótulo traduzido
+  // e cada contato ocuparia uma das vagas.
+  if (/^\/contatos\/[^/]+$/.test(pathname)) return;
   const label = pathLabels[pathname] || pathname.replace(/^\//, "").replace(/-/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
   const entry = { name: label, path: pathname, label };
   try {
@@ -110,7 +115,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   const t = useTranslations("dashboardLayout");
   const { isAuthenticated } = useAuthGuard();
   const { sidebarCollapsed } = useUIStore();
-  const { user, setConfiguracoes, injectTenantSettings, setSupervisorAdmin, setMenuVisibility, setTenantConfigsLoaded, patchUser, setPaymentOverdue, setBillingState, setBillingDaysInfo, setPlanFeatures } = useAuthStore();
+  const { user, setConfiguracoes, injectTenantSettings, setSupervisorAdmin, setMenuVisibility, setTenantMenuVisibility, setTenantConfigsLoaded, patchUser, setPaymentOverdue, setBillingState, setBillingDaysInfo, setPlanFeatures } = useAuthStore();
   const { resolvedTheme } = useTheme();
   const pathname = usePathname();
   const { setAppName, setLogoTimestamp, setSoundTimestamps, setSocketModelOptimized, setTenantBranding, setTypography } = useBrandingStore();
@@ -407,7 +412,9 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
 
   // ── Aviso de permissão negada (403 ERR_NO_PERMISSION do backend) ──
   useEffect(() => {
-    const handler = () => toast.error(t("noPermission"));
+    // `id` fixo: a ação em massa manda vários requests em paralelo e cada 403
+    // virava um toast próprio — com id, o sonner reaproveita um só.
+    const handler = () => toast.error(t("noPermission"), { id: "zpro-no-permission" });
     window.addEventListener("zpro:no-permission", handler);
     return () => window.removeEventListener("zpro:no-permission", handler);
   }, [t]);
@@ -499,17 +506,35 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
           // default real da coluna ("disabled"): backend antigo (sem a coluna) mantém
           // o comportamento atual, em que só admin/super/custom cobram.
           userPaymentsEnabled: (tenantData?.userPaymentsEnabled as string) || "disabled",
+          // Grupos nas métricas de tempo dos relatórios. "disabled" apaga as colunas
+          // de tempo das linhas de grupo no relatório por parâmetros (o backend já
+          // tira os grupos das médias por usuário). Fallback = default real da
+          // coluna ("enabled"): backend antigo mantém o comportamento atual.
+          groupTimeMetricsEnabled: (tenantData?.groupTimeMetricsEnabled as string) || "enabled",
+          // Interruptor dos Créditos de IA no tenant. Lido pelo gate isAiCreditsEnabled()
+          // do auth-store, que vem ANTES de qualquer request a /ai-credits/*. FAIL-CLOSED:
+          // só "enabled" explícito liga — backend antigo não manda o campo e o recurso
+          // fica oculto (menu, faixa, página e seletores), sem nenhuma chamada nova.
+          aiCreditsEnabled: tenantData?.aiCreditsEnabled === "enabled" ? "enabled" : "disabled",
+          // Limite de aviso de saldo baixo definido pela empresa, em centavos.
+          // Vazio = usa o padrão da plataforma (o valor efetivo vem de /ai-credits/status).
+          aiCreditsLowBalanceCents:
+            tenantData?.aiCreditsLowBalanceCents != null ? String(tenantData.aiCreditsLowBalanceCents) : "",
         });
         setTenantConfigsLoaded(true);
 
-        // Vue MainLayout.vue:1760/1784 — ticketsRain, forceReason, postmanLink no localStorage
+ // Front legado/1784 — ticketsRain, forceReason, postmanLink no localStorage
         localStorage.setItem("ticketsRain", JSON.stringify(tenantData?.ticketsRain ?? null));
         localStorage.setItem("forceReason", JSON.stringify(tenantData?.forceReason ?? null) || "disabled");
         localStorage.setItem("postmanLink", JSON.stringify(tenantData?.postmanLink ?? null) || JSON.stringify("https://www.postman.com/comunidade-zdg/z-pro/collection/s16subg/postman-v3-x-x-x?action=share&creator=25151510"));
 
-        // Vue MainLayout.vue:1752-1758 — menuVisibility do tenant mesclado com menuPermissions (para user/super)
+ // Front legado — menuVisibility do tenant mesclado com menuPermissions (para user/super)
         // §7.5 + §35.9 Opção B: custom usa customProfile.menuPermissions como source
         const tenantMenuVisibility = ((tenantData?.menuVisibility as unknown[])?.[0] || {}) as Record<string, boolean>;
+        // Teto do tenant guardado à parte: os branches abaixo sobrescrevem (boot)
+        // e o refreshUser substitui (30s) o `menuVisibility` pelo menuPermissions
+        // do usuário — só este mapa preserva o que o superadmin desligou.
+        setTenantMenuVisibility(tenantMenuVisibility);
         if (user?.profile === "user" || user?.profile === "super") {
           const menuPermissions = safeJsonParse(localStorage.getItem("menuPermissions"), {} as Record<string, boolean>);
           const merged = { ...tenantMenuVisibility, ...menuPermissions };
@@ -525,7 +550,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
           localStorage.setItem("menuVisibility", JSON.stringify(tenantMenuVisibility));
         }
 
-        // Vue Index.vue:5514-5527 — empresa inativa → avisa e recarrega
+ // Front legado — empresa inativa → avisa e recarrega
         if (tenantData?.status !== "active") {
           toast.warning(t("companyInactive"));
           setTimeout(() => window.location.reload(), 1000);
@@ -594,13 +619,13 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
         }
       })
       .catch(() => {});
-  }, [isAuthenticated, user?.tenantId, user?.profile, setSupervisorAdmin, setMenuVisibility, injectTenantSettings, setTenantConfigsLoaded, setPaymentOverdue, setBillingState, setBillingDaysInfo, setPlanFeatures]);
+  }, [isAuthenticated, user?.tenantId, user?.profile, setSupervisorAdmin, setMenuVisibility, setTenantMenuVisibility, injectTenantSettings, setTenantConfigsLoaded, setPaymentOverdue, setBillingState, setBillingDaysInfo, setPlanFeatures]);
 
   // ── LGPD terms check ───────────────────────────────────────────────────
   // Superadmin: abre modal se QUALQUER tenant ainda nao aceitou (gate de plataforma).
   //   Backend bulk-update propaga o aceite p/ todos os tenants, entao um clique do
   //   superadmin libera o gate ate um novo tenant ser criado com acceptTerms=false.
-  // Outros perfis: check do proprio tenant via /tenantsTerms (comportamento Vue).
+ // Outros perfis: check do proprio tenant via /tenantsTerms (comportamento front legado).
   // Comparacao !acceptTerms tolera false/0/null/undefined (Sequelize as vezes
   // serializa boolean como 0/1 dependendo do driver).
   useEffect(() => {
@@ -631,7 +656,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
     }
   }, [isAuthenticated, user?.profile, user?.tenantId, t]);
 
-  // ── Periodic user refresh (30s) — mirror Vue MainLayout atualizarUsuario() ──
+ // ── Periodic user refresh (30s) — mirror front legado MainLayout atualizarUsuario() ──
   const refreshUser = useCallback(async () => {
     // Lê o user atual via getState() em vez de fechar sobre `user`. CRÍTICO: sem
     // isto, refreshUser dependia de `user?.sipConfig` (objeto recriado a cada
@@ -647,7 +672,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
       if (data && typeof data === "object") {
         const userData = data as Record<string, unknown>;
 
-        // Vue MainLayout.vue:1747-1755 — profile, menuPermissions, menuVisibility
+ // Front legado — profile, menuPermissions, menuVisibility
         if (userData.profile) {
           localStorage.setItem("profile", userData.profile as string);
         }
@@ -668,9 +693,10 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
           }
         }
 
-        // Vue MainLayout.vue:1761-1769 — atualiza SIP fields no store e no localStorage
+ // Front legado — atualiza SIP fields no store e no localStorage
         const sipEnabled = !!userData.sipEnabled;
         const sipServer = userData.sipServer as string | undefined;
+        const sipDomain = userData.sipDomain as string | undefined;
         const sipUsername = userData.sipUsername as string | undefined;
         const sipPassword = userData.sipPassword as string | undefined;
         const sipPort = userData.sipPort as number | undefined;
@@ -679,6 +705,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
           sipEnabled && sipServer && sipUsername && sipPassword
             ? {
                 server: sipServer,
+                domain: sipDomain || undefined,
                 port: sipPort ?? 5060,
                 username: sipUsername,
                 password: sipPassword,
@@ -761,7 +788,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
             ? mergedConfigs
             : undefined;
         patchUser({
-          sipEnabled, sipServer, sipUsername, sipPassword, sipPort, sipTransport, sipConfig, phone,
+          sipEnabled, sipServer, sipDomain, sipUsername, sipPassword, sipPort, sipTransport, sipConfig, phone,
           ...(nextMenuPermissions ? { menuPermissions: nextMenuPermissions } : {}),
           ...(nextWhatsappAllowed ? { whatsappAllowed: nextWhatsappAllowed } : {}),
           ...(nextQueues ? { queues: nextQueues } : {}),
@@ -775,7 +802,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
         try {
           const local = safeJsonParse(localStorage.getItem("usuario"), {} as Record<string, unknown>);
           localStorage.setItem("usuario", JSON.stringify({
-            ...local, sipEnabled, sipServer, sipUsername, sipPassword, sipPort, sipTransport, sipConfig,
+            ...local, sipEnabled, sipServer, sipDomain, sipUsername, sipPassword, sipPort, sipTransport, sipConfig,
             ...(nextWhatsappAllowed ? { whatsappAllowed: nextWhatsappAllowed } : {}),
             ...(nextQueues ? { queues: nextQueues } : {}),
           }));
@@ -793,7 +820,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   useEffect(() => {
     if (!isAuthenticated) return;
 
-    // Vue MainLayout.vue:2871 — atualizarUsuario() imediato ao montar
+ // Front legado — atualizarUsuario() imediato ao montar
     refreshUser();
 
     const scheduleRefresh = () => {
@@ -809,7 +836,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
     };
   }, [isAuthenticated, refreshUser]);
 
-  // ── Notification permission request on first interaction (Vue MainLayout.vue:1103-1111) ──
+ // ── Notification permission request on first interaction ──
   useEffect(() => {
     if (!isAuthenticated) return;
     if (typeof window === "undefined" || !("Notification" in window)) return;
@@ -883,8 +910,10 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
         <Header />
         <NoProfileBanner />
         <BillingAlertBanner />
+        <AiCreditsBanner />
         <MetaRestrictionBanner />
         <MetaBannedBanner />
+        <MetaSendHealthBanner />
         {/* relative container so full-height pages can use absolute inset-0 */}
         <main className="flex-1 min-h-0 relative">
           {/* normal scroll container — pages that need scrolling use this */}

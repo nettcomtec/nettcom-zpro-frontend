@@ -6,6 +6,7 @@ import { PhoneCall, PhoneOff, Mic, MicOff, X } from "lucide-react"
 import { useTranslations } from "next-intl"
 import { Card } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
+import { startCallRingtone } from "@/lib/call-ringtone"
 import { useWabaCallStore } from "@/stores/waba-call-store"
 import { useWabaCallActions } from "./waba-call-provider"
 import { getWabaRtc } from "./waba-call-provider"
@@ -65,24 +66,12 @@ export function WabaCallModal() {
     return () => clearInterval(id)
   }, [state])
 
-  // Ringtone
+  // Ringtone: arquivo de public/ quando existir, senão o beep sintetizado de
+  // sempre (ver lib/call-ringtone.ts). Um pouco mais baixo que o toque de
+  // chamada recebida — este modal também toca para quem ligou.
   useEffect(() => {
     if (state !== "ringing") return
-    const ctx = new AudioContext()
-    let stopped = false
-    function beep() {
-      if (stopped) return
-      const osc = ctx.createOscillator()
-      const gain = ctx.createGain()
-      osc.connect(gain); gain.connect(ctx.destination)
-      osc.frequency.value = 480
-      gain.gain.setValueAtTime(0.25, ctx.currentTime)
-      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.6)
-      osc.start(); osc.stop(ctx.currentTime + 0.6)
-      setTimeout(() => { if (!stopped) beep() }, 1800)
-    }
-    beep()
-    return () => { stopped = true; ctx.close() }
+    return startCallRingtone({ beepGain: 0.25, fileVolume: 0.85 })
   }, [state])
 
   // Foco programático no botão Atender ao ENTRAR em "ringing" (chamada recebida),
@@ -245,6 +234,14 @@ export function WabaCallModal() {
                 <span className="text-muted-foreground text-sm">{t("ended")}</span>
               )}
             </div>
+
+            {/* Nota discreta: durante a chamada, uma nova chamada NÃO toca para
+                este atendente — de propósito. Sem isso o silêncio parece defeito. */}
+            {isActive && (
+              <p className="text-[10px] text-muted-foreground text-center leading-tight">
+                {t("busyNote")}
+              </p>
+            )}
           </div>
         </Card>
       </motion.div>

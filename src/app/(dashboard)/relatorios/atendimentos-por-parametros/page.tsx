@@ -25,12 +25,14 @@ import { Download, Filter, RefreshCw, ChevronDown, FileText, Printer, X, Info } 
 import { toast } from "sonner";
 import { fetchReportTickets } from "@/services/reports";
 import { printReportTable } from "@/lib/print-report";
+import { getTicketLastMessagePreview } from "@/lib/template-preview";
 import { fetchQueues } from "@/services/queues";
 import { fetchAllUsers } from "@/services/users";
 import { fetchReasons } from "@/services/reasons";
 import { fetchWhatsapps } from "@/services/whatsapp";
 import { formatDuration } from "@/services/dashboard";
 import { usePageAccess } from "@/hooks/use-page-access";
+import { useAuthStore } from "@/stores/auth-store";
 import { useLiveMode } from "@/hooks/use-live-mode";
 import { useSortable } from "@/hooks/use-sortable";
 import { SortableTableHead } from "@/components/ui/sortable-table-head";
@@ -45,6 +47,7 @@ import {
 interface TicketRow {
   id: number;
   status: string;
+  isGroup?: boolean;
   attendanceType?: "active" | "receptive" | null;
   firstMessageFromMe?: boolean | null;
   contact?: { name?: string; number?: string };
@@ -128,6 +131,12 @@ function formatRowDuration(totalMinFloat: number | null): string {
   // Segundos só abaixo de 1h: resposta rápida deixava de aparecer como "0min".
   if (days === 0 && hours === 0 && seconds > 0) parts.push(`${seconds}s`);
   return parts.length ? parts.join(" ") : "0min";
+}
+
+// `lastMessage` chega como JSON em vários casos (template WABA, resposta de Flow,
+// interativos) — o mesmo preview da lista de conversas evita o JSON cru no relatório.
+function lastMessageText(raw: string | undefined): string {
+  return getTicketLastMessagePreview(raw) || "N/A";
 }
 
 // Minutos por linha espelhando a fórmula do agregado timeStats (desconta pausa, piso 0).
@@ -394,6 +403,20 @@ export default function RelatorioAtendimentosParamsPage() {
     loadFilters();
   }, [loadFilters]);
 
+  // Grupos fora das métricas de tempo (interruptor do tenant em /configuracoes):
+  // as três colunas de tempo saem "—" para linha de grupo e o grupo não entra nas
+  // médias do rodapé. Quantidades seguem contando grupos. Backend antigo não manda
+  // a config → segue contando (comportamento histórico).
+  const hideGroupTimes = useAuthStore(
+    (s) => s.getConfigValue("groupTimeMetricsEnabled") === "disabled"
+  );
+  const timeAtrib = (row: TicketRow) =>
+    hideGroupTimes && row.isGroup ? null : rowFirstResponseMinutes(row);
+  const timeResp = (row: TicketRow) =>
+    hideGroupTimes && row.isGroup ? null : rowFirstReplyMinutes(row);
+  const timeAtend = (row: TicketRow) =>
+    hideGroupTimes && row.isGroup ? null : rowHandlingMinutes(row);
+
   // Subset exibido (respeita o filtro ativo do gráfico por fila).
   const displayData = useMemo(
     () =>
@@ -414,9 +437,9 @@ export default function RelatorioAtendimentosParamsPage() {
         const started = Number(row.startedAttendanceAt);
         const closed = Number(row.closedAt);
         const valueNum = parseFloat(String(row.value ?? ""));
-        const tAtrib = rowFirstResponseMinutes(row);
-        const tResp = rowFirstReplyMinutes(row);
-        const tAtend = rowHandlingMinutes(row);
+        const tAtrib = timeAtrib(row);
+        const tResp = timeResp(row);
+        const tAtend = timeAtend(row);
         return {
           row,
           id: row.id,
@@ -441,7 +464,7 @@ export default function RelatorioAtendimentosParamsPage() {
       }),
     // formatStatus/attendanceLabel dependem apenas de t (labels traduzidos)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [displayData, t]
+    [displayData, t, hideGroupTimes]
   );
 
   const { sortKey, sortDir, handleSort, sortedData } = useSortable(sortableRows);
@@ -495,7 +518,7 @@ export default function RelatorioAtendimentosParamsPage() {
         [t("colNome")]: row.contact?.name ?? "N/A",
         [t("colNumero")]: displayContactIdentity(row.contact) || "N/A",
         [t("colConexao")]: row.whatsapp?.name ?? "N/A",
-        [t("colUltimaMensagem")]: row.lastMessage ?? "N/A",
+        [t("colUltimaMensagem")]: lastMessageText(row.lastMessage),
         [t("colMsgsNaoLidas")]: row.unreadMessages ? t("sim") : t("nao"),
         [t("colDemanda")]: row.reasonName ?? row.reasons ?? "N/A",
         [t("colFila")]: row.queue?.queue ?? row.queue?.name ?? "N/A",
@@ -506,9 +529,9 @@ export default function RelatorioAtendimentosParamsPage() {
         [t("colDataCriacao")]: formatDate(row.createdAt),
         [t("colInicioAtendimento")]: formatEpochDate(row.startedAttendanceAt) ?? t("naoIniciado"),
         [t("colDataFechamento")]: formatEpochDate(row.closedAt) ?? t("emAberto"),
-        [t("colTempoAtribuicao")]: formatRowDuration(rowFirstResponseMinutes(row)),
-        [t("colTempoPrimeiraResposta")]: formatRowDuration(rowFirstReplyMinutes(row)),
-        [t("colTempoAtendimento")]: formatRowDuration(rowHandlingMinutes(row)),
+        [t("colTempoAtribuicao")]: formatRowDuration(timeAtrib(row)),
+        [t("colTempoPrimeiraResposta")]: formatRowDuration(timeResp(row)),
+        [t("colTempoAtendimento")]: formatRowDuration(timeAtend(row)),
       }));
       const ws = XLSX.utils.json_to_sheet(exportData);
       ws["!cols"] = [
@@ -544,7 +567,7 @@ export default function RelatorioAtendimentosParamsPage() {
       row.contact?.name ?? "N/A",
       displayContactIdentity(row.contact) || "N/A",
       row.whatsapp?.name ?? "N/A",
-      row.lastMessage ?? "N/A",
+      lastMessageText(row.lastMessage),
       row.unreadMessages ? t("sim") : t("nao"),
       row.reasonName ?? row.reasons ?? "N/A",
       row.queue?.queue ?? row.queue?.name ?? "N/A",
@@ -555,9 +578,9 @@ export default function RelatorioAtendimentosParamsPage() {
       formatDate(row.createdAt),
       formatEpochDate(row.startedAttendanceAt) ?? t("naoIniciado"),
       formatEpochDate(row.closedAt) ?? t("emAberto"),
-      formatRowDuration(rowFirstResponseMinutes(row)),
-      formatRowDuration(rowFirstReplyMinutes(row)),
-      formatRowDuration(rowHandlingMinutes(row)),
+      formatRowDuration(timeAtrib(row)),
+      formatRowDuration(timeResp(row)),
+      formatRowDuration(timeAtend(row)),
     ]);
     const csv = [headers, ...rows]
       .map((r) => r.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(","))
@@ -589,7 +612,7 @@ export default function RelatorioAtendimentosParamsPage() {
       row.contact?.name ?? "N/A",
       displayContactIdentity(row.contact) || "N/A",
       row.whatsapp?.name ?? "N/A",
-      row.lastMessage ?? "N/A",
+      lastMessageText(row.lastMessage),
       row.unreadMessages ? t("sim") : t("nao"),
       row.reasonName ?? row.reasons ?? "N/A",
       row.queue?.queue ?? row.queue?.name ?? "N/A",
@@ -600,9 +623,9 @@ export default function RelatorioAtendimentosParamsPage() {
       formatDate(row.createdAt),
       formatEpochDate(row.startedAttendanceAt) ?? t("naoIniciado"),
       formatEpochDate(row.closedAt) ?? t("emAberto"),
-      formatRowDuration(rowFirstResponseMinutes(row)),
-      formatRowDuration(rowFirstReplyMinutes(row)),
-      formatRowDuration(rowHandlingMinutes(row)),
+      formatRowDuration(timeAtrib(row)),
+      formatRowDuration(timeResp(row)),
+      formatRowDuration(timeAtend(row)),
     ]);
     if (!printReportTable({ title: t("title"), headers, rows })) {
       toast.error(t("toastExportError"));
@@ -633,10 +656,14 @@ export default function RelatorioAtendimentosParamsPage() {
   // GREATEST(0, (fim - createdAt)/60000 - totalPauseTime/60000); média sobre
   // todos os tickets do conjunto (tickets sem fim contam como 0, igual ao AVG do backend).
   const timeStats = (() => {
-    if (displayData.length === 0) return null;
+    // Contador de grupos desligado no tenant: grupo não entra nas médias.
+    const considered = hideGroupTimes
+      ? displayData.filter((row) => !row.isGroup)
+      : displayData;
+    if (considered.length === 0) return null;
     let sumTma = 0;
     let sumTme = 0;
-    displayData.forEach((row) => {
+    considered.forEach((row) => {
       const created = new Date(row.createdAt).getTime();
       if (isNaN(created)) return;
       const pauseMin = (Number(row.totalPauseTime ?? 0) || 0) / 60000;
@@ -654,8 +681,8 @@ export default function RelatorioAtendimentosParamsPage() {
       };
     };
     return {
-      tma: formatDuration(toHMS(sumTma / displayData.length)),
-      tme: formatDuration(toHMS(sumTme / displayData.length)),
+      tma: formatDuration(toHMS(sumTma / considered.length)),
+      tme: formatDuration(toHMS(sumTme / considered.length)),
     };
   })();
 
@@ -997,7 +1024,7 @@ export default function RelatorioAtendimentosParamsPage() {
                         <TableCell className={cn(isLiveMode && "live-blur-text")}>{displayContactIdentity(row.contact) || "N/A"}</TableCell>
                         <TableCell>{row.whatsapp?.name ?? "N/A"}</TableCell>
                         <TableCell className="max-w-[200px] truncate text-xs">
-                          {row.lastMessage ?? "N/A"}
+                          {lastMessageText(row.lastMessage)}
                         </TableCell>
                         <TableCell>{row.unreadMessages ? t("sim") : t("nao")}</TableCell>
                         <TableCell>{row.reasonName ?? row.reasons ?? "N/A"}</TableCell>
@@ -1024,13 +1051,13 @@ export default function RelatorioAtendimentosParamsPage() {
                           {formatEpochDate(row.closedAt) ?? t("emAberto")}
                         </TableCell>
                         <TableCell className="text-xs whitespace-nowrap tabular-nums">
-                          {formatRowDuration(rowFirstResponseMinutes(row))}
+                          {formatRowDuration(timeAtrib(row))}
                         </TableCell>
                         <TableCell className="text-xs whitespace-nowrap tabular-nums">
-                          {formatRowDuration(rowFirstReplyMinutes(row))}
+                          {formatRowDuration(timeResp(row))}
                         </TableCell>
                         <TableCell className="text-xs whitespace-nowrap tabular-nums">
-                          {formatRowDuration(rowHandlingMinutes(row))}
+                          {formatRowDuration(timeAtend(row))}
                         </TableCell>
                       </TableRow>
                     ))}

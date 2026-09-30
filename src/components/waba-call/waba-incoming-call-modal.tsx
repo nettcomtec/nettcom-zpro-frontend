@@ -1,8 +1,9 @@
 "use client"
 
-import { useEffect, useRef, useState } from "react"
+import { useEffect, useState } from "react"
 import { PhoneCall, PhoneOff } from "lucide-react"
 import { useTranslations } from "next-intl"
+import { startCallRingtone } from "@/lib/call-ringtone"
 import { useWabaCallStore } from "@/stores/waba-call-store"
 import { useWabaCallActions } from "./waba-call-provider"
 
@@ -10,40 +11,15 @@ export function WabaIncomingCallModal() {
   const t = useTranslations("wabaCalls")
   const { state, callInfo } = useWabaCallStore()
   const { accept, decline } = useWabaCallActions()
-  const audioRef = useRef<HTMLAudioElement | null>(null)
   const [progress, setProgress] = useState(100)
 
   const isVisible = state === 'ringing' && callInfo?.direction === 'USER_INITIATED'
 
-  // Ringtone
+  // Ringtone: arquivo de public/ quando existir, senão o beep sintetizado de
+  // sempre. Ver lib/call-ringtone.ts.
   useEffect(() => {
-    if (!isVisible) {
-      audioRef.current?.pause()
-      return
-    }
-    // Usa um beep simples gerado via Web Audio API para não depender de arquivo externo
-    const ctx = new AudioContext()
-    let stopped = false
-
-    function beep() {
-      if (stopped) return
-      const osc = ctx.createOscillator()
-      const gain = ctx.createGain()
-      osc.connect(gain)
-      gain.connect(ctx.destination)
-      osc.frequency.value = 480
-      gain.gain.setValueAtTime(0.3, ctx.currentTime)
-      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.6)
-      osc.start(ctx.currentTime)
-      osc.stop(ctx.currentTime + 0.6)
-      setTimeout(() => { if (!stopped) beep() }, 1800)
-    }
-    beep()
-
-    return () => {
-      stopped = true
-      ctx.close()
-    }
+    if (!isVisible) return
+    return startCallRingtone()
   }, [isVisible])
 
   // Barra de progresso de 30s

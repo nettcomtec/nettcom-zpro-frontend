@@ -1,16 +1,16 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 import { useTranslations } from "next-intl";
 import { toast } from "sonner";
 import {
-  Plus, Pencil, Trash2, Search, Send, Eye, Paperclip, Download, Upload,
+  Plus, Pencil, Trash2, Search, Send, Paperclip, Download, Upload,
   MailX, Loader2, FileText,
 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
@@ -23,64 +23,38 @@ import {
   AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent,
   AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
-import {
-  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
-} from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 
 import { usePageAccess } from "@/hooks/use-page-access";
 import { AccessDenied } from "@/components/layout/access-denied";
 import { PageHeader } from "@/components/layout/page-header";
-import { EmailHtmlEditor } from "@/components/email-marketing/email-html-editor";
-import { sanitize } from "@/lib/sanitize";
-import { fetchWhatsapps, type Whatsapp } from "@/services/whatsapp";
-import { filterWhatsappsForCurrentUser } from "@/lib/whatsapp-user-access";
+import { EmailTemplateTestDialog } from "@/components/email-marketing/email-template-test-dialog";
 import {
-  fetchEmailTemplates, fetchEmailTemplate, createEmailTemplate, updateEmailTemplate,
-  deleteEmailTemplate, testSendEmailTemplate,
+  fetchEmailTemplates, deleteEmailTemplate,
   fetchEmailBlacklist, addEmailBlacklist, removeEmailBlacklist,
   importEmailBlacklist, exportEmailBlacklist,
-  type EmailTemplate, type EmailBlacklistEntry, type EmailTemplateAttachment,
+  type EmailTemplate, type EmailBlacklistEntry,
 } from "@/services/email-marketing";
 
-const EMAIL_CHANNEL_TYPES = ["email", "webmail"];
-
-const formatBytes = (bytes?: number): string => {
-  if (!bytes || bytes <= 0) return "";
-  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-};
+// Criar/editar modelo vive na página própria /email-marketing/modelos/[id]
+// (PLANO_EMAIL_EDITOR_VISUAL D8) — a lista só navega.
+const TEMPLATE_PAGE_PREFIX = "/email-marketing/modelos/";
 
 export default function EmailMarketingPage() {
   const t = useTranslations("emailMarketingPage");
   const hasAccess = usePageAccess("email-marketing", { allowIfNotSet: true });
+  const router = useRouter();
 
   // ── Modelos ────────────────────────────────────────────────────────────
   const [templates, setTemplates] = useState<EmailTemplate[]>([]);
   const [loadingTemplates, setLoadingTemplates] = useState(false);
   const [templateSearch, setTemplateSearch] = useState("");
 
-  const [dialogOpen, setDialogOpen] = useState(false);
-  const [saving, setSaving] = useState(false);
-  const [editId, setEditId] = useState<number | null>(null);
-  const [formName, setFormName] = useState("");
-  const [formSubject, setFormSubject] = useState("");
-  const [formHtml, setFormHtml] = useState("");
-  const [existingAttachments, setExistingAttachments] = useState<EmailTemplateAttachment[]>([]);
-  const [newFiles, setNewFiles] = useState<File[]>([]);
-  const [loadingTemplateBody, setLoadingTemplateBody] = useState(false);
-
-  const [previewOpen, setPreviewOpen] = useState(false);
   const [deleteId, setDeleteId] = useState<number | null>(null);
 
   // Envio de teste
   const [testOpen, setTestOpen] = useState(false);
   const [testTemplateId, setTestTemplateId] = useState<number | null>(null);
-  const [testChannelId, setTestChannelId] = useState<string>("");
-  const [testTo, setTestTo] = useState("");
-  const [testSending, setTestSending] = useState(false);
-  const [testOptOutConfirm, setTestOptOutConfirm] = useState<string | null>(null);
-  const [emailChannels, setEmailChannels] = useState<Whatsapp[]>([]);
 
   // ── Blacklist ──────────────────────────────────────────────────────────
   const [blacklist, setBlacklist] = useState<EmailBlacklistEntry[]>([]);
@@ -127,81 +101,14 @@ export default function EmailMarketingPage() {
     if (!hasAccess) return;
     loadTemplates();
     loadBlacklist();
-    (async () => {
-      try {
-        const res = await fetchWhatsapps();
-        const raw: Whatsapp[] = Array.isArray(res.data) ? res.data : [];
-        const all = filterWhatsappsForCurrentUser(raw);
-        setEmailChannels(
-          all.filter(w => EMAIL_CHANNEL_TYPES.includes((w.type || "").toLowerCase()))
-        );
-      } catch {
-        /* canais indisponíveis: o teste fica desabilitado */
-      }
-    })();
   }, [hasAccess, loadTemplates, loadBlacklist]);
 
   const openCreate = () => {
-    setEditId(null);
-    setFormName("");
-    setFormSubject("");
-    setFormHtml("");
-    setExistingAttachments([]);
-    setNewFiles([]);
-    setDialogOpen(true);
+    router.push(`${TEMPLATE_PAGE_PREFIX}novo`);
   };
 
-  const openEdit = async (tpl: EmailTemplate) => {
-    setEditId(tpl.id);
-    setFormName(tpl.name);
-    setFormSubject(tpl.subject);
-    setFormHtml("");
-    setExistingAttachments(tpl.attachments || []);
-    setNewFiles([]);
-    setDialogOpen(true);
-    setLoadingTemplateBody(true);
-    try {
-      const full = await fetchEmailTemplate(tpl.id);
-      setFormHtml(full.html || "");
-      setExistingAttachments(full.attachments || []);
-    } catch {
-      toast.error(t("loadError"));
-    } finally {
-      setLoadingTemplateBody(false);
-    }
-  };
-
-  const handleSave = async () => {
-    if (!formName.trim() || !formSubject.trim() || !formHtml.trim()) {
-      toast.error(t("requiredFields"));
-      return;
-    }
-    setSaving(true);
-    try {
-      if (editId) {
-        await updateEmailTemplate(editId, {
-          name: formName.trim(),
-          subject: formSubject.trim(),
-          html: formHtml,
-          keepAttachmentKeys: existingAttachments.map(a => a.key),
-          files: newFiles,
-        });
-      } else {
-        await createEmailTemplate({
-          name: formName.trim(),
-          subject: formSubject.trim(),
-          html: formHtml,
-          files: newFiles,
-        });
-      }
-      toast.success(t("saved"));
-      setDialogOpen(false);
-      loadTemplates(templateSearch);
-    } catch {
-      toast.error(t("saveError"));
-    } finally {
-      setSaving(false);
-    }
+  const openEdit = (tpl: EmailTemplate) => {
+    router.push(`${TEMPLATE_PAGE_PREFIX}${tpl.id}`);
   };
 
   const handleDelete = async () => {
@@ -219,36 +126,7 @@ export default function EmailMarketingPage() {
 
   const openTest = (templateId: number) => {
     setTestTemplateId(templateId);
-    setTestTo("");
-    setTestOptOutConfirm(null);
-    if (emailChannels.length > 0 && !testChannelId) {
-      setTestChannelId(String(emailChannels[0].id));
-    }
     setTestOpen(true);
-  };
-
-  const handleTestSend = async (override = false) => {
-    if (!testTemplateId || !testChannelId || !testTo.trim()) return;
-    setTestSending(true);
-    try {
-      await testSendEmailTemplate(testTemplateId, {
-        whatsappId: Number(testChannelId),
-        to: testTo.trim(),
-        ...(override ? { allowOptOutOverride: true } : {}),
-      });
-      toast.success(t("testSent"));
-      setTestOpen(false);
-      setTestOptOutConfirm(null);
-    } catch (err: unknown) {
-      const resp = (err as { response?: { status?: number; data?: { error?: string; optOut?: { createdAt?: string } } } })?.response;
-      if (resp?.status === 409 && resp.data?.error === "ERR_EMAIL_OPTOUT") {
-        setTestOptOutConfirm(resp.data?.optOut?.createdAt || "");
-      } else {
-        toast.error(t("saveError"));
-      }
-    } finally {
-      setTestSending(false);
-    }
   };
 
   const handleBlacklistAdd = async () => {
@@ -329,8 +207,6 @@ export default function EmailMarketingPage() {
     if (reason === "bounce") return t("reasonBounce");
     return t("reasonManual");
   };
-
-  const previewHtml = useMemo(() => sanitize(formHtml || ""), [formHtml]);
 
   if (!hasAccess) return <AccessDenied />;
 
@@ -414,7 +290,16 @@ export default function EmailMarketingPage() {
                 ) : (
                   templates.map(tpl => (
                     <TableRow key={tpl.id}>
-                      <TableCell className="font-medium">{tpl.name}</TableCell>
+                      <TableCell className="font-medium">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span>{tpl.name}</span>
+                          {tpl.editorVersion ? (
+                            <Badge variant="outline" className="px-1.5 py-0 text-[10px] font-medium text-muted-foreground">
+                              {t("badgeVisual")}
+                            </Badge>
+                          ) : null}
+                        </div>
+                      </TableCell>
                       <TableCell className="hidden max-w-[280px] truncate md:table-cell">{tpl.subject}</TableCell>
                       <TableCell className="hidden sm:table-cell">
                         {(tpl.attachments?.length || 0) > 0 && (
@@ -546,203 +431,8 @@ export default function EmailMarketingPage() {
         </TabsContent>
       </Tabs>
 
-      {/* ── Dialog criar/editar modelo ─────────────────────────────────── */}
-      <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
-        <DialogContent className="flex max-h-[92dvh] w-[96vw] max-w-3xl flex-col overflow-hidden p-0">
-          <DialogHeader className="border-b px-6 py-4">
-            <DialogTitle>{editId ? t("dialogEditTitle") : t("dialogNewTitle")}</DialogTitle>
-          </DialogHeader>
-          <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-6 py-4">
-            <div className="grid gap-4 sm:grid-cols-2">
-              <div className="space-y-1.5">
-                <Label>{t("fieldName")}</Label>
-                <Input value={formName} onChange={e => setFormName(e.target.value)} maxLength={255} />
-              </div>
-              <div className="space-y-1.5">
-                <Label>{t("fieldSubject")}</Label>
-                <Input value={formSubject} onChange={e => setFormSubject(e.target.value)} />
-              </div>
-            </div>
-
-            <div className="space-y-1.5">
-              <div className="flex items-center justify-between">
-                <Label>{t("fieldHtml")}</Label>
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  className="gap-1.5"
-                  onClick={() => setPreviewOpen(true)}
-                  disabled={!formHtml.trim()}
-                >
-                  <Eye className="h-3.5 w-3.5" />
-                  {t("preview")}
-                </Button>
-              </div>
-              {loadingTemplateBody ? (
-                <div className="flex min-h-[260px] items-center justify-center rounded-md border">
-                  <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
-                </div>
-              ) : (
-                <EmailHtmlEditor value={formHtml} onChange={setFormHtml} />
-              )}
-              <p className="text-xs text-muted-foreground">{t("variablesNote")}</p>
-            </div>
-
-            <div className="space-y-1.5">
-              <Label>{t("attachments")}</Label>
-              <div className="space-y-2">
-                {existingAttachments.map(att => (
-                  <div key={att.key} className="flex items-center justify-between gap-2 rounded-md border px-3 py-1.5 text-sm">
-                    <span className="flex min-w-0 items-center gap-2">
-                      <Paperclip className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-                      <span className="truncate">{att.filename}</span>
-                      <span className="shrink-0 text-xs text-muted-foreground">{formatBytes(att.size)}</span>
-                    </span>
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="icon"
-                      className="h-7 w-7 text-destructive"
-                      onClick={() => setExistingAttachments(prev => prev.filter(a => a.key !== att.key))}
-                      aria-label={t("delete")}
-                    >
-                      <Trash2 className="h-3.5 w-3.5" />
-                    </Button>
-                  </div>
-                ))}
-                {newFiles.map((f, i) => (
-                  <div key={`${f.name}-${i}`} className="flex items-center justify-between gap-2 rounded-md border border-dashed px-3 py-1.5 text-sm">
-                    <span className="flex min-w-0 items-center gap-2">
-                      <Paperclip className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-                      <span className="truncate">{f.name}</span>
-                      <span className="shrink-0 text-xs text-muted-foreground">{formatBytes(f.size)}</span>
-                    </span>
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="icon"
-                      className="h-7 w-7 text-destructive"
-                      onClick={() => setNewFiles(prev => prev.filter((_, j) => j !== i))}
-                      aria-label={t("delete")}
-                    >
-                      <Trash2 className="h-3.5 w-3.5" />
-                    </Button>
-                  </div>
-                ))}
-                <label className="inline-flex cursor-pointer items-center gap-1.5 text-sm text-primary hover:underline">
-                  <Plus className="h-4 w-4" />
-                  {t("addAttachment")}
-                  <input
-                    type="file"
-                    multiple
-                    className="sr-only"
-                    accept=".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.csv,.txt,.rtf,.odt,.ods,.png,.jpg,.jpeg,.gif,.webp,.bmp,.mp3,.ogg,.wav,.mp4,.zip,.ics,.vcf"
-                    onChange={e => {
-                      const files = Array.from(e.target.files || []);
-                      const tooBig = files.filter(f => f.size > 25 * 1024 * 1024);
-                      if (tooBig.length > 0) toast.error(t("attachmentTooBig"));
-                      setNewFiles(prev => [...prev, ...files.filter(f => f.size <= 25 * 1024 * 1024)]);
-                      e.target.value = "";
-                    }}
-                  />
-                </label>
-                <p className="text-xs text-muted-foreground">{t("attachmentsHint")}</p>
-              </div>
-            </div>
-          </div>
-          <DialogFooter className="border-t px-6 py-4">
-            <Button variant="outline" onClick={() => setDialogOpen(false)}>{t("cancel")}</Button>
-            <Button onClick={handleSave} disabled={saving} className="gap-1.5">
-              {saving && <Loader2 className="h-4 w-4 animate-spin" />}
-              {t("save")}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      {/* ── Preview ────────────────────────────────────────────────────── */}
-      <Dialog open={previewOpen} onOpenChange={setPreviewOpen}>
-        <DialogContent className="flex max-h-[92dvh] w-[96vw] max-w-2xl flex-col overflow-hidden p-0">
-          <DialogHeader className="border-b px-6 py-4">
-            <DialogTitle>{t("previewTitle")}</DialogTitle>
-          </DialogHeader>
-          <div className="min-h-0 flex-1 overflow-y-auto p-4">
-            {/* sandbox SEM allow-scripts (padrão do render de e-mail recebido) */}
-            <iframe
-              title={t("previewTitle")}
-              sandbox="allow-same-origin"
-              srcDoc={previewHtml}
-              className="h-[60vh] w-full rounded-md border bg-white"
-            />
-          </div>
-        </DialogContent>
-      </Dialog>
-
       {/* ── Envio de teste ─────────────────────────────────────────────── */}
-      <Dialog open={testOpen} onOpenChange={o => { setTestOpen(o); if (!o) setTestOptOutConfirm(null); }}>
-        <DialogContent className="w-[calc(100vw-2rem)] max-w-md">
-          <DialogHeader>
-            <DialogTitle>{t("testSendTitle")}</DialogTitle>
-          </DialogHeader>
-          <div className="space-y-4">
-            <div className="space-y-1.5">
-              <Label>{t("testChannel")}</Label>
-              <Select value={testChannelId} onValueChange={setTestChannelId}>
-                <SelectTrigger>
-                  <SelectValue placeholder={t("testChannel")} />
-                </SelectTrigger>
-                <SelectContent>
-                  {emailChannels.map(c => (
-                    <SelectItem key={c.id} value={String(c.id)}>{c.name}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-              {emailChannels.length === 0 && (
-                <p className="text-xs text-destructive">{t("noChannels")}</p>
-              )}
-            </div>
-            <div className="space-y-1.5">
-              <Label>{t("testTo")}</Label>
-              <Input
-                type="email"
-                value={testTo}
-                onChange={e => {
-                  setTestTo(e.target.value);
-                  // Trocou o destinatário: a confirmação de opt-out anterior não
-                  // vale para o novo endereço (auditoria pós-impl. #7)
-                  setTestOptOutConfirm(null);
-                }}
-                placeholder="nome@dominio.com"
-              />
-            </div>
-            <p className="text-xs text-muted-foreground">{t("testHint")}</p>
-            {testOptOutConfirm !== null && (
-              <div className="rounded-md border border-amber-500/50 bg-amber-500/10 p-3 text-sm">
-                <p>{t("optOutWarnDesc", { date: testOptOutConfirm ? new Date(testOptOutConfirm).toLocaleDateString() : "—" })}</p>
-              </div>
-            )}
-          </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setTestOpen(false)}>{t("cancel")}</Button>
-            {testOptOutConfirm !== null ? (
-              <Button variant="destructive" disabled={testSending} onClick={() => handleTestSend(true)} className="gap-1.5">
-                {testSending && <Loader2 className="h-4 w-4 animate-spin" />}
-                {t("optOutSendAnyway")}
-              </Button>
-            ) : (
-              <Button
-                disabled={testSending || !testChannelId || !testTo.trim()}
-                onClick={() => handleTestSend(false)}
-                className="gap-1.5"
-              >
-                {testSending && <Loader2 className="h-4 w-4 animate-spin" />}
-                {t("testSendAction")}
-              </Button>
-            )}
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      <EmailTemplateTestDialog open={testOpen} onOpenChange={setTestOpen} templateId={testTemplateId} />
 
       {/* ── Import blacklist ───────────────────────────────────────────── */}
       <Dialog open={importOpen} onOpenChange={setImportOpen}>

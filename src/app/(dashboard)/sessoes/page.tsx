@@ -5,6 +5,8 @@ import { formatDateTime } from "@/lib/format";
 import React, { useState, useEffect, useCallback, useRef } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { sanitize } from "@/lib/sanitize";
+import { canonicalChannelType, getEffectiveTypeLimit } from "@/lib/channel-types";
+import { channelCreateErrorKey } from "@/lib/channel-create-error";
 import {
   CHATGPT_MODELS, OPENAI_VOICES,
   GROK_MODELS, GEMINI_MODELS, DEEPSEEK_MODELS,
@@ -177,6 +179,7 @@ import { fetchAppWooCommerces, registerWooCommerceWebhooks, fetchAppNuvemshops, 
 import api from "@/lib/api";
 import { cn, isValidHttpUrl } from "@/lib/utils";
 import { DiagnoseModal } from "@/components/sessoes/diagnose-modal";
+import { WabaSendHealthNotice } from "@/components/sessoes/waba-send-health-notice";
 import { FarewellMediaManager, FAREWELL_MEDIA_TYPES } from "@/components/sessoes/farewell-media-manager";
 import { InactivityConfigManager } from "@/components/sessoes/inactivity-config-manager";
 import { FarewellTemplateManager, FAREWELL_TEMPLATE_TYPES } from "@/components/sessoes/farewell-template-manager";
@@ -203,6 +206,11 @@ import { HijackTakeoverDialog } from "@/components/common/hijack-takeover-dialog
 import { Dialog360CreateChannelDialog } from "@/components/sessoes/dialog360-create-channel-dialog";
 import { GupshupCreateChannelDialog } from "@/components/sessoes/gupshup-create-channel-dialog";
 import { getGupshupChannel } from "@/services/gupshup";
+import { fetchAiAgents, type AiAgentSummary } from "@/services/ai-agents";
+import {
+  PlatformAiSelector, isPlatformAiModelAvailable, usePlatformAiEnabled,
+} from "@/components/ai-credits/platform-ai-selector";
+import { AI_PLATFORM_KEY_SENTINEL, isPlatformKey } from "@/services/ai-credits";
 import { BspWebhookInfoCard } from "@/components/sessoes/bsp-webhook-info-card";
 import { GupshupChannelDataEditor } from "@/components/sessoes/gupshup-channel-data-editor";
 import { Dialog360ChannelDataEditor } from "@/components/sessoes/dialog360-channel-data-editor";
@@ -343,7 +351,7 @@ const CHANNEL_TYPES: { labelKey: string; value: string; group: string }[] = [
   { labelKey: "channelTypeNuvemshop", value: "nuvemshop", group: "outros" },
 ];
 
-// Settings keys for AI integrations (mirrors Vue's listarConfiguracoes)
+// Settings keys for AI integrations (mirrors the legacy front's listarConfiguracoes)
 interface IntegrationSettings {
   chatgpt: boolean;
   typebot: boolean;
@@ -369,6 +377,23 @@ function supportsAI(type: string) {
 }
 
 const QR_TYPES = ["baileys", "zapo", "whatsapp", "meow", "evo", "evogo", "zapi", "uazapi"];
+
+// Motivos que o backend devolve quando o QR do Z-API nao pode ser gerado: canal
+// sem Number ID (Instance ID) ou API Token, credenciais do provedor ausentes, ou
+// resposta sem QR. Antes disso a rota respondia 200 e a tela ficava sem QR e sem
+// explicacao. Codigo desconhecido devolve null e o chamador mantem o
+// comportamento antigo (backend antigo nao manda motivo nenhum).
+const ZAPI_QR_ERROR_KEYS: Record<string, string> = {
+  ERR_ZAPI_MISSING_INSTANCE_ID: "zapiMissingInstanceId",
+  ERR_ZAPI_MISSING_TOKEN: "zapiMissingToken",
+  ERR_ZAPI_MISSING_HOST: "zapiMissingHost",
+  ERR_ZAPI_QR_UNAVAILABLE: "zapiQrUnavailable",
+};
+
+function qrRequestErrorKey(err: unknown): string | null {
+  const code = (err as { response?: { data?: { error?: string } } })?.response?.data?.error;
+  return (code && ZAPI_QR_ERROR_KEYS[code]) || null;
+}
 
 const WAVOIP_CARD_TYPES = ["whatsapp", "baileys", "meow", "evo", "evogo", "uazapi", "zapi"];
 
@@ -1068,6 +1093,7 @@ function SessionCard({
               platformCloudLabel={t("cloudApiBadgeLabel")}
               platformCoexTooltip={t("coexBadgeTooltip")}
               platformCloudTooltip={t("cloudApiBadgeTooltip")}
+              hideSendHealth
             />
           )}
           {item.type === "dialog360" && item.status === "CONNECTED" && (
@@ -1435,6 +1461,7 @@ function SessionCard({
           <div className="flex-1 min-w-0">
             <SessionStatusBadge status={item.status} />
             <StatusLabel item={item} onRenewActivation={onRefreshActivationTicket} />
+            {item.type === "waba" && <WabaSendHealthNotice whatsappId={item.id} variant="card" />}
           </div>
         </div>
         <p className="text-xs text-muted-foreground mt-2">{t("updatedAt")} {updatedAt}</p>
@@ -1782,7 +1809,14 @@ function QrCodeModal({
     setDisablingPairing(true);
     try {
       await updateWhatsapp(channel.id, { wppUser: "" });
-      try { await requestNewQrCode(channel.id); } catch { /* QR pode chegar via socket */ }
+      try {
+        await requestNewQrCode(channel.id);
+      } catch (qrErr) {
+        // Motivo conhecido (credencial do canal faltando) tem de aparecer; nos
+        // demais casos o QR ainda pode chegar via socket.
+        const errorKey = qrRequestErrorKey(qrErr);
+        if (errorKey) toast.error(t(errorKey as any));
+      }
       setForceQrMode(true);
     } catch {
       toast.error(t("errorRequestingQr"));
@@ -2177,6 +2211,9 @@ function emptyForm(): Omit<Partial<Whatsapp>, "messageQueue"> & { smtpConfig?: S
     userId: null,
     hybridMode: "disabled",
     linkedChannelId: null,
+    hybridNativeInteractive: false,
+    mlEventsEnabled: false,
+    igCommentsCreateTickets: true,
     baileysLib: "v7",
     baileysAuthStore: "files",
     tokenAPI: "",
@@ -2210,7 +2247,7 @@ function emptyForm(): Omit<Partial<Whatsapp>, "messageQueue"> & { smtpConfig?: S
       oauth2: { client_id: "", client_secret: "", redirect_uri: "" },
     },
     messageQueue: undefined,
-    // Feature toggles — defaults mirror Vue's ModalWhatsapp
+ // Feature toggles — defaults mirror the legacy front's ModalWhatsapp
     farewellMessage: "",
     farewellMediaUrls: [] as string[],
     farewellTemplate: null as any,
@@ -2273,6 +2310,7 @@ function ChannelModal({
   const tHijack = useTranslations("channelHijack");
   const tCommon = useTranslations("common");
   const tGpt = useTranslations("chatGptPage");
+  const tAiAgents = useTranslations("aiAgents");
   const isEdit = !!(initial?.id);
   const profilePicHeader = isEdit && initial?.profilePic &&
     initial.profilePic !== "disabled" &&
@@ -2282,6 +2320,31 @@ function ChannelModal({
     : null;
   type FormType = Omit<Partial<Whatsapp>, "messageQueue"> & { smtpConfig?: SmtpConfig; messageQueue?: string; emailSignature?: string };
   const [form, setForm] = useState<FormType>(emptyForm());
+  // IA da plataforma na seção ChatGPT: o canal consome do saldo pré-pago em vez de
+  // chave própria. Sem o recurso liberado na empresa o seletor não renderiza e o modo
+  // é SEMPRE falso — a seção fica como sempre foi, inclusive para um canal já gravado
+  // nesse modo (o campo de chave mostra o marcador, que não é segredo, e o save o
+  // mantém intacto, como em qualquer front antigo).
+  const platformAiEnabled = usePlatformAiEnabled();
+  // O modo vive no PRÓPRIO campo de chave (é o marcador que o servidor entende), sem
+  // estado paralelo: abrir um canal salvo assim já começa em modo plataforma. A seção
+  // ChatGPT só existe com a integração ligada e canal que suporta IA — fora dela o
+  // modo não vale, para o payload nunca gravar o marcador de uma seção que o admin
+  // não viu.
+  const chatgptPlatformMode =
+    platformAiEnabled &&
+    integrationSettings.chatgpt &&
+    supportsAI(String(form.type || "")) &&
+    isPlatformKey(form.chatgptApiKey);
+  // Modelo guardado do OUTRO modo, para a troca ida-e-volta não perder o que estava
+  // configurado. Vive FORA do formulário (nunca entra no payload) e zera a cada
+  // abertura do modal.
+  const chatgptModelByMode = useRef<string | null>(null);
+  // Mesma ideia para a CHAVE: o marcador ocupa o campo em modo plataforma, então voltar
+  // para chave própria precisa devolver a chave que estava salva. Sem isto, experimentar
+  // a plataforma e desistir apagava a chave do canal no save (o campo vazio é enviado de
+  // propósito para permitir limpar), e o ChatGPT daquele canal parava de funcionar.
+  const chatgptApiKeyOwnMode = useRef<string | null>(null);
   // Validacao inline do submit: espelha os 4 gates do handleSubmit (toast permanece).
   // Chave por campo -> mensagem; o erro some ao digitar no campo e trocar o tipo de
   // canal limpa todos (o form re-renderiza outro conjunto de campos).
@@ -2306,6 +2369,9 @@ function ChannelModal({
   };
   const [showPairingCode, setShowPairingCode] = useState(false);
   const [loading, setLoading] = useState(false);
+  // Sonda "Agentes de IA": null = backend sem o recurso (ou carga pendente/falha) —
+  // a seção não renderiza e o campo aiAgentId nunca entra no payload (backend antigo).
+  const [aiAgents, setAiAgents] = useState<AiAgentSummary[] | null>(null);
   const [oauthCooldownUntil, setOauthCooldownUntil] = useState<number | null>(null);
   const [hijackState, setHijackState] = useState<MetaProxyHijackPayload | null>(null);
   const [hijackLoading, setHijackLoading] = useState(false);
@@ -2465,6 +2531,16 @@ function ChannelModal({
       setInfiniteChoice(false);
       // Abrir/reabrir o modal nunca herda erros de validacao da sessao anterior
       setFormErrors({});
+      // Nem o modelo lembrado da outra forma de IA da sessao anterior do modal
+      chatgptModelByMode.current = null;
+      // Idem para a chave: cada abertura parte do que o servidor devolveu neste canal.
+      chatgptApiKeyOwnMode.current = null;
+      // Sonda de Agentes de IA (1x por abertura): 404/erro = backend sem o recurso →
+      // seção oculta e aiAgentId fora do payload (rollout aditivo, sem regressão).
+      setAiAgents(null);
+      fetchAiAgents()
+        .then((list) => setAiAgents(Array.isArray(list) ? list : []))
+        .catch(() => setAiAgents(null));
       const rawVer = initial?.wabaVersion || "";
       const strippedVer = rawVer.replace(/^v/i, "");
       setManualWabaVersion(!!strippedVer && !["17.0","18.0","19.0","20.0","21.0","22.0","23.0","24.0","25.0"].includes(strippedVer));
@@ -2633,7 +2709,7 @@ function ChannelModal({
     function handleProxyMessage(event: MessageEvent) {
       if (event.origin !== OAUTH_PROXY_URL) return;
       const metaExpectedOrigin = OAUTH_PROXY_URL;
-      const { type, error, data: msgData, hijack: msgHijack } = (event.data || {}) as { type?: string; error?: string; data?: any; hijack?: any };
+      const { type, error, errorCode, data: msgData, hijack: msgHijack } = (event.data || {}) as { type?: string; error?: string; errorCode?: string | null; data?: any; hijack?: any };
       if (type === "proxy:ready") {
         const popup = proxyPopupRef.current;
         if (!popup || popup.closed) return;
@@ -2704,7 +2780,8 @@ function ChannelModal({
                   onClose();
                 } catch (e: any) {
                   const errCode = e?.data?.error || e?.response?.data?.error || e?.message || "";
-                  toast.error(errCode || t("errorSaving"));
+                  const key = channelCreateErrorKey(errCode);
+                  toast.error(key ? t(key) : (errCode || t("errorSaving")));
                 }
               }
             : undefined;
@@ -2717,7 +2794,10 @@ function ChannelModal({
             callbackUrl:  msgHijack.callbackUrl || null,
           }, retryFn);
         } else {
-          toast.error(error || t("waOauthError"));
+          // Proxy novo manda errorCode; proxy antigo so a mensagem (que pode ser o
+          // proprio codigo) — os dois passam pelo mesmo mapa.
+          const key = channelCreateErrorKey(errorCode || error);
+          toast.error(key ? t(key) : (error || t("waOauthError")));
           setOauthFailed(true);
         }
       }
@@ -2934,6 +3014,31 @@ function ChannelModal({
     if (k === "type") setFormErrors((prev) => (Object.keys(prev).length ? {} : prev));
     else if (k === "name" || k === "tokenAPI" || k === "linkedChannelId") clearFormError(k);
     setForm((prev) => ({ ...prev, [key]: value }));
+  }
+
+  // Troca entre chave própria e IA da plataforma na seção ChatGPT. O marcador do modo
+  // plataforma ocupa o campo de chave, então voltar para chave própria o LIMPA: ele
+  // nunca pode aparecer no campo como se fosse uma chave digitada pelo admin. O modelo
+  // de cada modo é lembrado à parte (`chatgptModelByMode`): o nome de modelo do
+  // catálogo da plataforma não é o mesmo de uma chave própria, e trocar de modo e
+  // voltar não pode deixar o canal com um modelo que a outra ponta não conhece.
+  function handleChatgptPlatformAiChange(next: boolean) {
+    const currentModel = (form.chatgptModel as string) || "";
+    const remembered = chatgptModelByMode.current;
+    chatgptModelByMode.current = currentModel;
+    // Indo para a plataforma, guarda a chave que estava no campo para poder devolvê-la;
+    // voltando, restaura a guardada (nunca o marcador). `??` porque "" é valor lembrado:
+    // canal que não tinha chave continua sem chave.
+    const currentKey = (form.chatgptApiKey as string) || "";
+    if (next) chatgptApiKeyOwnMode.current = isPlatformKey(currentKey) ? chatgptApiKeyOwnMode.current : currentKey;
+    const restoredKey = chatgptApiKeyOwnMode.current ?? "";
+    setForm((prev) => ({
+      ...prev,
+      chatgptApiKey: next ? AI_PLATFORM_KEY_SENTINEL : restoredKey,
+      // 1ª troca do modal mantém o modelo atual (o seletor avisa se ele não está no
+      // catálogo, sem trocar nada sozinho); `??` porque "" é um valor lembrado
+      chatgptModel: remembered ?? currentModel,
+    }));
   }
 
   function setSmtpField(key: string, value: unknown) {
@@ -3196,6 +3301,21 @@ function ChannelModal({
       }
     }
 
+    // Canal que PASSA A USAR a IA da plataforma (novo, ou troca de chave própria para
+    // plataforma): o modelo tem de estar à venda, senão o canal salvaria armado para
+    // falhar a cada mensagem. Mesmo critério do servidor — canal que JÁ estava no modo
+    // plataforma não é conferido, porque o dono da instalação pode ter tirado o modelo
+    // do catálogo depois e o save não pode ficar refém disso. `null` = catálogo
+    // desconhecido aqui (não carregou): quem decide é o servidor.
+    if (
+      chatgptPlatformMode &&
+      !isPlatformKey(initial?.chatgptApiKey) &&
+      isPlatformAiModelAvailable((form.chatgptModel as string) || "", "chat") === false
+    ) {
+      toast.error(tAiAgents("errPlatformModelNotAllowed"));
+      return;
+    }
+
     // Todos os gates passaram — limpa residuos de tentativas anteriores
     setFormErrors((prev) => (Object.keys(prev).length ? {} : prev));
 
@@ -3325,6 +3445,29 @@ function ChannelModal({
       Object.keys(payload).forEach((k) => {
         if (payload[k] === undefined) delete payload[k];
       });
+      // Agente de IA: o campo SÓ viaja quando a sonda carregou (backend com o recurso).
+      // Em backend antigo nada muda no payload — rollout aditivo sem regressão.
+      if (aiAgents === null) delete payload.aiAgentId;
+      // IA da plataforma na seção ChatGPT: vai o marcador no lugar da chave e os campos
+      // que só existem com chave própria são LIMPOS — organização e endereço próprio não
+      // valem nesse modo, e um Assistant ID esquecido mandaria o atendimento para a API
+      // de assistentes com a chave errada. O que ficou digitado segue no formulário (só
+      // não é enviado), para voltar se o admin desistir da troca.
+      if (chatgptPlatformMode) {
+        payload.chatgptApiKey = AI_PLATFORM_KEY_SENTINEL;
+        payload.chatgptOrganizationId = "";
+        payload.chatgptBaseUrl = "";
+        payload.assistantId = "";
+      } else if (
+        platformAiEnabled &&
+        isPlatformKey(payload.chatgptApiKey) &&
+        !supportsAI(String(form.type || ""))
+      ) {
+        // Marcador sobrando de uma escolha feita ANTES de trocar o tipo do canal (o
+        // tipo só é editável em canal novo, e a seção ChatGPT não existe em tipo sem
+        // IA): sai do payload em vez de gravar um modo que este canal não usa.
+        delete payload.chatgptApiKey;
+      }
       // Normaliza wabaVersion: remove prefixo "v" antes de enviar ao backend (backend faz v${wabaVersion})
       if (payload.wabaVersion) {
         payload.wabaVersion = (payload.wabaVersion as string).replace(/^v/i, "");
@@ -3391,15 +3534,14 @@ function ChannelModal({
         return;
       }
       const errCode = d?.error || d?.message || "";
+      // Limite de conexoes / limite por tipo / tipo nao permitido: mapa unico,
+      // compartilhado com os listeners do popup OAuth.
+      const mappedKey = channelCreateErrorKey(errCode);
       // Canal de biblioteca (evo/evogo/meow/zapi/uazapi) sem host+token cadastrados:
       // o backend barra a criacao e o rotulo do tipo vem da propria lista da UI.
       const libLabelKey = CHANNEL_TYPES.find(c => c.value === form.type)?.labelKey;
-      const msg = errCode === "ERR_NO_PERMISSION_CONNECTIONS_LIMIT"
-        ? t("errorConnectionsLimit")
-        : errCode === "ERR_NO_PERMISSION_CHANNEL_TYPE_LIMIT"
-        ? t("errorChannelTypeLimit")
-        : errCode === "ERR_CHANNEL_TYPE_NOT_ALLOWED"
-        ? t("errorChannelTypeNotAllowed")
+      const msg = mappedKey
+        ? t(mappedKey)
         : errCode === "ERR_CHANNEL_LIB_NOT_CONFIGURED"
         ? t("errorChannelLibNotConfigured", {
             type: libLabelKey ? t(libLabelKey as any) : String(form.type || "")
@@ -3525,10 +3667,13 @@ function ChannelModal({
                     <SelectGroup key={group}>
                       <SelectLabel className="bg-muted text-muted-foreground text-xs uppercase tracking-wider px-3 py-1.5 mb-0.5">{t(groupLabelKey as Parameters<typeof t>[0])}</SelectLabel>
                       {items.map((ct) => {
-                        // "infinite" é pseudo-tipo de baileys: limite/uso contam como baileys
-                        const limitType = ct.value === "infinite" ? "baileys" : ct.value;
-                        const typeLimit = channelConnectionLimits[limitType];
-                        const typeCount = existingChannels.filter((w) => w.type === limitType).length;
+                        // "infinite" é pseudo-tipo de baileys: limite/uso contam como baileys.
+                        // Limite e contagem no tipo CANONICO (waba_oauth -> waba,
+                        // instagram_oauth -> instagram, facebook_oauth -> messenger, hub_* -> hub):
+                        // manual e via login dividem a mesma cota (0 = ilimitado).
+                        const limitType = canonicalChannelType(ct.value === "infinite" ? "baileys" : ct.value);
+                        const typeLimit = getEffectiveTypeLimit(channelConnectionLimits, limitType);
+                        const typeCount = existingChannels.filter((w) => canonicalChannelType(w.type) === limitType).length;
                         const atLimit = !!(typeLimit && typeLimit > 0 && typeCount >= typeLimit);
                         const INTEGRATION_REQUIRED_TYPES = ["evo", "evogo", "zapi", "uazapi", "hub", "mercadolivre", "olx", "linkedin", "youtube", "tiktok", "woocommerce", "dialog360", "gupshup"];
                         const needsIntegration = INTEGRATION_REQUIRED_TYPES.includes(ct.value);
@@ -3564,15 +3709,24 @@ function ChannelModal({
                                 </TooltipProvider>
                               )}
                               {typeLimit && typeLimit > 0 ? (
-                                atLimit ? (
-                                  <span className="ml-auto text-[10px] font-semibold text-destructive">
-                                    {t("channelTypeAtLimit")}
-                                  </span>
-                                ) : (
-                                  <span className="ml-auto text-[10px] text-muted-foreground">
-                                    {t("channelTypeUsage", { used: typeCount, max: typeLimit })}
-                                  </span>
-                                )
+                                <TooltipProvider>
+                                  <Tooltip>
+                                    <TooltipTrigger asChild>
+                                      {atLimit ? (
+                                        <span className="ml-auto text-[10px] font-semibold text-destructive">
+                                          {t("channelTypeAtLimit")}
+                                        </span>
+                                      ) : (
+                                        <span className="ml-auto text-[10px] text-muted-foreground">
+                                          {t("channelTypeUsage", { used: typeCount, max: typeLimit })}
+                                        </span>
+                                      )}
+                                    </TooltipTrigger>
+                                    <TooltipContent side="right">
+                                      <p className="max-w-[200px] text-xs">{t("channelTypeUsageTooltip")}</p>
+                                    </TooltipContent>
+                                  </Tooltip>
+                                </TooltipProvider>
                               ) : null}
                             </span>
                           </SelectItem>
@@ -3998,6 +4152,25 @@ function ChannelModal({
                     <p className="text-xs text-muted-foreground mt-1">{t("hybridLinkedCoexNote")}</p>
                   )}
                 </Field>
+              )}
+              {/* Coexistencia: por padrao botao/lista de sessao viram menu numerado e saem
+                  pela conexao vinculada; este interruptor mantem os interativos nativos
+                  pela API oficial (backend: Whatsapps.hybridNativeInteractive). */}
+              {form.hybridMode === "coexistence" && (
+                <div className="flex items-start justify-between gap-3 py-2">
+                  <div className="flex-1">
+                    <Label htmlFor="hybridNativeInteractive" className="cursor-pointer text-sm font-medium leading-snug">
+                      {t("hybridNativeInteractiveLabel")}
+                    </Label>
+                    <p className="text-xs text-muted-foreground mt-0.5">{t("hybridNativeInteractiveHint")}</p>
+                  </div>
+                  <Switch
+                    id="hybridNativeInteractive"
+                    checked={!!form.hybridNativeInteractive}
+                    onCheckedChange={(v) => setField("hybridNativeInteractive", v)}
+                    className="mt-0.5 flex-shrink-0"
+                  />
+                </div>
               )}
             </CollapseSection>
           )}
@@ -4632,7 +4805,12 @@ function ChannelModal({
                         // para permitir o user concluir o OAuth no popup.
                         try { onSaved(); } catch { /* nao critico */ }
                       } catch (err: any) {
-                        const msg = err?.response?.data?.message || err?.message || t("oauth2StartError");
+                        // api.ts rejeita com o response: o código vem em err.data.error
+                        const errCode = err?.data?.error || err?.response?.data?.error || "";
+                        const key = channelCreateErrorKey(errCode);
+                        const msg = key
+                          ? t(key)
+                          : err?.response?.data?.message || err?.data?.message || err?.message || t("oauth2StartError");
                         toast.error(msg);
                         return;
                       }
@@ -5333,6 +5511,66 @@ function ChannelModal({
             </CollapseSection>
           )}
 
+          {/* Instagram — comentarios abrem atendimento (Whatsapps.igCommentsCreateTickets).
+              null/undefined = ligado (default backend; backend sem a migration). */}
+          {type === "instagram" && (
+            <CollapseSection title={t("igCommentsSection")} defaultOpen={false}>
+              <div className="flex items-start justify-between gap-3 py-2">
+                <div className="flex-1">
+                  <span className="flex items-center gap-1.5">
+                    <Label htmlFor="igCommentsCreateTickets" className="cursor-pointer text-sm font-medium leading-snug">
+                      {t("igCommentsLabel")}
+                    </Label>
+                    <TooltipProvider>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <button type="button" className="text-muted-foreground hover:text-foreground" aria-label={t("igCommentsLabel")}>
+                            <HelpCircle className="h-3.5 w-3.5" />
+                          </button>
+                        </TooltipTrigger>
+                        <TooltipContent className="max-w-xs">
+                          <p>{t("igCommentsTooltip")}</p>
+                        </TooltipContent>
+                      </Tooltip>
+                    </TooltipProvider>
+                  </span>
+                  <p className="text-xs text-muted-foreground mt-0.5">{t("igCommentsHint")}</p>
+                </div>
+                <Switch
+                  id="igCommentsCreateTickets"
+                  checked={form.igCommentsCreateTickets !== false}
+                  onCheckedChange={(v) => setField("igCommentsCreateTickets", v)}
+                  className="mt-0.5 flex-shrink-0"
+                />
+              </div>
+            </CollapseSection>
+          )}
+
+          {/* Mercado Livre — reclamacoes (claims) e pedidos (orders_v2) */}
+          {type === "mercadolivre" && (
+            <CollapseSection title={t("mercadoLivreSection")} defaultOpen={false}>
+              <div className="flex items-start justify-between gap-3 py-2">
+                <div className="flex-1">
+                  <Label htmlFor="mlEventsEnabled" className="cursor-pointer text-sm font-medium leading-snug">
+                    {t("mlEventsLabel")}
+                  </Label>
+                  <p className="text-xs text-muted-foreground mt-0.5">{t("mlEventsHint")}</p>
+                </div>
+                <Switch
+                  id="mlEventsEnabled"
+                  checked={!!form.mlEventsEnabled}
+                  onCheckedChange={(v) => setField("mlEventsEnabled", v)}
+                  className="mt-0.5 flex-shrink-0"
+                />
+              </div>
+              {!!form.mlEventsEnabled && (
+                <div className="rounded-md bg-info/10 border border-info/30 p-3 text-xs text-foreground">
+                  {t("mlEventsNote")}
+                </div>
+              )}
+            </CollapseSection>
+          )}
+
           {/* Farewell Message */}
           {(["whatsapp","baileys","zapo","meow","evo","evogo","zapi","uazapi","waba","dialog360","gupshup","instagram","messenger","webchat","mercadolivre","olx","linkedin","youtube","tiktok","woocommerce","nuvemshop","telegram"].includes(type) || isHubType(type)) && (
             <CollapseSection title={t("farewellSection")} defaultOpen={false}>
@@ -5376,28 +5614,72 @@ function ChannelModal({
             </CollapseSection>
           )}
 
+          {/* Agente de IA — renderiza SÓ quando a sonda de listagem respondeu (backend novo).
+              Precedência (D9): com agente vinculado, ele assume o atendimento no lugar do
+              fluxo padrão do canal — o aviso abaixo aparece quando os dois estão configurados. */}
+          {aiAgents !== null && supportsAI(type) && (
+            <CollapseSection title={t("aiAgentSection.title")} defaultOpen={false}>
+              <Field label={t("aiAgentSection.select")}>
+                <SearchableSelect
+                  options={[
+                    { value: "__none__", label: t("aiAgentSection.none") },
+                    ...aiAgents.map((a) => ({ value: String(a.id), label: a.name })),
+                  ]}
+                  value={(form as any).aiAgentId != null ? String((form as any).aiAgentId) : "__none__"}
+                  onValueChange={(v) =>
+                    setField("aiAgentId" as any, (v === "__none__" ? null : Number(v)) as any)
+                  }
+                  placeholder={isEdit ? t("aiAgentSection.select") : t("availableAfterCreate")}
+                  disabled={!isEdit}
+                />
+                <p className="text-[11px] text-muted-foreground mt-1">{t("aiAgentSection.tooltip")}</p>
+              </Field>
+              {(form as any).aiAgentId != null && form.chatFlowId != null && (
+                <Alert variant="warning">
+                  <AlertTriangle className="h-4 w-4" />
+                  <AlertDescription>{t("aiAgentSection.precedenceWarning")}</AlertDescription>
+                </Alert>
+              )}
+            </CollapseSection>
+          )}
+
           {/* ChatGPT */}
           {integrationSettings.chatgpt && supportsAI(type) && (
             <CollapseSection title="ChatGPT" defaultOpen={false}>
-              <Field label="ChatGPT API Key">
-                <Input
-                  value={(form.chatgptApiKey as string) || ""}
-                  onChange={(e) => setField("chatgptApiKey", e.target.value)}
-                  placeholder="sk-..."
-                />
-              </Field>
-              <OpenAIBaseUrlField
-                value={(form.chatgptBaseUrl as string) || ""}
-                onChange={(v) => setField("chatgptBaseUrl", v)}
-                context="channel"
+              {/* Não renderiza nada (nem faz request) sem o recurso liberado na empresa.
+                  No modo plataforma é ele que mostra o modelo. */}
+              <PlatformAiSelector
+                value={chatgptPlatformMode}
+                onChange={handleChatgptPlatformAiChange}
+                showModel
+                modelKind="chat"
+                model={(form.chatgptModel as string) || ""}
+                onModelChange={(modelId) => setField("chatgptModel", modelId)}
+                disabled={loading}
               />
-              <Field label="Organization Key (opcional)">
-                <Input
-                  value={(form.chatgptOrganizationId as string) || ""}
-                  onChange={(e) => setField("chatgptOrganizationId", e.target.value)}
-                  placeholder="org-..."
-                />
-              </Field>
+              {!chatgptPlatformMode && (
+                <>
+                  <Field label="ChatGPT API Key">
+                    <Input
+                      value={(form.chatgptApiKey as string) || ""}
+                      onChange={(e) => setField("chatgptApiKey", e.target.value)}
+                      placeholder="sk-..."
+                    />
+                  </Field>
+                  <OpenAIBaseUrlField
+                    value={(form.chatgptBaseUrl as string) || ""}
+                    onChange={(v) => setField("chatgptBaseUrl", v)}
+                    context="channel"
+                  />
+                  <Field label="Organization Key (opcional)">
+                    <Input
+                      value={(form.chatgptOrganizationId as string) || ""}
+                      onChange={(e) => setField("chatgptOrganizationId", e.target.value)}
+                      placeholder="org-..."
+                    />
+                  </Field>
+                </>
+              )}
               <Field label={t("stopWord")}>
                 <Input
                   value={(form.chatgptOff as string) || ""}
@@ -5413,36 +5695,40 @@ function ChannelModal({
                   rows={4}
                 />
               </Field>
-              <Field label="Assistant ID (opcional)">
-                <Input
-                  value={(form.assistantId as string) || ""}
-                  onChange={(e) => setField("assistantId", e.target.value)}
-                  placeholder="asst_..."
-                />
-              </Field>
-              {(form.assistantId as string)?.trim() && (
-                <Alert variant="warning">
-                  <AlertTriangle className="h-4 w-4" />
-                  <AlertTitle>{tGpt("assistantMigrationTitle")}</AlertTitle>
-                  <AlertDescription>{tGpt("assistantMigrationDesc")}</AlertDescription>
-                </Alert>
+              {!chatgptPlatformMode && (
+                <>
+                  <Field label="Assistant ID (opcional)">
+                    <Input
+                      value={(form.assistantId as string) || ""}
+                      onChange={(e) => setField("assistantId", e.target.value)}
+                      placeholder="asst_..."
+                    />
+                  </Field>
+                  {(form.assistantId as string)?.trim() && (
+                    <Alert variant="warning">
+                      <AlertTriangle className="h-4 w-4" />
+                      <AlertTitle>{tGpt("assistantMigrationTitle")}</AlertTitle>
+                      <AlertDescription>{tGpt("assistantMigrationDesc")}</AlertDescription>
+                    </Alert>
+                  )}
+                  <Field label="ChatGPT Model">
+                    <Input
+                      list="chatgpt-model-list"
+                      value={(form.chatgptModel as string) || ""}
+                      onChange={(e) => setField("chatgptModel", e.target.value)}
+                      placeholder="gpt-4o-mini"
+                    />
+                    <datalist id="chatgpt-model-list">
+                      {CHATGPT_MODELS.map((m) => (
+                        <option key={m} value={m} />
+                      ))}
+                    </datalist>
+                    <p className="text-[11px] text-muted-foreground mt-1">
+                      Modelos com visão (analisa imagens): <code>gpt-4o-mini</code>, <code>gpt-4o</code>, <code>gpt-4-turbo</code>. Outros aceitam texto. Você pode digitar um modelo customizado.
+                    </p>
+                  </Field>
+                </>
               )}
-              <Field label="ChatGPT Model">
-                <Input
-                  list="chatgpt-model-list"
-                  value={(form.chatgptModel as string) || ""}
-                  onChange={(e) => setField("chatgptModel", e.target.value)}
-                  placeholder="gpt-4o-mini"
-                />
-                <datalist id="chatgpt-model-list">
-                  {CHATGPT_MODELS.map((m) => (
-                    <option key={m} value={m} />
-                  ))}
-                </datalist>
-                <p className="text-[11px] text-muted-foreground mt-1">
-                  Modelos com visão (analisa imagens): <code>gpt-4o-mini</code>, <code>gpt-4o</code>, <code>gpt-4-turbo</code>. Outros aceitam texto. Você pode digitar um modelo customizado.
-                </p>
-              </Field>
               <Field label="Voice Model">
                 <Input
                   list="chatgpt-voice-list"
@@ -5809,7 +6095,7 @@ function ChannelModal({
                   list="gemini-model-list"
                   value={(form.geminiModel as string) || ""}
                   onChange={(e) => setField("geminiModel", e.target.value)}
-                  placeholder="gemini-2.0-flash-001"
+                  placeholder="gemini-2.5-flash"
                 />
                 <datalist id="gemini-model-list">
                   {GEMINI_MODELS.map((m) => <option key={m} value={m} />)}
@@ -7018,7 +7304,7 @@ export default function SessoesPage() {
     return () => clearInterval(interval);
   }, [qrModalOpen, loadChannels]);
 
-  // Real-time session status updates via socket (mirrors Vue: ${tenantId}:whatsappSession)
+ // Real-time session status updates via socket (mirrors the legacy front: ${tenantId}:whatsappSession)
   useEffect(() => {
     if (!tenantId) return;
     const socket = getSocket();
@@ -7452,7 +7738,14 @@ export default function SessoesPage() {
     setQrLoadingId(null);
     try {
       await requestNewQrCode(item.id);
-    } catch {
+    } catch (err) {
+      // Motivo conhecido (credencial do canal faltando): nao adianta abrir o
+      // modal, o QR nao vem nem pelo socket — mostrar o que corrigir.
+      const errorKey = qrRequestErrorKey(err);
+      if (errorKey) {
+        toast.error(t(errorKey as any));
+        return;
+      }
       // QR may arrive via socket even if request fails
     }
     setQrChannel(item);
@@ -8042,8 +8335,8 @@ export default function SessoesPage() {
       setQrChannel(channel);
       setQrModalOpen(true);
       setTimeout(loadChannels, 2000);
-    } catch {
-      toast.error(t("errorRequestingQr"));
+    } catch (err) {
+      toast.error(t((qrRequestErrorKey(err) || "errorRequestingQr") as any));
     }
   }
 
@@ -8092,8 +8385,8 @@ export default function SessoesPage() {
           help={{
             description: t("helpDesc"),
             sections: [
-              { title: t("helpS0T"), items: [t("helpS0I0"), t("helpS0I1"), t("helpS0I2")] },
-              { title: t("helpS1T"), items: [t("helpS1I0"), t("helpS1I1")] },
+              { title: t("helpS0T"), items: [t("helpS0I0"), t("helpS0I1"), t("helpS0I2"), t("helpS0I3")] },
+              { title: t("helpS1T"), items: [t("helpS1I0"), t("helpS1I1"), t("helpS1I3")] },
             ],
           }}
         >

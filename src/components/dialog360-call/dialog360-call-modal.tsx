@@ -6,6 +6,7 @@ import { PhoneCall, PhoneOff, Mic, MicOff, X } from "lucide-react"
 import { useTranslations } from "next-intl"
 import { Card } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
+import { startCallRingtone } from "@/lib/call-ringtone"
 import { useDialog360CallStore } from "@/stores/dialog360-call-store"
 import {
   useDialog360CallActions,
@@ -80,31 +81,12 @@ export function Dialog360CallModal() {
     return () => clearInterval(id)
   }, [state])
 
-  // Ringtone gerado via Web Audio API.
+  // Ringtone: arquivo de public/ quando existir, senão o beep sintetizado de
+  // sempre (ver lib/call-ringtone.ts). Um pouco mais baixo que o toque de
+  // chamada recebida — este modal também toca para quem ligou.
   useEffect(() => {
     if (state !== "ringing") return
-    const ctx = new AudioContext()
-    let stopped = false
-    function beep() {
-      if (stopped) return
-      const osc = ctx.createOscillator()
-      const gain = ctx.createGain()
-      osc.connect(gain)
-      gain.connect(ctx.destination)
-      osc.frequency.value = 480
-      gain.gain.setValueAtTime(0.25, ctx.currentTime)
-      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.6)
-      osc.start()
-      osc.stop(ctx.currentTime + 0.6)
-      setTimeout(() => {
-        if (!stopped) beep()
-      }, 1800)
-    }
-    beep()
-    return () => {
-      stopped = true
-      ctx.close()
-    }
+    return startCallRingtone({ beepGain: 0.25, fileVolume: 0.85 })
   }, [state])
 
   // Foco programático no botão Atender ao ENTRAR em "ringing" (chamada recebida),
@@ -313,6 +295,14 @@ export function Dialog360CallModal() {
                 <span className="text-muted-foreground text-sm">{t("ended")}</span>
               )}
             </div>
+
+            {/* Enquanto esta chamada está ativa, uma nova chamada não toca para
+                este atendente — o aviso explica que o silêncio é de propósito. */}
+            {state === "active" && (
+              <p className="text-[10px] text-muted-foreground text-center leading-tight">
+                {t("busyNote")}
+              </p>
+            )}
           </div>
         </Card>
       </motion.div>

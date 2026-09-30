@@ -43,10 +43,24 @@ import {
 } from "@/services/user-tenants";
 import { fetchTenants } from "@/services/tenants";
 
+// Espelho da lista nova de /usuarios (ALL_MENU_PERMISSION_KEYS): mesma chave = mesma
+// rota da sidebar. Chave ausente no mapa gravado = visível (default true), igual lá —
+// a lista antiga (chatPrivado/configuracoes, default false) gravava mapa que escondia
+// menus sem ninguém ter desmarcado nada. Chaves antigas já gravadas são preservadas
+// no merge do openEdit e reenviadas intactas.
 const MENU_PERMISSION_KEYS = [
-  "massa", "grupo", "chatPrivado", "kanban", "funil",
-  "relatorios", "campanhas", "email-marketing", "agendamentos", "configuracoes",
-] as const;
+  "massa", "grupo", "chat-privado", "kanban", "funil", "tarefas", "agenda", "sessoes",
+  "relatorios", "painel-atendimentos", "filas", "equipes", "mensagens-rapidas", "chat-flow",
+  "agendamentos", "aniversarios", "fechamento", "etiquetas", "notas",
+  "protocolos", "avaliacoes", "horarioAtendimento", "campanhas", "contatos",
+  "google-calendar", "agendamento-publico", "email-marketing",
+];
+
+const USER_ONLY_PERMS = ["massa", "campanhas", "grupo", "chat-privado", "kanban", "funil", "tarefas", "agenda", "contatos"];
+
+const DEFAULT_MENU: Record<string, boolean> = Object.fromEntries(
+  MENU_PERMISSION_KEYS.map((k) => [k, true])
+);
 
 // Tela superadmin-only: page size alto para carregar todos os usuários em
 // 1 requisição (backend cap = 500). Infinite scroll segue como rede de
@@ -80,19 +94,47 @@ export default function UsuarioTenantsPage() {
   const t = useTranslations("usuariotenantsPage");
   const tBh = useTranslations("businessHoursEditor");
   const tSidebar = useTranslations("layoutSidebar");
+  // Rótulos reusados da tela /usuarios — mesma lista, mesmo nome de item nas duas telas.
+  const tUsuarios = useTranslations("usuariosPage");
 
-  const MENU_PERMISSIONS = [
-    { key: "massa", label: t("menuMassa") },
-    { key: "grupo", label: t("menuGrupo") },
-    { key: "chatPrivado", label: t("menuChatPrivado") },
-    { key: "kanban", label: t("menuKanban") },
-    { key: "funil", label: t("menuFunil") },
-    { key: "relatorios", label: t("menuRelatorios") },
-    { key: "campanhas", label: t("menuCampanhas") },
-    { key: "email-marketing", label: tSidebar("item.emailMarketing") },
-    { key: "agendamentos", label: t("menuAgendamentos") },
-    { key: "configuracoes", label: t("menuConfiguracoes") },
-  ] as const;
+  const menuLabelMap: Record<string, string> = {
+    "massa": tUsuarios("menuMassa"),
+    "grupo": tUsuarios("menuGrupo"),
+    "chat-privado": tUsuarios("menuChatPrivado"),
+    "kanban": tUsuarios("menuKanban"),
+    "funil": tSidebar("item.funil"),
+    "tarefas": tUsuarios("menuTarefas"),
+    "agenda": tSidebar("item.agenda"),
+    "sessoes": tUsuarios("menuSessoes"),
+    "relatorios": tUsuarios("menuRelatorios"),
+    "filas": tUsuarios("menuFilas"),
+    "equipes": tUsuarios("menuEquipes"),
+    "mensagens-rapidas": tUsuarios("menuMensagensRapidas"),
+    "chat-flow": tUsuarios("menuChatFlow"),
+    "agendamentos": tUsuarios("menuAgendamentos"),
+    "aniversarios": tUsuarios("menuAniversarios"),
+    "fechamento": tUsuarios("menuFechamento"),
+    "etiquetas": tUsuarios("menuEtiquetas"),
+    "notas": tUsuarios("menuNotas"),
+    "protocolos": tUsuarios("menuProtocolos"),
+    "avaliacoes": tUsuarios("menuAvaliacoes"),
+    "horarioAtendimento": tUsuarios("menuHorarioAtendimento"),
+    "campanhas": tUsuarios("menuCampanhas"),
+    "email-marketing": tSidebar("item.emailMarketing"),
+    "contatos": tUsuarios("menuContatos"),
+    "google-calendar": tUsuarios("menuGoogleCalendar"),
+    "agendamento-publico": tSidebar("item.agendamentoPublico"),
+    "painel-atendimentos": tSidebar("item.painelAtendimentos"),
+  };
+
+  const MENU_PERMISSIONS = MENU_PERMISSION_KEYS.map((key) => ({
+    key,
+    label: menuLabelMap[key] ?? key,
+  }));
+
+  // Mesmo recorte por perfil de /usuarios: perfil comum vê só o conjunto reduzido.
+  const getMenuPermsForProfile = (profile: string) =>
+    profile === "user" ? MENU_PERMISSIONS.filter((p) => USER_ONLY_PERMS.includes(p.key)) : MENU_PERMISSIONS;
 
   const profileMap: Record<string, { label: string; icon: React.ElementType; variant: "default" | "secondary" | "destructive" | "outline" }> = {
     user: { label: t("profileUser"), icon: User, variant: "secondary" },
@@ -110,6 +152,7 @@ export default function UsuarioTenantsPage() {
   const [deleting, setDeleting] = useState<UserTenant | null>(null);
   const [togglingId, setTogglingId] = useState<number | null>(null);
   const [menuPermissions, setMenuPermissions] = useState<Record<string, boolean>>({});
+  const [menuOpen, setMenuOpen] = useState(false);
   const [restrictedUser, setRestrictedUser] = useState<"enabled" | "disabled">("disabled");
   const [businessHours, setBusinessHours] = useState<BusinessHour[]>(getDefaultBusinessHours());
   const [bhOpen, setBhOpen] = useState(false);
@@ -238,12 +281,6 @@ export default function UsuarioTenantsPage() {
     setSortKey(key);
   };
 
-  const resetPermissions = () => {
-    const defaults: Record<string, boolean> = {};
-    MENU_PERMISSIONS.forEach((p) => { defaults[p.key] = false; });
-    return defaults;
-  };
-
   const openCreate = () => {
     setEditing(null);
     form.reset({
@@ -254,9 +291,10 @@ export default function UsuarioTenantsPage() {
       tenantId: undefined as unknown as number,
       phone: "",
     });
-    setMenuPermissions(resetPermissions());
+    setMenuPermissions({ ...DEFAULT_MENU });
     setRestrictedUser("disabled");
     setBusinessHours(getDefaultBusinessHours());
+    setMenuOpen(false);
     setBhOpen(false);
     setDialogOpen(true);
   };
@@ -271,10 +309,20 @@ export default function UsuarioTenantsPage() {
       tenantId: u.tenantId,
       phone: u.phone || "",
     });
-    setMenuPermissions(u.menuPermissions ?? resetPermissions());
+    // Merge com default true (igual /usuarios): chave ausente = menu visível. O spread
+    // preserva chaves antigas já gravadas (chatPrivado/configuracoes) sem reescrevê-las.
+    // `agenda` herda de `kanban` (era a chave que regia o Agenda antes de existir),
+    // senão o default true concederia Agenda a quem tem Kanban desmarcado.
+    const rawMenu = u.menuPermissions as Record<string, boolean> | undefined;
+    setMenuPermissions(
+      rawMenu && typeof rawMenu === "object" && !Array.isArray(rawMenu)
+        ? { ...DEFAULT_MENU, agenda: rawMenu.kanban === true, ...rawMenu }
+        : { ...DEFAULT_MENU }
+    );
     setRestrictedUser(u.restrictedUser === "enabled" ? "enabled" : "disabled");
     const rawBh = u.businessHours as BusinessHour[] | undefined;
     setBusinessHours(Array.isArray(rawBh) && rawBh.length > 0 ? rawBh : getDefaultBusinessHours());
+    setMenuOpen(false);
     setBhOpen(Array.isArray(rawBh) && rawBh.length > 0);
     setDialogOpen(true);
   };
@@ -325,8 +373,18 @@ export default function UsuarioTenantsPage() {
       toast.success(t("userRemoved"));
       setDeleting(null);
       load();
-    } catch {
-      toast.error(t("errorRemoving"));
+    } catch (err) {
+      // 409 do backend quando o usuario tem registros vinculados: o payload vem em
+      // `message` (nao em `error`). Mesmo tratamento da tela /usuarios.
+      const errData =
+        (err as { response?: { data?: { error?: string; message?: string } } })?.response?.data ??
+        (err as { data?: { error?: string; message?: string } })?.data;
+      const code = (errData?.error ?? errData?.message ?? "").toString();
+      toast.error(
+        code === "ERR_USER_HAS_LINKED_RECORDS"
+          ? tUsuarios("errorRemovingLinkedRecords")
+          : t("errorRemoving")
+      );
     }
   };
 
@@ -341,8 +399,9 @@ export default function UsuarioTenantsPage() {
         toast.success(t("userDeactivated"));
       }
       await load();
-    } catch {
-      toast.error(t("errorToggleStatus"));
+    } catch (err) {
+      const code = ((err as { data?: { error?: string } })?.data?.error ?? "").toString();
+      toast.error(code === "ERR_NO_PERMISSION_USER_LIMIT" ? tUsuarios("userLimitReached") : t("errorToggleStatus"));
     } finally {
       setTogglingId(null);
     }
@@ -543,23 +602,31 @@ export default function UsuarioTenantsPage() {
               </div>
             </div>
 
-            <div>
-              <h4 className="text-sm font-semibold mb-3">{t("sectionMenuPermissions")}</h4>
-              <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
-                {MENU_PERMISSIONS.map((perm) => (
-                  <label
-                    key={perm.key}
-                    className="flex items-center gap-2 rounded-md border p-2.5 cursor-pointer hover:bg-accent/50 transition-colors"
-                  >
-                    <Checkbox
-                      checked={menuPermissions[perm.key] ?? false}
-                      onCheckedChange={() => togglePermission(perm.key)}
-                    />
-                    <span className="text-sm">{perm.label}</span>
-                  </label>
-                ))}
-              </div>
-            </div>
+            {/* Permissões de Menu — mesma forma da tela /usuarios (colapsável + lista
+                completa filtrada por perfil, marcado = visível) */}
+            <Collapsible open={menuOpen} onOpenChange={setMenuOpen}>
+              <CollapsibleTrigger className="flex w-full items-center gap-2 rounded-md border p-3 text-sm font-medium hover:bg-accent/50">
+                <ChevronRight className={`h-4 w-4 transition-transform ${menuOpen ? "rotate-90" : ""}`} />
+                {t("sectionMenuPermissions")}
+              </CollapsibleTrigger>
+              <CollapsibleContent className="pt-2">
+                <p className="text-xs text-muted-foreground mb-2">{tUsuarios("menuPainelAtendimentosHint")}</p>
+                <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2">
+                  {getMenuPermsForProfile(form.watch("profile")).map((perm) => (
+                    <label
+                      key={perm.key}
+                      className="flex items-center gap-2 rounded-md border p-2 text-sm cursor-pointer hover:bg-accent/50"
+                    >
+                      <Checkbox
+                        checked={!!menuPermissions[perm.key]}
+                        onCheckedChange={() => togglePermission(perm.key)}
+                      />
+                      {perm.label}
+                    </label>
+                  ))}
+                </div>
+              </CollapsibleContent>
+            </Collapsible>
 
             {/* Horário de Atendimento */}
             <div>

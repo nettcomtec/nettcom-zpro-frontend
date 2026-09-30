@@ -10,7 +10,7 @@ import {
   Pencil, SmilePlus, ExternalLink, ShoppingBag, Package,
   Megaphone, Navigation, Link2, List, Grid2X2, Mail,
   Copy, CornerUpRight, CircleDashed, PlayCircle, X, ChevronLeft, ChevronRight,
-  Play, Pause, CalendarDays, ZoomIn, ZoomOut, RotateCcw, RotateCw, Printer, Maximize2, Search,
+  Play, Pause, CalendarDays, CalendarCheck, ZoomIn, ZoomOut, RotateCcw, RotateCw, Printer, Maximize2, Search,
   Star, Bot, Loader2, Pin, BarChart3, Receipt, Copy as CopyIcon, Phone,
   PhoneCall, PhoneOff, ShieldCheck, Languages, X as XIcon, Youtube,
   AudioLines, FolderPlus, Route, RouteOff, CheckCircle2, Ban,
@@ -18,7 +18,7 @@ import {
 import { cn } from "@/lib/utils";
 import { sanitize } from "@/lib/sanitize";
 import { linkifyParts } from "@/lib/linkify";
-import { getTicketLastMessagePreview } from "@/lib/template-preview";
+import { getTicketLastMessagePreview, parseNfmEntries } from "@/lib/template-preview";
 import { extractOrderDetails, formatMetaAmount } from "@/lib/order-details";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -47,7 +47,7 @@ import api from "@/lib/api";
 import { createContact, fetchContacts, type Contact } from "@/services/contacts";
 import { createTicket } from "@/services/tickets";
 import { fetchWhatsapps, type Whatsapp as WhatsappSession } from "@/services/whatsapp";
-import { translateMessage, type TranslateTargetLang } from "@/services/copilot";
+import { copilotUiLangPayload, translateMessage, type TranslateTargetLang } from "@/services/copilot";
 import {
   listWhatsappPayments, markPaymentAsPaid, cancelPayment,
   type WhatsappPayment,
@@ -141,7 +141,10 @@ function getAudioUrl(input?: string | { mediaUrl?: string; storageUrl?: string }
 // Códigos de erro Meta/BSP com descrição traduzida no tooltip do ack de falha
 // NO_SEND_CONTEXT é nosso (backend/helpers/NoSendContextErrorZPRO): ticket sem
 // conversa/thread ativa no canal — ML, OLX, LinkedIn, TikTok e YouTube.
-const ACK_ERROR_KNOWN_CODES = ["100", "131026", "131047", "131048", "131049", "131051", "132000", "132012", "NO_SEND_CONTEXT"];
+// TELEGRAM_UNREACHABLE e TELEGRAM_MEDIA_MISSING também (TbotServices/helpers/
+// TelegramSendGuardZPRO): o contato bloqueou o bot ou nunca falou com ele; o
+// arquivo da mídia não está mais no servidor.
+const ACK_ERROR_KNOWN_CODES = ["100", "131026", "131042", "131047", "131048", "131049", "131051", "132000", "132012", "NO_SEND_CONTEXT", "TELEGRAM_UNREACHABLE", "TELEGRAM_MEDIA_MISSING"];
 
 function AckIcon({
   ack,
@@ -831,7 +834,9 @@ function ImageContent({ msg }: { msg: Message }) {
         <img
           src={url}
           alt={msg.body || "imagem"}
-          className={cn("rounded-lg object-cover", isSticker ? "max-w-[100px] max-h-[100px]" : "max-w-[280px] max-h-[280px]")}
+          // min(...,100%): a bolha e limitada a 70% da largura da lista, entao
+          // no celular 280px estouravam a bolha e vazavam para a direita.
+          className={cn("rounded-lg object-cover", isSticker ? "max-w-[100px] max-h-[100px]" : "max-w-[min(280px,100%)] max-h-[280px]")}
         />
         {!isSticker && (
           <div className="absolute inset-0 rounded-lg bg-black/0 group-hover/img:bg-black/10 transition-colors flex items-center justify-center">
@@ -1039,7 +1044,7 @@ function WaveAudioContent({ msg, fromMe }: { msg: Message; fromMe?: boolean }) {
   const progress = duration > 0 ? currentTime / duration : 0;
 
   return (
-    <div className="rounded-xl border bg-muted/20 p-3 min-w-[280px] max-w-[360px]">
+    <div className="rounded-xl border bg-muted/20 p-3 min-w-[min(280px,100%)] max-w-[360px]">
       <audio
         ref={audioRef}
         src={audioUrl || undefined}
@@ -1164,7 +1169,7 @@ function AudioContent({ msg }: { msg: Message }) {
   };
 
   return (
-    <div className="rounded-xl border bg-muted/20 p-3 min-w-[280px] max-w-[360px]">
+    <div className="rounded-xl border bg-muted/20 p-3 min-w-[min(280px,100%)] max-w-[360px]">
       <div className="flex items-center gap-3">
         <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-primary/10 text-primary">
           <svg className="h-5 w-5" fill="currentColor" viewBox="0 0 24 24" aria-hidden>
@@ -1219,7 +1224,7 @@ function VideoContent({ msg }: { msg: Message }) {
   const url = getMediaUrl(msg);
   if (url.endsWith(".gif")) {
     // eslint-disable-next-line @next/next/no-img-element
-    return <img src={url} alt="" className="rounded-lg max-w-[280px]" />;
+    return <img src={url} alt="" className="rounded-lg max-w-[min(280px,100%)]" />;
   }
   return (
     <div>
@@ -1478,13 +1483,21 @@ function VcardContent({ msg }: { msg: Message }) {
       const ticketData = ticket as { id: number };
       window.location.href = `/atendimento?ticketId=${ticketData.id}`;
     } catch (err: unknown) {
-      const axErr = err as { response?: { status?: number; data?: unknown } };
-      if (axErr.response?.status === 409) {
+      // O interceptor do axios rejeita com o PRÓPRIO response (error.response || error),
+      // então status/data ficam na RAIZ do err — ler err.response aqui nunca casava e o
+      // dialog de atendimento existente jamais abria (caía no toast genérico). O corpo
+      // do 409 é {message, statusCode, ticket}; o id vem de ticket.id (fallback: message).
+      const axErr = err as { status?: number; data?: unknown };
+      if (axErr.status === 409) {
         let ticketId: number | null = null;
-        try {
-          const parsed = JSON.parse(axErr.response.data as string);
-          ticketId = parsed?.id ?? null;
-        } catch { /* ignore */ }
+        const d = axErr.data as { ticket?: { id?: number }; message?: string } | undefined;
+        if (d?.ticket?.id) {
+          ticketId = d.ticket.id;
+        } else if (typeof d?.message === "string") {
+          try {
+            ticketId = JSON.parse(d.message)?.id ?? null;
+          } catch { /* ignore */ }
+        }
         setExistingTicketId(ticketId);
         setSessionDialog(false);
         setExistingDialog(true);
@@ -1500,7 +1513,7 @@ function VcardContent({ msg }: { msg: Message }) {
     const displayNumber = number || phone || "";
     const hasNumber = !!displayNumber;
     return (
-      <div className="rounded-lg border bg-muted/30 overflow-hidden min-w-[220px]">
+      <div className="rounded-lg border bg-muted/30 overflow-hidden min-w-[min(220px,100%)]">
         <div className="flex items-center gap-3 p-3">
           <div className="h-10 w-10 rounded-full bg-primary/10 flex items-center justify-center shrink-0">
             <Contact2 className="h-5 w-5 text-primary" />
@@ -1626,6 +1639,78 @@ function VcardContent({ msg }: { msg: Message }) {
   );
 }
 
+const OSM_TILE_SIZE = 256;
+const OSM_ZOOM = 15;
+// Meia largura/altura máximas da miniatura (280 x 120): cobre o maior tamanho do
+// balão; em tela estreita o excedente fica fora do overflow-hidden.
+const OSM_HALF_W = 140;
+const OSM_HALF_H = 60;
+
+// Monta só os tiles que cobrem a área em volta do ponto (2 a 6 imagens) e os
+// posiciona em relação ao CENTRO do contêiner, então o ponto fica centrado em
+// qualquer largura do balão.
+function OsmMapThumbnail({ lat, lng, alt, attribution }: { lat: number; lng: number; alt: string; attribution: string }) {
+  const [failed, setFailed] = useState(false);
+  if (failed || !Number.isFinite(lat) || !Number.isFinite(lng)) {
+    return <MapPin className="h-12 w-12 text-muted-foreground" />;
+  }
+
+  const n = 2 ** OSM_ZOOM;
+  const latRad = (Math.max(-85.0511, Math.min(85.0511, lat)) * Math.PI) / 180;
+  const pointX = ((lng + 180) / 360) * n * OSM_TILE_SIZE;
+  const pointY = ((1 - Math.log(Math.tan(latRad) + 1 / Math.cos(latRad)) / Math.PI) / 2) * n * OSM_TILE_SIZE;
+
+  const tiles: { key: string; src: string; dx: number; dy: number }[] = [];
+  const firstY = Math.floor((pointY - OSM_HALF_H) / OSM_TILE_SIZE);
+  const lastY = Math.floor((pointY + OSM_HALF_H) / OSM_TILE_SIZE);
+  const firstX = Math.floor((pointX - OSM_HALF_W) / OSM_TILE_SIZE);
+  const lastX = Math.floor((pointX + OSM_HALF_W) / OSM_TILE_SIZE);
+  for (let ty = firstY; ty <= lastY; ty++) {
+    if (ty < 0 || ty >= n) continue;
+    for (let tx = firstX; tx <= lastX; tx++) {
+      const wrappedX = ((tx % n) + n) % n;
+      tiles.push({
+        key: `${tx}-${ty}`,
+        src: `https://tile.openstreetmap.org/${OSM_ZOOM}/${wrappedX}/${ty}.png`,
+        dx: tx * OSM_TILE_SIZE - pointX,
+        dy: ty * OSM_TILE_SIZE - pointY,
+      });
+    }
+  }
+
+  return (
+    <div role="img" aria-label={alt} className="absolute inset-0">
+      {tiles.map((tile) => (
+        // eslint-disable-next-line @next/next/no-img-element
+        <img
+          key={tile.key}
+          src={tile.src}
+          alt=""
+          aria-hidden="true"
+          draggable={false}
+          loading="lazy"
+          className="absolute max-w-none select-none"
+          style={{
+            width: OSM_TILE_SIZE,
+            height: OSM_TILE_SIZE,
+            left: `calc(50% + ${tile.dx}px)`,
+            top: `calc(50% + ${tile.dy}px)`,
+          }}
+          onError={() => setFailed(true)}
+        />
+      ))}
+      <MapPin
+        className="absolute h-6 w-6 -translate-x-1/2 -translate-y-full text-red-600 fill-red-500/40 drop-shadow"
+        style={{ left: "50%", top: "50%" }}
+        aria-hidden="true"
+      />
+      <span className="absolute top-1 right-1 rounded bg-background/80 px-1 text-[9px] leading-tight text-muted-foreground">
+        {attribution}
+      </span>
+    </div>
+  );
+}
+
 function LocationContent({ msg }: { msg: Message }) {
   const t = useTranslations("messageBubble");
   const lat = msg.latitude;
@@ -1643,16 +1728,10 @@ function LocationContent({ msg }: { msg: Message }) {
 
   return (
     <a href={mapsUrl} target="_blank" rel="noopener noreferrer" className="block rounded-lg border bg-muted/30 overflow-hidden max-w-[280px]">
-      {/* Map thumbnail — use openstreetmap tile (no API key needed) */}
+      {/* Miniatura por tiles do OpenStreetMap (sem chave de API) */}
       <div className="relative h-[120px] w-full bg-muted flex items-center justify-center overflow-hidden">
         {parsedLat && parsedLng ? (
-          // eslint-disable-next-line @next/next/no-img-element
-          <img
-            src={`https://static-maps.yandex.ru/1.x/?ll=${parsedLng},${parsedLat}&size=280,120&z=15&l=map&pt=${parsedLng},${parsedLat},pm2rdl`}
-            alt={t("locationAlt")}
-            className="w-full h-full object-cover"
-            onError={(e) => { (e.target as HTMLImageElement).style.display = "none"; }}
-          />
+          <OsmMapThumbnail lat={Number(parsedLat)} lng={Number(parsedLng)} alt={t("locationAlt")} attribution={t("mapAttribution")} />
         ) : (
           <MapPin className="h-12 w-12 text-muted-foreground" />
         )}
@@ -1730,7 +1809,7 @@ function CtaCallContent({ msg }: { msg: Message }) {
   }
   const href = phone ? `tel:${phone}` : undefined;
   return (
-    <div className="min-w-[200px]">
+    <div className="min-w-[min(200px,100%)]">
       {body && <TextContent body={body} />}
       {footer && (
         <div className={cn("mt-1 rounded-md px-2 py-1", msg.fromMe ? "bg-white/10" : "bg-muted/60")}>
@@ -2589,7 +2668,7 @@ function TemplateContent({ msg, onQuickSend }: { msg: Message; onQuickSend?: (te
   let buttons: { type: string; text: string; url?: string; phone_number?: string; otp_type?: string; autofill_text?: string; example?: string[]; coupon_code?: string }[] = [];
 
   try {
-    // Merge body + dataJson (same logic as Vue's formatarTemplates)
+ // Merge body + dataJson (same logic as the legacy front's formatarTemplates)
     const fromBody = parseComponents(msg.body);
     const fromDataJson = parseComponents(msg.dataJson);
     const bodyLooksLikeArray = (msg.body ?? "").trim().startsWith("[") && fromBody.length > 0;
@@ -2641,13 +2720,13 @@ function TemplateContent({ msg, onQuickSend }: { msg: Message; onQuickSend?: (te
       )}
       {/* Header: video */}
       {headerFormat === "VIDEO" && headerMediaSrc && (
-        <video controls className="max-w-[250px] rounded" preload="metadata">
+        <video controls className="max-w-[min(250px,100%)] rounded" preload="metadata">
           <source src={headerMediaSrc} type="video/mp4" />
         </video>
       )}
       {/* Header: image */}
       {headerFormat === "IMAGE" && headerMediaSrc && (
-        <img src={headerMediaSrc} alt="" className="max-w-[250px] rounded" />
+        <img src={headerMediaSrc} alt="" className="max-w-[min(250px,100%)] rounded" />
       )}
       {/* Header: document */}
       {headerFormat === "DOCUMENT" && headerMediaSrc && (
@@ -2911,7 +2990,7 @@ function ProductContent({ msg }: { msg: Message }) {
         <span className="text-sm font-medium">{t("product")}</span>
       </div>
       {/* eslint-disable-next-line @next/next/no-img-element */}
-      {imgSrc && <img src={imgSrc} alt={name} className="rounded-lg mb-2 object-cover max-w-[200px] max-h-[120px]" />}
+      {imgSrc && <img src={imgSrc} alt={name} className="rounded-lg mb-2 object-cover max-w-[min(200px,100%)] max-h-[120px]" />}
       {name && <p className="text-sm font-medium">{name}</p>}
       {price && <p className="text-sm font-semibold text-green-600">{price}</p>}
       {description && <p className="text-xs text-muted-foreground whitespace-pre-wrap">{description}</p>}
@@ -2974,7 +3053,7 @@ function AlbumContent({ msg, allMessages }: { msg: Message; allMessages?: Messag
   const [scale, setScale] = useState(1);
   const [offset, setOffset] = useState({ x: 0, y: 0 });
 
-  // Filtra áudio e transcrição (igual ao Vue), ordena por albumIndex depois createdAt
+ // Filtra áudio e transcrição (igual ao front legado), ordena por albumIndex depois createdAt
   const albumMsgs = (allMessages || [])
     .filter((m) =>
       m.albumId === msg.albumId &&
@@ -3304,13 +3383,13 @@ function NotesContent({ msg }: { msg: Message }) {
         <div className="mb-2">
           {msg.mediaType?.includes("image") && (
             // eslint-disable-next-line @next/next/no-img-element
-            <img src={getMediaUrl(msg)} alt="" className="rounded max-w-[200px] max-h-[120px] object-cover" />
+            <img src={getMediaUrl(msg)} alt="" className="rounded max-w-[min(200px,100%)] max-h-[120px] object-cover" />
           )}
           {msg.mediaType?.includes("video") && (
-            <video controls src={getMediaUrl(msg)} className="max-w-[200px] rounded" />
+            <video controls src={getMediaUrl(msg)} className="max-w-[min(200px,100%)] rounded" />
           )}
           {msg.mediaType?.includes("audio") && (
-            <audio controls src={getAudioUrl(msg)} className="max-w-[200px]" />
+            <audio controls src={getAudioUrl(msg)} className="max-w-[min(200px,100%)]" />
           )}
         </div>
       )}
@@ -3320,7 +3399,7 @@ function NotesContent({ msg }: { msg: Message }) {
             <>
               <button onClick={() => setNoteLightbox(true)} className="block relative group/img">
                 {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img src={getMediaUrl(noteAttachedUrl)} alt="" className="rounded max-w-[200px] max-h-[120px] object-cover" />
+                <img src={getMediaUrl(noteAttachedUrl)} alt="" className="rounded max-w-[min(200px,100%)] max-h-[120px] object-cover" />
                 <div className="absolute inset-0 rounded bg-black/0 group-hover/img:bg-black/10 transition-colors flex items-center justify-center">
                   <ExternalLink className="h-5 w-5 text-white opacity-0 group-hover/img:opacity-100 transition-opacity drop-shadow-md" />
                 </div>
@@ -3367,10 +3446,10 @@ function NotesContent({ msg }: { msg: Message }) {
             </>
           )}
           {noteIsVideo && (
-            <video controls src={getMediaUrl(noteAttachedUrl)} className="max-w-[200px] rounded" />
+            <video controls src={getMediaUrl(noteAttachedUrl)} className="max-w-[min(200px,100%)] rounded" />
           )}
           {noteIsAudio && (
-            <audio controls src={getAudioUrl(noteAttachedUrl)} className="max-w-[200px]" />
+            <audio controls src={getAudioUrl(noteAttachedUrl)} className="max-w-[min(200px,100%)]" />
           )}
           {noteIsFile && (
             <a href={getMediaUrl(noteAttachedUrl)} target="_blank" rel="noopener noreferrer" className="flex items-center gap-1 text-xs text-primary underline break-all">
@@ -3403,6 +3482,34 @@ function TransferContent({ msg }: { msg: Message }) {
     <div className="flex items-center gap-2 rounded-lg border border-blue-500/40 bg-blue-500/10 p-2 text-xs text-blue-700 dark:border-blue-300/40 dark:bg-blue-300/15 dark:text-blue-100">
       <CornerDownRight className="h-4 w-4" />
       <span>{msg.body || t("ticketTransferred")}</span>
+    </div>
+  );
+}
+
+// Divisoria de sistema criada no instante em que a mensagem agendada realmente
+// sai. O backend nao tem i18n: o body traz SO o trecho da mensagem (ate 140
+// chars) — o rotulo e o horario sao montados aqui, a partir do prefixo do
+// messageId ("sched_notice") e do createdAt da propria linha.
+function ScheduleNoticeContent({ msg }: { msg: Message }) {
+  const t = useTranslations("messageBubble");
+  const { locale } = useLocale();
+  const timeLabel = msg.createdAt
+    ? new Date(msg.createdAt).toLocaleTimeString(locale, { hour: "2-digit", minute: "2-digit" })
+    : "";
+  const excerpt = (msg.body || "").trim();
+
+  return (
+    <div className="rounded-lg border border-emerald-500/40 bg-emerald-500/10 p-2 text-xs text-emerald-700 dark:border-emerald-300/40 dark:bg-emerald-300/15 dark:text-emerald-100">
+      <div className="flex items-center gap-2">
+        <CalendarCheck className="h-4 w-4 shrink-0" />
+        <span className="font-medium">{t("scheduleNoticeSent")}</span>
+        {timeLabel && (
+          <span className="ml-auto whitespace-nowrap opacity-70">{timeLabel}</span>
+        )}
+      </div>
+      {excerpt && (
+        <p className="mt-1 whitespace-pre-wrap [overflow-wrap:anywhere] opacity-90">{excerpt}</p>
+      )}
     </div>
   );
 }
@@ -3812,39 +3919,10 @@ function CallPermissionContent({ msg }: { msg: Message }) {
 }
 
 // ── nfm_reply / interactive_nfm_reply: resposta a flow/formulário ─────────────
-const NFM_IGNORE_KEYS = new Set([
-  "flow_token","body","name","response_json","Sent","sent","token","tokenApi",
-  "id","ticketId","messageId","whatsapp","from","to","timestamp","type",
-  "interactive","context",
-]);
-
+// Parse compartilhado com o preview de `lastMessage` (lib/template-preview.ts).
 function NfmReplyContent({ msg }: { msg: Message }) {
-  let entries: { label: string; answer: string }[] = [];
-  try {
-    let raw = msg.body;
-    if (raw.startsWith('"{')) {
-      raw = raw.replace(/^"|"$/g, "").replace(/\\"/g, '"');
-    }
-    const data = JSON.parse(raw) as Record<string, unknown>;
-    entries = Object.entries(data)
-      .filter(([k]) => !NFM_IGNORE_KEYS.has(k))
-      .map(([k, v]) => {
-        const label = k
-          .replace(/^screen_\d+_/, "")
-          .replace(/_\d+$/, "")
-          .replace(/_/g, " ")
-          .replace(/\b\w/g, (c) => c.toUpperCase());
-        let answer = String(v ?? "");
-        if (answer.includes("_")) {
-          answer = answer.split("_").slice(1).join(" ");
-          answer = answer.charAt(0).toUpperCase() + answer.slice(1).toLowerCase();
-        }
-        return { label, answer };
-      });
-  } catch {
-    return <TextContent body={msg.body} showLinkPreview />;
-  }
-  if (!entries.length) return <TextContent body={msg.body} showLinkPreview />;
+  const entries = parseNfmEntries(msg.body);
+  if (!entries?.length) return <TextContent body={msg.body} showLinkPreview />;
   return (
     <div className="space-y-1 rounded-lg border bg-muted/20 p-3">
       {entries.map(({ label, answer }, i) => (
@@ -4531,7 +4609,7 @@ function CarouselUazContent({ msg }: { msg: Message }) {
   const card = cards[idx];
   if (!card) return <TextContent body={msg.body} />;
   return (
-    <div className="min-w-[240px] space-y-2">
+    <div className="min-w-[min(240px,100%)] space-y-2">
       {text && <p className="text-sm mb-1">{text}</p>}
       <div className={cn("rounded-lg overflow-hidden border", msg.fromMe ? "border-primary-foreground/20" : "border-border/50")}>
         {card.image && <img src={card.image} alt="" className="w-full max-h-48 object-cover" />}
@@ -4581,7 +4659,7 @@ function PixButtonContent({ msg }: { msg: Message }) {
   };
 
   return (
-    <div className="min-w-[220px]">
+    <div className="min-w-[min(220px,100%)]">
       <div className="rounded-lg border bg-muted/20 p-3 space-y-2">
         <div className="flex items-center gap-2">
           <div className="h-8 w-8 rounded-full bg-teal-500/15 flex items-center justify-center">
@@ -4610,7 +4688,7 @@ function RequestPaymentContent({ msg }: { msg: Message }) {
   try { p = JSON.parse(msg.body); } catch {}
   const amount = typeof p.amount === "number" ? p.amount : 0;
   return (
-    <div className="min-w-[240px]">
+    <div className="min-w-[min(240px,100%)]">
       <div className="rounded-lg border bg-muted/20 overflow-hidden">
         <div className="px-3 py-2 border-b bg-muted/40 flex items-center gap-2">
           <Receipt className="h-4 w-4 text-muted-foreground" />
@@ -4698,6 +4776,10 @@ function getMessageContent(msg: Message, allMessages?: Message[], useWave?: bool
 
   if (mt === "transcription") return <TranscriptionContent msg={msg} />;
   if (mt === "share") return <SharedPostContent msg={msg} />;
+  // Aviso de disparo de agendada: chega com mediaType "notes" (por isso ja e
+  // centralizado pelo gate isSystem), mas nao e nota do atendente — precisa vir
+  // ANTES do branch de notes para nao cair na caixa amarela sem rotulo.
+  if (msg.messageId?.startsWith("sched_notice")) return <ScheduleNoticeContent msg={msg} />;
   if (mt === "notes" || mt === "callNotes") return <NotesContent msg={msg} />;
   if (mt === "transfer") return <TransferContent msg={msg} />;
   if (mt === "location_request") return <LocationRequestContent />;
@@ -4928,7 +5010,7 @@ export const MessageBubble = React.memo(function MessageBubble({ message: msg, a
   const [translationLang, setTranslationLang] = useState<TranslateTargetLang | null>((msg.translatedLang as TranslateTargetLang) ?? null);
   const [translating, setTranslating] = useState(false);
   const [savingToGallery, setSavingToGallery] = useState(false);
-  // Regra Vue: encaminhar bloqueado para usuário restrito (MensagemChat.vue:125-131 — restrictedUserRestriction9)
+ // Regra do front legado: encaminhar bloqueado para usuário restrito (front legado — restrictedUserRestriction9)
   const { isRestrictedUser, getConfigValue } = useAuthStore();
   const isRestricted = isRestrictedUser();
   const { isLiveMode } = useLiveMode();
@@ -4974,6 +5056,7 @@ export const MessageBubble = React.memo(function MessageBubble({ message: msg, a
       const { data } = await api.post<{ answer: string }>("/copilot/askAi", {
         body: msg.body,
         ticketId,
+        ...copilotUiLangPayload(),
       });
       setAiResult(data.answer);
     } catch (err: unknown) {
@@ -5007,7 +5090,15 @@ export const MessageBubble = React.memo(function MessageBubble({ message: msg, a
   // Canal híbrido (WABA com modo híbrido ativo): reagir e responder ficam
   // desabilitados — o roteamento híbrido/transporte não suporta essas ações.
   const isHybridChannel = !!whatsapp?.hybridMode && whatsapp.hybridMode !== "disabled";
-  const isTextMessage = ["chat", "extendedTextMessage", "conversation"].includes(msg.mediaType || "chat");
+  // Mensagem de texto recebida por WABA Meta/Instagram/Messenger/Dialog360/Gupshup e
+  // meow chega com mediaType "text" (o mesmo vale para o outbound do webchat) — sem ele
+  // aqui, Copiar texto / Pergunte a IA / Traduzir sumiam do menu dessas mensagens,
+  // embora aparecessem nas enviadas pelo atendente (que nascem "chat").
+  const isTextMessage = ["chat", "text", "extendedTextMessage", "conversation"].includes(msg.mediaType || "chat");
+  // Editar mantem a lista ANTIGA de proposito: os canais que gravam "text" nao
+  // suportam edicao de mensagem, e incluir o tipo aqui faria surgir um "Editar" que
+  // nao funciona (Instagram, Messenger, webchat e echo do gupshup).
+  const isEditableTextMessage = ["chat", "extendedTextMessage", "conversation"].includes(msg.mediaType || "chat");
   const isAudio = ["audio", "audioMessage"].includes(msg.mediaType || "");
   const canForward = !NON_FORWARDABLE_TYPES.has(msg.mediaType || "") && !isRestricted;
   const isStickerMsg = msg.mediaType === "sticker" || msg.mediaType === "stickerMessage" || msg.mediaType === "lottieStickerMessage";
@@ -5111,14 +5202,16 @@ export const MessageBubble = React.memo(function MessageBubble({ message: msg, a
         )}
 
         {editing ? (
-          <div className="space-y-2 w-full min-w-[220px]">
+          <div className="space-y-2 w-full min-w-[min(220px,100%)]">
             <textarea
               ref={editTextareaRef}
               value={editText}
               onChange={handleEditInput}
               onKeyDown={handleEditKeyDown}
               rows={3}
-              className="w-full rounded-lg border-2 border-primary/40 focus:border-primary bg-background text-foreground px-3 py-2 text-sm leading-relaxed resize-none outline-none transition-colors shadow-inner min-h-[72px]"
+              // text-base no mobile: fonte < 16px faz o iOS ampliar a pagina ao
+              // focar o campo. A partir de sm volta a 14px.
+              className="w-full rounded-lg border-2 border-primary/40 focus:border-primary bg-background text-foreground px-3 py-2 text-base sm:text-sm leading-relaxed resize-none outline-none transition-colors shadow-inner min-h-[72px]"
             />
             <div className="flex items-center justify-between gap-2">
               <span className="text-[10px] text-foreground/70 select-none bg-black/10 dark:bg-white/10 rounded px-1.5 py-0.5">Enter {t("toSave")} · Esc {t("toCancel")}</span>
@@ -5315,7 +5408,7 @@ export const MessageBubble = React.memo(function MessageBubble({ message: msg, a
                 <Forward className="mr-2 h-4 w-4" /> {t("forwardPrivateChat")}
               </DropdownMenuItem>
             )}
-            {msg.fromMe && isTextMessage && onEdit && !["dialog360", "gupshup", "waba"].includes(String(msg.channel || "").toLowerCase()) && (
+            {msg.fromMe && isEditableTextMessage && onEdit && !["dialog360", "gupshup", "waba"].includes(String(msg.channel || "").toLowerCase()) && (
               <DropdownMenuItem onClick={() => { setEditText(msg.body); setEditing(true); }}>
                 <Pencil className="mr-2 h-4 w-4" /> {t("edit")}
               </DropdownMenuItem>

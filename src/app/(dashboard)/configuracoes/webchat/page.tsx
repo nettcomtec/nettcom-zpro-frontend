@@ -45,6 +45,7 @@ import {
   Copy,
   CheckCircle,
   AlertTriangle,
+  Info,
   XCircle,
   Download,
   Play,
@@ -1011,6 +1012,14 @@ export default function WebchatPage() {
                 {/* ── Formulário inicial (pré-chat) ── */}
                 <TabsContent value="prechat" className="space-y-4 pt-4">
                   <p className="text-xs text-muted-foreground">{t("preChatDesc")}</p>
+                  <Alert className="border-amber-500/60 bg-amber-50 text-amber-900 dark:bg-amber-950/40 dark:text-amber-200">
+                    <Info className="h-4 w-4" />
+                    <AlertDescription>
+                      <strong>{t("preChatDirectLinkOnlyTitle")}</strong>
+                      <br />
+                      {t("preChatDirectLinkOnlyDesc")}
+                    </AlertDescription>
+                  </Alert>
               <div className="flex items-center justify-between gap-3 rounded-lg border p-3">
                 <Label htmlFor="wcPreChatEnable" className="cursor-pointer">
                   {t("preChatEnable")}

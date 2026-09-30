@@ -40,7 +40,7 @@ const CATEGORIES: { key: string; labelKey: string; types: string[] }[] = [
   {
     key: "integrations",
     labelKey: "paletteCatIntegrations",
-    types: ["webhook", "webhookAll", "chatgpt", "typebot", "n8n", "vapi", "sms"],
+    types: ["webhook", "webhookAll", "chatgpt", "agent", "typebot", "n8n", "vapi", "sms"],
   },
   {
     key: "crm",

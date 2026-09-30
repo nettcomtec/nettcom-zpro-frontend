@@ -207,7 +207,7 @@ export default function MassaWavoipPage() {
 
   const clearFile = () => { setUploadedFile(null); audioBufferRef.current = null; };
 
-  // ---- Injeção de áudio na chamada (porta do MassaWavoip.vue) ----
+ // ---- Injeção de áudio na chamada (porta do MassaWavoip) ----
   // Monta um MediaStream a partir do arquivo (source -> gain -> MediaStreamDestination)
   // e o publica em window.currentMP3Stream para o getUserMedia interceptado devolver.
   // Fica SILENCIOSO até source.start() (chamado no aceite do destinatário).

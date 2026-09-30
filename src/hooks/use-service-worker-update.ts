@@ -3,6 +3,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { disconnectSocket } from "@/lib/socket";
 import { logger } from "@/lib/logger";
+import { clearStoredPushFlags } from "@/lib/push-subscription";
 import pkg from "../../package.json";
 
 // Versão real do build (frontend/package.json) — antes era um "4.0.0" hardcoded
@@ -225,6 +226,12 @@ export function useServiceWorkerUpdate() {
 
       if ("serviceWorker" in navigator) {
         try {
+          // Desregistrar o SW mata a assinatura de Web Push junto. Sem limpar a
+          // flag, o PWA seguia achando que estava inscrito e ninguém refazia a
+          // assinatura — o iPhone parava de receber push a cada versão nova.
+          // Com a flag limpa, o self-heal do usePushNotifications reinscreve no
+          // boot seguinte (permissão já concedida, sem prompt).
+          clearStoredPushFlags();
           const registrations = await navigator.serviceWorker.getRegistrations();
           await Promise.all(registrations.map((r) => r.unregister()));
           await new Promise((r) => setTimeout(r, 300));

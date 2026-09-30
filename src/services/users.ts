@@ -14,6 +14,7 @@ export interface User {
   phone?: string;
   status?: string;
   isOnline?: boolean;
+  lastLogin?: string | null;
   inactive?: boolean;
   restrictedUser?: boolean | string;
   blockWavoip?: boolean;
@@ -75,6 +76,14 @@ export async function reactivateUser(userId: number) {
 
 export async function updateUserConfigs(userId: number, configs: Record<string, unknown>) {
   return api.put(`/users/${userId}/configs`, configs);
+}
+
+// Marca o tour de boas-vindas como visto no servidor (best-effort, chamador dá
+// catch silencioso). skipNoPermissionToast: backend antigo sem "tourDone" na
+// allowlist de User.configs responde 403 ERR_NO_PERMISSION — sem a flag, o
+// toast global "sem permissão" apareceria do nada no login.
+export async function persistTourDone(userId: number) {
+  return api.put(`/users/${userId}/configs`, { tourDone: "v1" }, { skipNoPermissionToast: true });
 }
 
 // Troca da própria senha (exige senha atual; backend limpa mustChangePassword)

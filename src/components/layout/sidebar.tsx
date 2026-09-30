@@ -38,9 +38,11 @@ import {
   StickyNote, Split, Cog, PhoneCall, Gift, Instagram,
   BarChart2, Youtube, Music2,
   HardDrive, Download, Smartphone, CheckCircle2, X, ShoppingBag, Package, Linkedin, Facebook,
-  Home, Compass, Receipt, CircleDot, PauseCircle, ListChecks, MailPlus,
+  Home, Compass, Receipt, CircleDot, PauseCircle, ListChecks, MailPlus, DatabaseZap,
+  Coins, Sparkles,
 } from "lucide-react";
 import { updateUserIsOnline } from "@/services/users";
+import { unsubscribePush } from "@/lib/push-subscription";
 import { getBullBoardStatus } from "@/services/superadmin";
 import { getInitials } from "@/lib/utils";
 import { useBrandingStore } from "@/stores/branding-store";
@@ -243,6 +245,7 @@ function buildAdminMenu(t: (key: string) => string): NavCategory[] {
       icon: Bot,
       items: sortItems([
         { name: t("item.agendamentos"), href: "/agendamentos", icon: Calendar, routeName: "agendamentos", tourId: "tour-agendamentos" },
+        { name: t("item.aiAgents"), href: "/agentes-ia", icon: Bot, routeName: "agentes-ia", tourId: "tour-agentes-ia" },
         { name: t("item.aniversarios"), href: "/aniversarios", icon: Gift, routeName: "aniversarios", tourId: "tour-aniversarios" },
         { name: t("item.chatFlow"), href: "/chat-flow", icon: Workflow, routeName: "chat-flow", tourId: "tour-chatflow" },
         { name: t("item.instagramAutomacao"), href: "/instagram-automacao", icon: Instagram, routeName: "instagram-automacao" },
@@ -291,6 +294,8 @@ function buildAdminMenu(t: (key: string) => string): NavCategory[] {
         { name: t("item.api"), href: "/api-service", icon: Split, routeName: "api-service", tourId: "tour-api" },
         { name: t("item.auditLog"), href: "/audit-log", icon: ClipboardList, routeName: "audit-log", tourId: "tour-auditlog" },
         { name: t("item.configuracoes"), href: "/configuracoes", icon: Settings, routeName: "configuracoes", tourId: "tour-config" },
+        // Só aparece com o gate dos Créditos de IA ligado (fail-closed em getProfileMenus).
+        { name: t("item.aiCredits"), href: "/creditos-ia", icon: Coins, routeName: "creditos-ia" },
         { name: t("item.integracoesMeta"), href: "/integracoes-meta", icon: MessageCircle, routeName: "integracoes-meta", tourId: "tour-integracoes-meta" },
       ]),
     },
@@ -324,6 +329,7 @@ function buildSuperAdminMenu(t: (key: string) => string): NavCategory[] {
           items: sortItems([
             { name: t("item.pagamentos"), href: "/pagamentostenants", icon: CreditCard, routeName: "pagamentostenants" },
             { name: t("item.planos"), href: "/planos", icon: CreditCard, routeName: "planos" },
+            { name: t("item.aiPlatform"), href: "/ia-plataforma", icon: Sparkles, routeName: "iaPlataforma" },
           ]),
         },
       ],
@@ -392,6 +398,7 @@ function buildSuperAdminMenu(t: (key: string) => string): NavCategory[] {
             { name: t("item.storageConfig"), href: "/storage-config", icon: HardDrive, routeName: "storageConfig" },
             { name: t("item.dadosInternos"), href: "/tenantsPk", icon: Database, routeName: "tenantsPk" },
             { name: t("item.auditLog"), href: "/audit-log", icon: ClipboardList, routeName: "audit-log" },
+            { name: t("item.bancoDeDados"), href: "/banco-de-dados", icon: DatabaseZap, routeName: "bancoDeDados" },
           ]),
         },
       ],
@@ -407,14 +414,23 @@ function buildSuperAdminMenu(t: (key: string) => string): NavCategory[] {
   ];
 }
 
-function getProfileMenus(profile: ProfileType, menuVisibility: Record<string, boolean>, t: (key: string) => string, isRestricted?: boolean, planFeatures?: PlanFeatures | null, wavoipEnabled?: boolean): NavCategory[] {
+function getProfileMenus(profile: ProfileType, menuVisibility: Record<string, boolean>, t: (key: string) => string, isRestricted?: boolean, planFeatures?: PlanFeatures | null, wavoipEnabled?: boolean, tenantMenuVisibility?: Record<string, boolean> | null, aiCreditsVisible?: boolean): NavCategory[] {
   const isVisible = (routeName?: string) => {
     if (!routeName) return true;
-    // Vue MainLayout.vue:2073-2075 — restrictedUser oculta o menu de contatos
+    // Teto do TENANT (AND): para user/super/custom o `menuVisibility` abaixo é o
+    // menuPermissions do próprio usuário (sobrescrito no boot/refresh do layout),
+    // então o que o superadmin desligou em /tenants só sobrevive neste mapa.
+    if (tenantMenuVisibility && isMenuRouteHidden(tenantMenuVisibility, routeName)) return false;
+ // Front legado — restrictedUser oculta o menu de contatos
     if (routeName === "contatos" && isRestricted) return false;
     // Interruptor do WaVoIP no tenant (isWavoipEnabled = plano + Tenant.wavoipEnabled).
     // `undefined` = chamador antigo que não passa o gate → não esconde nada.
     if (routeName === "wavoip" && wavoipEnabled === false) return false;
+    // Créditos de IA: polaridade INVERTIDA em relação ao WaVoIP — FAIL-CLOSED. Só
+    // `true` explícito mostra o item; `undefined` (chamador que não passa o gate)
+    // esconde. O valor vem de useAiCreditsNavVisible() (recurso ligado no tenant +
+    // quem pode gerenciar), então user/super e tenant sem o recurso nunca veem o item.
+    if (routeName === "creditos-ia" && aiCreditsVisible !== true) return false;
     // O PLANO é o teto: rota de capability não contratada some do menu, independente
     // de menuVisibility/permissão. Plano ausente => libera (grandfathering). AND com o resto.
     if (!planAllowsRoute(planFeatures, routeName)) return false;
@@ -505,8 +521,32 @@ export interface BuildNavEntriesArgs {
   showPayments?: boolean;
   /** Troca de senha obrigatória: nav vazia (beco-sem-saída em /trocar-senha). */
   mustChangePassword?: boolean;
+  /** Termos do revendedor pendentes (só admin): nav vazia (beco-sem-saída em /aceite-termos). */
+  resellerTermsPending?: boolean;
   /** isWavoipEnabled() do auth-store: plano + interruptor Tenant.wavoipEnabled. */
   wavoipEnabled?: boolean;
+  /** Teto do tenant (auth-store.tenantMenuVisibility). Ausente = sem teto (chamador antigo). */
+  tenantMenuVisibility?: Record<string, boolean>;
+  /** useAiCreditsNavVisible(). FAIL-CLOSED: ausente ou false = item "Créditos de IA" oculto. */
+  aiCreditsVisible?: boolean;
+}
+
+/**
+ * Gate do item "Créditos de IA" na navegação (sidebar E command palette — mesma fonte,
+ * para os dois nunca divergirem). Recurso ligado no tenant (plano AND interruptor,
+ * fail-closed) AND quem pode gerenciar (admin, ou custom com `ai_credits_manage`).
+ * Para o perfil custom exige também a chave de menu marcada no template — é a MESMA
+ * leitura do usePageAccess (`=== true`), então o item nunca aponta para "acesso negado".
+ */
+export function useAiCreditsNavVisible(): boolean {
+  return useAuthStore((s) => {
+    if (!s.isAiCreditsEnabled() || !s.canManageAiCredits()) return false;
+    if (s.user?.profile === "custom") {
+      const perms = (s.user.customProfile?.menuPermissions as Record<string, boolean> | undefined) || {};
+      return perms["creditos-ia"] === true;
+    }
+    return true;
+  });
 }
 
 /**
@@ -514,7 +554,7 @@ export interface BuildNavEntriesArgs {
  * FILTRADA por TODOS os gates da sidebar: planAllowsRoute (plano é o teto),
  * isMenuRouteHidden (alias-aware, vale p/ perfil custom), restrictedUser
  * (esconde contatos), união user+admin para o perfil custom, e o lockdown de
- * pagamento atrasado (Vue MainLayout.vue:1860 — somente a rota de
+ * pagamento atrasado (Front legado — somente a rota de
  * regularização). Consumido pela Sidebar E pelo CommandPalette — qualquer
  * mudança de gate aqui vale automaticamente para os dois (paridade de listagem).
  */
@@ -527,14 +567,17 @@ export function buildNavEntriesForProfile({
   paymentOverdue,
   showPayments,
   mustChangePassword,
+  resellerTermsPending,
   wavoipEnabled,
+  tenantMenuVisibility,
+  aiCreditsVisible,
 }: BuildNavEntriesArgs): NavCategory[] {
   // Troca de senha obrigatória: sem menu nenhum — o guard prende em /trocar-senha
   // e o backend nega todo o resto com 403; itens de nav seriam só ruído.
   if (mustChangePassword && profile !== "superadmin") {
     return [];
   }
-  // Vue MainLayout.vue:1860 — se houver pagamento OVERDUE, exibe apenas link de pagamento.
+ // Front legado — se houver pagamento OVERDUE, exibe apenas link de pagamento.
   // LGPD: usuários comuns sem acesso a pagamentos não veem essa lockdown — mantêm a nav
   // normal; o backend bloqueia operações com 402 quando aplicável.
   if (paymentOverdue && showPayments) {
@@ -546,7 +589,13 @@ export function buildNavEntriesForProfile({
       defaultOpen: true,
     }];
   }
-  return getProfileMenus(profile, menuVisibility, t, isRestricted, profile === "superadmin" ? null : planFeatures, wavoipEnabled);
+  // Termos do revendedor pendentes: sem menu — o guard prende em /aceite-termos e
+  // o backend nega o resto com 403. Fica DEPOIS da inadimplência (ordem
+  // pagamento → senha → termos: o link de pagamento continua visível).
+  if (resellerTermsPending && profile === "admin") {
+    return [];
+  }
+  return getProfileMenus(profile, menuVisibility, t, isRestricted, profile === "superadmin" ? null : planFeatures, wavoipEnabled, profile === "superadmin" ? null : tenantMenuVisibility, aiCreditsVisible);
 }
 
 /**
@@ -560,6 +609,9 @@ export async function performLogout(setOffline: boolean): Promise<void> {
   if (setOffline && user?.userId) {
     try { await updateUserIsOnline(user.userId, false); } catch { /* ignora — sai mesmo assim */ }
   }
+  // Web Push (PWA): desfaz a assinatura deste aparelho para quem saiu parar de
+  // receber avisos aqui. Best-effort com teto de 3s — sair nunca trava.
+  await unsubscribePush();
   clearAuth();
   window.location.href = "/login";
 }
@@ -575,10 +627,11 @@ export function Sidebar() {
   const { logoTimestamp, appName, tenantBranding } = useBrandingStore();
   const { showButton: showPwaButton, canPromptInstall, canOpenApp, install: installPWA, showIOSInstructions, setShowIOSInstructions } = useInstallPWA();
   const { sidebarCollapsed, setSidebarCollapsed, mobileSidebarOpen, setMobileSidebarOpen, tourActive } = useUIStore();
-  const { user, menuVisibility, isRestrictedUser, paymentOverdue, canViewPayments, planFeatures } = useAuthStore();
+  const { user, menuVisibility, tenantMenuVisibility, isRestrictedUser, paymentOverdue, canViewPayments, planFeatures } = useAuthStore();
   const wavoipEnabled = useAuthStore((s) => s.isWavoipEnabled());
+  const aiCreditsVisible = useAiCreditsNavVisible();
 
-  const effectiveTenantId = tenantBranding && tenantBranding.customLogoTimestamp > 0 ? tenantBranding.tenantId : undefined;
+  const effectiveTenantId =tenantBranding && tenantBranding.customLogoTimestamp > 0 ? tenantBranding.tenantId : undefined;
   const effectiveLogoTs = tenantBranding?.customLogoTimestamp || logoTimestamp;
   const effectiveLogoDarkTs = tenantBranding?.customLogoDarkTimestamp || logoTimestamp;
   const logoUrl     = getLogoUrl(effectiveLogoTs || undefined, effectiveTenantId);
@@ -710,7 +763,10 @@ export function Sidebar() {
       paymentOverdue,
       showPayments,
       mustChangePassword: !!user?.mustChangePassword,
+      resellerTermsPending: !!user?.resellerTermsPending,
       wavoipEnabled,
+      tenantMenuVisibility: tenantMenuVisibility || {},
+      aiCreditsVisible,
     });
     // Bull-Board: injeta o atalho (link externo, nova aba) no subgrupo Operação
     // do menu Sistema do superadmin, só quando o backend reporta disponível.
@@ -727,7 +783,7 @@ export function Sidebar() {
     }
     return cats;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [profile, menuVisibility, isRestricted, paymentOverdue, showPayments, planFeatures, bullBoard.enabled, bullBoard.url, user?.mustChangePassword, wavoipEnabled]);
+  }, [profile, menuVisibility, tenantMenuVisibility, isRestricted, paymentOverdue, showPayments, planFeatures, bullBoard.enabled, bullBoard.url, user?.mustChangePassword, user?.resellerTermsPending, wavoipEnabled, aiCreditsVisible]);
 
   // During tour: expand all collapsed-sidebar categories so items are in the DOM
   useEffect(() => {

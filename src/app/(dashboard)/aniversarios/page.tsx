@@ -308,7 +308,7 @@ export default function AniversariosPage() {
     fetchWhatsapps()
       .then((res) => {
         const all: Whatsapp[] = Array.isArray(res.data) ? res.data : [];
-        // Filter: connected + birthdayDate enabled, same types as Vue
+ // Filter: connected + birthdayDate enabled, same types as front legado
         const allowedTypes = ["whatsapp", "waba", "instagram", "baileys", "zapo", "evo", "evogo", "meow", "uazapi", "zapi"];
         const eligible = all.filter(
           (w) =>

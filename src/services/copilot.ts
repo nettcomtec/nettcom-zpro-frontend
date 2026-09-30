@@ -1,4 +1,27 @@
 import api, { BACKGROUND_REQUEST } from "@/lib/api";
+import { locales, type Locale } from "@/i18n/config";
+
+/**
+ * Idioma da interface do atendente, para as operacoes do Copiloto cujo texto e
+ * LIDO POR ELE (resumo, sentimento, insights, Pergunte a IA). Nao vai nas que
+ * produzem texto para o CLIENTE (sugerir resposta, respostas rapidas, reescrever,
+ * gerar template): la o idioma continua sendo o do tenant, senao a lingua do
+ * atendente vazaria para a conversa. Backend antigo ignora o campo.
+ *
+ * Devolve objeto para dar spread — VAZIO quando o usuario nunca escolheu idioma
+ * (o LocalStorage so e escrito no setLocale). Sem esse cuidado, quem nunca trocou
+ * de idioma mandaria "pt" e sobrescreveria o idioma configurado no tenant.
+ */
+export function copilotUiLangPayload(): { uiLang?: Locale } {
+  if (typeof window === "undefined") return {};
+  try {
+    const stored = localStorage.getItem("language") as Locale | null;
+    if (stored && (locales as readonly string[]).includes(stored)) return { uiLang: stored };
+  } catch {
+    // noop — sem escolha explicita, segue o idioma do tenant
+  }
+  return {};
+}
 
 export type SentimentLevel = "positive" | "neutral" | "negative" | "frustrated";
 
@@ -32,7 +55,7 @@ export async function analyzeSentiment(
 ): Promise<SentimentResult> {
   const { data } = await api.post<SentimentResult>(
     "/copilot/sentiment",
-    { ticketId },
+    { ticketId, ...copilotUiLangPayload() },
     options?.background ? { ...BACKGROUND_REQUEST } : undefined
   );
   return data;
@@ -97,6 +120,7 @@ export async function summarizeContact(
     contactId,
     ticketId,
     systemPrompt,
+    ...copilotUiLangPayload(),
   });
   return data;
 }
@@ -135,6 +159,7 @@ export async function generateDashboardInsights(
     stats,
     systemPrompt,
     period,
+    ...copilotUiLangPayload(),
   });
   return data;
 }

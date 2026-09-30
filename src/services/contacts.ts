@@ -51,6 +51,10 @@ export interface Contact {
   cidade?: string;
   estado?: string;
   cep?: string;
+  logradouro?: string | null;
+  numeroEndereco?: string | null;
+  complemento?: string | null;
+  bairro?: string | null;
   bsuid?: string | null;
   username?: string | null;
   parentBsuid?: string | null;
@@ -73,6 +77,10 @@ export interface ContactPayload {
   cidade?: string;
   estado?: string;
   cep?: string;
+  logradouro?: string;
+  numeroEndereco?: string;
+  complemento?: string;
+  bairro?: string;
   messengerId?: string;
   instagramPK?: string;
   hubWhatsapp?: string;
@@ -98,10 +106,23 @@ export interface ContactPayload {
   hubEmail?: string;
 }
 
-export async function fetchContacts(params?: { searchParam?: string; pageNumber?: number; pageSize?: number; tagId?: number; walletId?: number; queueId?: number; smartSearch?: boolean }) {
-  const { walletId, smartSearch = true, ...rest } = params || { searchParam: "", pageNumber: 1 };
+// Envelope do GET /contacts. `addressFilter: true` = o backend entende addressBairro/addressCidade/
+// addressUfs; sem ele, com filtro de endereço ativo, a tela aborta (backend antigo ignora os params e
+// devolveria a base inteira). O retorno de fetchContacts segue sem tipo para não quebrar os
+// chamadores antigos — quem precisa do eco usa este tipo.
+export interface ContactsListResponse {
+  contacts: Contact[];
+  count: number;
+  hasMore: boolean;
+  addressFilter?: boolean;
+}
+
+export async function fetchContacts(params?: { searchParam?: string; pageNumber?: number; pageSize?: number; tagId?: number; tagIds?: number[]; tagMatch?: "any" | "all"; walletId?: number; queueId?: number; smartSearch?: boolean; addressBairro?: string; addressCidade?: string; addressUfs?: string }) {
+  const { walletId, tagIds, smartSearch = true, ...rest } = params || { searchParam: "", pageNumber: 1 };
   const queryParams: Record<string, unknown> = { ...rest, smartSearch };
   if (walletId != null) queryParams.walletId = { id: walletId };
+  // CSV na query: array em GET vira objeto no qs acima do arrayLimit
+  if (tagIds?.length) queryParams.tagIds = tagIds.join(",");
   return api.get("/contacts", { params: queryParams });
 }
 
@@ -167,19 +188,31 @@ export async function exportContacts(params?: {
   mode?: "all" | "filtered";
   searchParam?: string;
   walletId?: number;
+  queueId?: number;
   tagId?: number;
+  tagIds?: number[];
+  tagMatch?: "any" | "all";
   smartSearch?: boolean;
+  addressBairro?: string;
+  addressCidade?: string;
+  addressUfs?: string;
 }) {
-  return api.post<{ downloadLink: string }>("/contacts/export", params || {});
+  return api.post<{ downloadLink: string; addressFilter?: boolean }>("/contacts/export", params || {});
 }
 
 export async function exportContactsCount(params?: {
   searchParam?: string;
   walletId?: number;
+  queueId?: number;
   tagId?: number;
+  tagIds?: number[];
+  tagMatch?: "any" | "all";
   smartSearch?: boolean;
+  addressBairro?: string;
+  addressCidade?: string;
+  addressUfs?: string;
 }) {
-  return api.post<{ all: number; filtered: number }>("/contacts/export/count", params || {});
+  return api.post<{ all: number; filtered: number; addressFilter?: boolean }>("/contacts/export/count", params || {});
 }
 
 export type UpdateBehavior =

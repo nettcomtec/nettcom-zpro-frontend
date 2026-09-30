@@ -3,6 +3,7 @@
 import { formatDate as formatDateIntl } from "@/lib/format";
 
 import React, { useState, useEffect, useCallback, useRef } from "react";
+import Link from "next/link";
 import { useTranslations } from "next-intl";
 import { PageHeader } from "@/components/layout/page-header";
 import { Card, CardContent } from "@/components/ui/card";
@@ -30,7 +31,7 @@ import {
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import {
   CheckSquare, Plus, Search, Pencil, Trash2,
-  LayoutList, Kanban as KanbanIcon, GripVertical,
+  LayoutList, Kanban as KanbanIcon, GripVertical, ContactRound,
 } from "lucide-react";
 import { toast } from "sonner";
 import {
@@ -41,6 +42,7 @@ import { fetchAllUsers, type User } from "@/services/users";
 import { usePageAccess } from "@/hooks/use-page-access";
 import { AccessDenied } from "@/components/layout/access-denied";
 import { useAuthStore } from "@/stores/auth-store";
+import { useLiveMode } from "@/hooks/use-live-mode";
 import { cn } from "@/lib/utils";
 
 const STATUS_VARIANT_MAP: Record<string, "secondary" | "default" | "destructive" | "outline" | "warning"> = {
@@ -73,6 +75,37 @@ function formatDate(dateStr?: string): string {
 function isOverdue(dateStr?: string): boolean {
   if (!dateStr) return false;
   return new Date(dateStr) < new Date();
+}
+
+// ─── Contato vinculado (PLANO_CRM_CONTATO D19) ───────────────────────────────
+// Backend antigo não manda `contact`: o chip simplesmente não aparece. Usuário
+// restrito não vê o chip (nome do contato), como o "Ver perfil" do funil.
+// O link não é arrastável e não propaga clique/toque: arrastar o card segue
+// funcionando e tocar no chip não dispara o arraste por toque do kanban.
+
+function TaskContactChip({ contact, className }: { contact?: TodoItem["contact"]; className?: string }) {
+  const t = useTranslations("relationship");
+  const { isLiveMode } = useLiveMode();
+  const isRestricted = useAuthStore((s) => s.isRestrictedUser());
+  if (!contact?.id || isRestricted) return null;
+  const name = contact.name || `#${contact.id}`;
+  return (
+    <div className={cn("min-w-0", className)}>
+      <Link
+        href={`/contatos/${contact.id}`}
+        draggable={false}
+        onClick={(e) => e.stopPropagation()}
+        onTouchStart={(e) => e.stopPropagation()}
+        className="inline-flex max-w-[14rem] items-center gap-1 rounded-full border bg-muted/40 px-2 py-0.5 text-xs text-muted-foreground transition-colors hover:border-primary/40 hover:text-primary"
+        title={isLiveMode ? undefined : name}
+      >
+        <ContactRound className="h-3 w-3 shrink-0" />
+        <span className={cn("truncate", isLiveMode && "live-blur-text")}>
+          {t("taskContact", { name })}
+        </span>
+      </Link>
+    </div>
+  );
 }
 
 // ─── Kanban Card ─────────────────────────────────────────────────────────────
@@ -132,6 +165,8 @@ function TaskCard({ task, priorityMap, onDragStart, onDragEnd, onEdit, onDelete,
       {task.description && (
         <p className="text-xs text-muted-foreground line-clamp-2 mt-1.5 pl-6">{task.description}</p>
       )}
+
+      <TaskContactChip contact={task.contact} className="mt-1.5 pl-6" />
 
       {/* Footer */}
       <div className="mt-2.5 pl-6 flex flex-col gap-1.5">
@@ -654,6 +689,7 @@ export default function TarefasPage() {
                                 {task.description && (
                                   <p className="text-xs text-muted-foreground line-clamp-1">{task.description}</p>
                                 )}
+                                <TaskContactChip contact={task.contact} className="mt-1" />
                               </div>
                             </TableCell>
                             <TableCell>

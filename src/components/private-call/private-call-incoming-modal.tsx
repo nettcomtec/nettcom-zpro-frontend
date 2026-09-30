@@ -6,6 +6,7 @@ import { useTranslations } from "next-intl";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
+import { startCallRingtone } from "@/lib/call-ringtone";
 import { usePrivateCallStore } from "@/stores/private-call-store";
 import { usePrivateCallActions } from "./private-call-provider";
 
@@ -22,35 +23,9 @@ export function PrivateCallIncomingModal() {
 
   useEffect(() => {
     if (!open) return;
-    const AudioCtx: typeof AudioContext | undefined =
-      typeof window !== "undefined"
-        ? window.AudioContext ?? (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext
-        : undefined;
-    if (!AudioCtx) return;
-    const ctx = new AudioCtx();
-    let stopped = false;
-
-    const beep = () => {
-      if (stopped) return;
-      try {
-        const osc = ctx.createOscillator();
-        const gain = ctx.createGain();
-        osc.connect(gain);
-        gain.connect(ctx.destination);
-        osc.frequency.value = 480;
-        gain.gain.setValueAtTime(0.3, ctx.currentTime);
-        gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.6);
-        osc.start(ctx.currentTime);
-        osc.stop(ctx.currentTime + 0.6);
-      } catch { /* ignore */ }
-      setTimeout(() => { if (!stopped) beep(); }, 1800);
-    };
-    beep();
-
-    return () => {
-      stopped = true;
-      try { ctx.close(); } catch { /* ignore */ }
-    };
+    // Toca o arquivo de public/ quando existir; senão, o beep sintetizado de
+    // sempre. Ver lib/call-ringtone.ts.
+    return startCallRingtone();
   }, [open]);
 
   return (

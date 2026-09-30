@@ -396,19 +396,28 @@ Include only the components requested.`
       raw = raw.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").trim()
       const parsed = JSON.parse(raw)
 
-      // Aplica no state
+      // Aplica no state, cortando nos limites oficiais da Meta: o `maxLength` dos
+      // campos so limita digitacao/colagem, nao valor que chega pelo state, entao
+      // texto acima do limite ficaria no formulario e so seria recusado ao salvar.
       setTplName(String(parsed.name || "").toLowerCase().replace(/[^a-z0-9_]/g, "_"))
       if (Array.isArray(parsed.components)) {
         for (const c of parsed.components) {
           if (c.type === "HEADER" && c.format === "TEXT") {
             setTplHeaderFormat("TEXT")
-            setTplHeaderText(String(c.text || ""))
+            setTplHeaderText(String(c.text || "").slice(0, WABA_LIMITS.templateHeaderText))
           } else if (c.type === "BODY") {
-            setTplBody(String(c.text || ""))
+            setTplBody(String(c.text || "").slice(0, WABA_LIMITS.templateBody))
           } else if (c.type === "FOOTER") {
-            setTplFooter(String(c.text || ""))
+            setTplFooter(String(c.text || "").slice(0, WABA_LIMITS.templateFooter))
           } else if (c.type === "BUTTONS" && Array.isArray(c.buttons)) {
-            setTplButtons(parseTemplateButtons(c))
+            setTplButtons(
+              parseTemplateButtons(c).map((b) => ({
+                ...b,
+                text: (b.text || "").slice(0, WABA_LIMITS.templateButtonText),
+                url: b.url ? b.url.slice(0, WABA_LIMITS.templateUrl) : b.url,
+                phone_number: b.phone_number ? b.phone_number.slice(0, WABA_LIMITS.templatePhone) : b.phone_number,
+              }))
+            )
           }
         }
       }

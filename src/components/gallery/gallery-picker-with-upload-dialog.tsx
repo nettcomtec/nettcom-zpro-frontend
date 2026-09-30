@@ -13,7 +13,10 @@ import {
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { fetchGallery, getGalleryPreviewUrl, uploadGalleryFiles, type GalleryItem } from "@/services/gallery";
+import {
+  fetchGallery, getGalleryPreviewUrl, uploadGalleryFiles,
+  type GalleryItem, type UploadFailureCode,
+} from "@/services/gallery";
 
 const MAX_UPLOAD_SIZE = 50 * 1024 * 1024;
 
@@ -58,6 +61,7 @@ export function GalleryPickerWithUploadDialog({
   uploadAccept = "image/*,video/*,application/pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx",
 }: GalleryPickerWithUploadDialogProps) {
   const t = useTranslations("atendimentoChat");
+  const tGal = useTranslations("galeriaPage");
   const [items, setItems] = useState<GalleryItem[]>([]);
   const [loading, setLoading] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -132,9 +136,35 @@ export function GalleryPickerWithUploadDialog({
     }
     setUploading(true);
     try {
-      await uploadGalleryFiles(files);
-      toast.success(t("galleryUploadSuccess") || "Upload concluído");
-      await loadFirstPage();
+      // uploadGalleryFiles não lança por arquivo: devolve quem subiu e quem falhou (com o
+      // motivo). Antes o retorno era ignorado e o toast de sucesso saía mesmo com tudo recusado.
+      const { success, failed } = await uploadGalleryFiles(files);
+      if (success > 0) toast.success(t("galleryUploadSuccess") || "Upload concluído");
+      if (failed.length > 0) {
+        const reasonLabel = (code: UploadFailureCode) => {
+          switch (code) {
+            case "too_large":    return tGal("uploadReasonTooLarge");
+            case "unsupported":  return tGal("uploadReasonUnsupported");
+            case "unauthorized": return tGal("uploadReasonUnauthorized");
+            case "quota":        return tGal("uploadReasonQuota");
+            case "server_error": return tGal("uploadReasonServerError");
+            case "timeout":      return tGal("uploadReasonTimeout");
+            case "network":      return tGal("uploadReasonNetwork");
+            default:             return tGal("uploadReasonUnknown");
+          }
+        };
+        const grouped = failed.reduce<Record<string, number>>((acc, f) => {
+          const label = reasonLabel(f.code);
+          acc[label] = (acc[label] || 0) + 1;
+          return acc;
+        }, {});
+        const description = Object.entries(grouped)
+          .sort((a, b) => b[1] - a[1])
+          .map(([label, count]) => (count > 1 ? `${count}x ${label}` : label))
+          .join("\n");
+        toast.error(tGal("uploadPartialError", { count: failed.length }), { description });
+      }
+      if (success > 0) await loadFirstPage();
     } catch {
       toast.error(t("galleryUploadError") || "Erro no upload");
     } finally {

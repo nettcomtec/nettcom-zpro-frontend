@@ -1,6 +1,6 @@
 "use client";
-import { useState } from "react";
-import { ConfigPage } from "@/components/config/config-section";
+import { useEffect, useMemo, useState } from "react";
+import { ConfigPage, type ConfigField } from "@/components/config/config-section";
 import { Button } from "@/components/ui/button";
 import { Bot, FlaskConical, Loader2 } from "lucide-react";
 import { useTranslations } from "next-intl";
@@ -8,6 +8,8 @@ import { toast } from "sonner";
 import { COPILOT_MODELS_BY_PROVIDER } from "@/lib/openai-models";
 import { testCopilotCredentials } from "@/services/copilot";
 import { OpenAIBaseUrlTooltip } from "@/components/copilot/openai-base-url-tooltip";
+import { loadPlatformAiCatalog, usePlatformAiEnabled } from "@/components/ai-credits/platform-ai-selector";
+import { type AiPublicModelPrice } from "@/services/ai-credits";
 
 const COPILOT_PROVIDERS = [
   { value: "openai", label: "OpenAI (ChatGPT)" },
@@ -16,9 +18,49 @@ const COPILOT_PROVIDERS = [
   { value: "gemini", label: "Google (Gemini)" },
 ];
 
+// Provedor "IA da plataforma": o Copiloto consome do saldo pré-pago da empresa em vez
+// de chave própria. É o mesmo marcador que o servidor entende nos outros usos de IA.
+const PLATFORM_PROVIDER = "platform";
+
 export default function CopilotPage() {
   const t = useTranslations("copilotPage");
+  const tPlatform = useTranslations("platformAiSelector");
   const [testing, setTesting] = useState(false);
+
+  // Sem o recurso liberado na empresa NADA disso existe: nenhuma opção nova, nenhuma
+  // condição nova nos campos e nenhum request — a página fica como sempre foi.
+  const platformAiEnabled = usePlatformAiEnabled();
+  const [platformModels, setPlatformModels] = useState<AiPublicModelPrice[]>([]);
+
+  useEffect(() => {
+    if (!platformAiEnabled) return;
+    let cancelled = false;
+    loadPlatformAiCatalog()
+      .then((catalog) => {
+        if (cancelled) return;
+        setPlatformModels(catalog.models.filter((item) => item.kind === "chat"));
+      })
+      .catch(() => {
+        // Falha no catálogo nunca quebra a tela: a lista fica vazia e o que está salvo
+        // no servidor continua valendo
+        if (!cancelled) setPlatformModels([]);
+      });
+    return () => { cancelled = true; };
+  }, [platformAiEnabled]);
+
+  const providers = useMemo(
+    () =>
+      platformAiEnabled
+        ? [...COPILOT_PROVIDERS, { value: PLATFORM_PROVIDER, label: tPlatform("platform") }]
+        : COPILOT_PROVIDERS,
+    [platformAiEnabled, tPlatform]
+  );
+
+  // Chave própria e lista de modelos digitável só fazem sentido fora do modo
+  // plataforma. `undefined` (recurso desligado) = campo sem condição, como hoje.
+  const hideOnPlatform: ConfigField["visibleWhen"] = platformAiEnabled
+    ? { field: "copilotProvider", notEquals: PLATFORM_PROVIDER }
+    : undefined;
 
   const runTest = async (settings: Record<string, string>) => {
     setTesting(true);
@@ -69,16 +111,20 @@ export default function CopilotPage() {
       title={t("title")}
       description={t("description")}
       icon={Bot}
-      headerActions={({ settings }) => (
-        <Button size="sm" variant="outline" disabled={testing} onClick={() => runTest(settings)}>
-          {testing ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <FlaskConical className="mr-2 h-4 w-4" />}
-          {t("testButton")}
-        </Button>
-      )}
+      headerActions={({ settings }) =>
+        // Com a IA da plataforma não há chave nem endereço a conferir — o teste existe
+        // para validar credencial própria, então o botão sai de cena nesse modo.
+        settings.copilotProvider === PLATFORM_PROVIDER ? null : (
+          <Button size="sm" variant="outline" disabled={testing} onClick={() => runTest(settings)}>
+            {testing ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <FlaskConical className="mr-2 h-4 w-4" />}
+            {t("testButton")}
+          </Button>
+        )
+      }
       help={{
         description: t("helpDesc"),
         sections: [
-          { title: t("helpS0T"), items: [t("helpS0I0"), t("helpS0I1"), t("helpS0I2")] },
+          { title: t("helpS0T"), items: [t("helpS0I0"), t("helpS0I1"), t("helpS0I2"), t("helpS0I3")] },
           { title: t("helpS1T"), items: [t("helpS1I0"), t("helpS1I1"), t("helpS1I2")] },
           {
             title: t("helpS2T"),
@@ -108,7 +154,7 @@ export default function CopilotPage() {
               label: t("providerLabel"),
               type: "select",
               placeholder: t("providerPlaceholder"),
-              options: COPILOT_PROVIDERS,
+              options: providers,
               description: t("providerDescription"),
             },
             {
@@ -117,6 +163,7 @@ export default function CopilotPage() {
               type: "password",
               placeholder: t("apiKeyPlaceholder"),
               description: t("apiKeyDescription"),
+              visibleWhen: hideOnPlatform,
             },
             {
               key: "copilotBaseUrl",
@@ -136,7 +183,26 @@ export default function CopilotPage() {
               description: t("modelDescription"),
               optionsFromField: "copilotProvider",
               datalistOptionsMap: COPILOT_MODELS_BY_PROVIDER,
+              visibleWhen: hideOnPlatform,
             },
+            // No modo plataforma o modelo é escolha fechada: só o que está à venda no
+            // catálogo. Mesmo `key` do campo acima — os dois nunca aparecem juntos.
+            ...(platformAiEnabled
+              ? [
+                  {
+                    key: "copilotModel",
+                    label: t("modelLabel"),
+                    type: "select" as const,
+                    placeholder: t("modelPlaceholder"),
+                    description: t("modelDescription"),
+                    options: platformModels.map((item) => ({
+                      value: item.modelId,
+                      label: item.name || item.modelId,
+                    })),
+                    visibleWhen: { field: "copilotProvider", value: PLATFORM_PROVIDER },
+                  },
+                ]
+              : []),
             {
               key: "copilotSystemPrompt",
               label: t("systemPromptLabel"),

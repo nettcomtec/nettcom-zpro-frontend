@@ -69,6 +69,10 @@ const TENANT_KEY_MAP: Record<string, { url: string; field: string }> = {
   autoUnpauseOnReply:      { url: "tenantsAutoUnpauseOnReply",    field: "autoUnpauseOnReply" },
   allowDuplicateMessages:  { url: "tenantsAllowDuplicateMessages", field: "allowDuplicateMessages" },
   autoDisableIntegrationsOnAccept: { url: "tenantsAutoDisableIntegrationsOnAccept", field: "autoDisableIntegrationsOnAccept" },
+  groupTimeMetricsEnabled: { url: "tenantsGroupTimeMetrics",   field: "groupTimeMetricsEnabled" },
+  contactEventsRetentionDays: { url: "tenantsContactEventsRetention", field: "contactEventsRetentionDays" },
+  scheduleSentNoticeEnabled: { url: "tenantsScheduleSentNotice", field: "scheduleSentNoticeEnabled" },
+  aiAgentPrivateWebhookEnabled: { url: "tenantsAiAgentPrivateWebhook", field: "aiAgentPrivateWebhookEnabled" },
   botReopenGraceSeconds:   { url: "tenantsBotReopenGrace",        field: "botReopenGraceSeconds" },
   botReopenDestinationType: { url: "tenantsBotReopenGrace",       field: "botReopenDestinationType" },
   botReopenQueueId:        { url: "tenantsBotReopenGrace",        field: "botReopenQueueId" },
@@ -132,6 +136,15 @@ const TENANT_KEY_MAP: Record<string, { url: string; field: string }> = {
   limiteTickets:           { url: "tenantsTicketLimit",           field: "ticketLimit" },
 };
 
+// Retenção do histórico do contato (Tenants.contactEventsRetentionDays): valores
+// aceitos pelo backend. 0 = nunca apagar (padrão).
+const CONTACT_EVENTS_RETENTION_OPTIONS = [
+  { value: "0", labelKey: "contactEventsRetentionNever" },
+  { value: "365", labelKey: "contactEventsRetention1y" },
+  { value: "730", labelKey: "contactEventsRetention2y" },
+  { value: "1825", labelKey: "contactEventsRetention5y" },
+] as const;
+
 /**
  * Sub-cabeçalho de grupo dentro de um card. É apenas uma divisão VISUAL: nenhuma
  * configuração muda de card, então PageHelp, índice de busca e tutoriais seguem
@@ -176,6 +189,8 @@ export default function ConfigGeralPage() {
   // ao menos uma queue do tenant tem autoDistributeEnabled=true. Avisa que
   // varias settings abaixo interagem com a feature.
   const [hasAutoDistEnabledQueues, setHasAutoDistEnabledQueues] = useState(false);
+  // Retenção do histórico do contato: só existe em backend com a coluna no Tenant.
+  const [hasContactEventsRetention, setHasContactEventsRetention] = useState(false);
   // ── UX: seções recolhíveis, filtros e modo compacto ──────────────────────
   // REGRA: o estado inicial de TODOS eles reproduz a página como ela sempre foi
   // (tudo expandido, sem filtro, descrições visíveis). Recolher/filtrar é opt-in
@@ -245,6 +260,10 @@ export default function ConfigGeralPage() {
         if (tenantId && results[4]) {
           const raw = (results[4] as { data: unknown }).data;
           const tenantData = (Array.isArray(raw) ? raw[0] : raw) as Record<string, unknown>;
+          // Backend sem a coluna não devolve o campo → a linha de retenção fica oculta.
+          setHasContactEventsRetention(
+            !!tenantData && Object.prototype.hasOwnProperty.call(tenantData, "contactEventsRetentionDays")
+          );
           const tenantFieldMap: Record<string, unknown> = {
             chatbotLane: tenantData?.showChatBot,
             semRedis: tenantData?.noRedis,
@@ -253,6 +272,18 @@ export default function ConfigGeralPage() {
             autoUnpauseOnReply: tenantData?.autoUnpauseOnReply,
             allowDuplicateMessages: tenantData?.allowDuplicateMessages,
             autoDisableIntegrationsOnAccept: tenantData?.autoDisableIntegrationsOnAccept,
+            // Backend antigo não tem a coluna: cai em "enabled", que é o default
+            // real (grupos sempre contaram nas métricas) — sem regressão.
+            groupTimeMetricsEnabled: tenantData?.groupTimeMetricsEnabled ?? "enabled",
+            // Retenção do histórico do contato (dias; 0 = nunca apagar). A linha só é
+            // exibida quando o tenant traz o campo (hasContactEventsRetention).
+            contactEventsRetentionDays: tenantData?.contactEventsRetentionDays ?? 0,
+            // Backend antigo não tem a coluna: cai em "enabled", que é o default
+            // real do recurso (o aviso nasce ligado) — sem regressão.
+            scheduleSentNoticeEnabled: tenantData?.scheduleSentNoticeEnabled ?? "enabled",
+            // Backend antigo nao tem a coluna: cai em "disabled", que e o default
+            // real (rede privada bloqueada) — sem regressao.
+            aiAgentPrivateWebhookEnabled: tenantData?.aiAgentPrivateWebhookEnabled ?? "disabled",
             botReopenGraceSeconds: tenantData?.botReopenGraceSeconds ?? 0,
             botReopenDestinationType: tenantData?.botReopenDestinationType ?? "lastUser",
             botReopenQueueId: tenantData?.botReopenQueueId ?? "",
@@ -398,11 +429,14 @@ export default function ConfigGeralPage() {
         entries.map(([key, value]) => {
           const tenantMapping = TENANT_KEY_MAP[key];
           if (tenantMapping && tenantId) {
-            // customProfileEnabled é boolean no backend; demais flags são strings 'enabled'/'disabled'
+            // customProfileEnabled é boolean no backend; contactEventsRetentionDays é
+            // número de dias; demais flags são strings 'enabled'/'disabled'
             const mappedValue =
               tenantMapping.field === "customProfileEnabled"
                 ? value === "enabled"
-                : value;
+                : tenantMapping.field === "contactEventsRetentionDays"
+                  ? Number(value) || 0
+                  : value;
             return api.put(`/${tenantMapping.url}/${tenantId}`, {
               id: tenantId,
               [tenantMapping.field]: mappedValue,
@@ -672,12 +706,16 @@ export default function ConfigGeralPage() {
     { id: "bsuidStrictMode", label: t("bsuidStrictMode"), section: t("orgDistTitle") },
     { id: "forcarAdmin", label: t("forcarAdmin"), section: t("orgDistTitle") },
     { id: "uazapiDisableLid", label: t("uazapiDisableLid"), section: t("orgDistTitle") },
+    { id: "aiAgentPrivateWebhookEnabled", label: t("aiAgentPrivateWebhook"), section: t("orgDistTitle") },
     { id: "signed", label: t("signed"), section: t("attendanceResourcesTitle") },
     { id: "controleFeatures", label: t("controleFeatures"), section: t("attendanceResourcesTitle") },
     { id: "forceReason", label: t("forceReason"), section: t("attendanceResourcesTitle") },
     { id: "allowPause", label: t("allowPause"), section: t("attendanceResourcesTitle") },
     { id: "autoUnpauseOnReply", label: t("autoUnpauseOnReply"), section: t("attendanceResourcesTitle") },
     { id: "allowDuplicateMessages", label: t("allowDuplicateMessages"), section: t("attendanceResourcesTitle") },
+    { id: "groupTimeMetricsEnabled", label: t("groupTimeMetricsEnabled"), section: t("attendanceResourcesTitle") },
+    ...(hasContactEventsRetention ? [{ id: "contactEventsRetentionDays", label: t("contactEventsRetentionDays"), section: t("attendanceResourcesTitle") }] : []),
+    { id: "scheduleSentNoticeEnabled", label: t("scheduleSentNotice"), section: t("attendanceResourcesTitle") },
     { id: "botReopenGraceSeconds", label: t("botReopenGrace"), section: t("attendanceResourcesTitle") },
     { id: "botReopenDestinationType", label: t("botReopenDestination"), section: t("attendanceResourcesTitle") },
     { id: "scheduleRoutingWindowDays", label: t("scheduleRoutingWindow"), section: t("attendanceResourcesTitle") },
@@ -708,7 +746,7 @@ export default function ConfigGeralPage() {
     ...(canRunLidConsolidation ? [{ id: "normalizeBirthdays", label: t("normalizeBirthdaysTitle"), section: t("systemActionsTitle") }] : []),
     ...(canRunLidConsolidation ? [{ id: "lidConsolidation", label: t("lidConsolidationTitle"), section: t("systemActionsTitle") }] : []),
     ...(canRunLidConsolidation ? [{ id: "instagramPkSanitize", label: t("instagramPkSanitizeTitle"), section: t("systemActionsTitle") }] : []),
-  ], [t, canRunLidConsolidation]);
+  ], [t, canRunLidConsolidation, hasContactEventsRetention]);
 
   // \u00cdndice r\u00f3tulo -> descri\u00e7\u00e3o, montado a partir das mensagens cruas do namespace.
   // A conven\u00e7\u00e3o do arquivo de locale \u00e9 `chave` + `chaveDesc`, ent\u00e3o d\u00e1 para indexar
@@ -841,12 +879,20 @@ export default function ConfigGeralPage() {
       if (v === "disabled" || v === "false" || v === "0") return t("pendingValueOff");
       return v;
     };
-    return Object.entries(changed).map(([key, value]) => ({
-      key,
-      label: labelOf(key),
-      from: fmt(settings.find((s) => s.key === key)?.value),
-      to: fmt(value),
-    }));
+    // Retenção é número de dias: "0" significa "Nunca", não "Desligado".
+    const fmtRetention = (v: string | undefined) => {
+      const option = CONTACT_EVENTS_RETENTION_OPTIONS.find((o) => o.value === String(Number(v) || 0));
+      return option ? t(option.labelKey) : fmt(v);
+    };
+    return Object.entries(changed).map(([key, value]) => {
+      const format = key === "contactEventsRetentionDays" ? fmtRetention : fmt;
+      return {
+        key,
+        label: labelOf(key),
+        from: format(settings.find((s) => s.key === key)?.value),
+        to: format(value),
+      };
+    });
   }, [changed, settings, allSettingItems, t]);
 
   // Com filtro ativo a seção fica sempre aberta: filtrar e continuar vendo um
@@ -914,6 +960,9 @@ export default function ConfigGeralPage() {
     for (const [child, parent] of Object.entries(dependents)) {
       apply(`row-${child}`, hasActiveFilters && !matchesFilters(parent));
     }
+    // Retenção do histórico do contato fica fora do catálogo (linha condicional ao
+    // backend): segue o mesmo critério da própria nota para não sobrar linha órfã.
+    apply("row-contactEventsRetentionDays", hasActiveFilters && !matchesFilters("contactEventsRetentionDays"));
     // Sub-cabeçalhos de grupo somem quando todas as linhas do grupo sumiram.
     for (const [, groups] of Object.entries(SETTING_GROUP_ORDER)) {
       for (const group of groups) {
@@ -1539,6 +1588,14 @@ export default function ConfigGeralPage() {
               label={t("uazapiDisableLid")}
               description={t("uazapiDisableLidDesc")}
             />
+            <SettingRow
+              settingKey="aiAgentPrivateWebhookEnabled"
+              label={t("aiAgentPrivateWebhook")}
+              description={t("aiAgentPrivateWebhookDesc")}
+            />
+            <p id="note-aiAgentPrivateWebhookEnabled" className="js-setting-hint text-xs text-muted-foreground -mt-2 mb-3 ml-1 pl-3 border-l-2 border-amber-300 dark:border-amber-700/50">
+              {t("aiAgentPrivateWebhookNote")}
+            </p>
         </SettingsCollapsibleSection>
 
         {/* Atendimento e Recursos */}
@@ -1584,6 +1641,47 @@ export default function ConfigGeralPage() {
               label={t("allowDuplicateMessages")}
               description={t("allowDuplicateMessagesDesc")}
             />
+            <SettingRow
+              settingKey="groupTimeMetricsEnabled"
+              label={t("groupTimeMetricsEnabled")}
+              description={t("groupTimeMetricsEnabledDesc")}
+            />
+            {/* contactEventsRetentionDays: dias (0 = nunca). Oculto em backend sem a coluna. */}
+            {hasContactEventsRetention && (
+              <>
+                <div
+                  id="row-contactEventsRetentionDays"
+                  className={`flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 py-2 border-b border-border/40 rounded-sm transition-colors duration-500 ${highlightedKey === "contactEventsRetentionDays" ? "bg-yellow-100/70 dark:bg-yellow-800/25" : ""}`}
+                >
+                  <div className="flex-1 min-w-0 sm:pr-4">
+                    <Label className="text-sm font-medium">{t("contactEventsRetentionDays")}</Label>
+                    <p className="js-setting-hint text-xs text-muted-foreground mt-0.5">{t("contactEventsRetentionDaysDesc")}</p>
+                  </div>
+                  <Select
+                    value={String(Number(getValue("contactEventsRetentionDays")) || 0)}
+                    onValueChange={(v) => handleChange("contactEventsRetentionDays", v)}
+                  >
+                    <SelectTrigger className="w-full sm:w-[200px]"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      {CONTACT_EVENTS_RETENTION_OPTIONS.map((option) => (
+                        <SelectItem key={option.value} value={option.value}>{t(option.labelKey)}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <p id="note-contactEventsRetentionDays" className="js-setting-hint text-xs text-muted-foreground -mt-2 mb-3 ml-1 pl-3 border-l-2 border-amber-300 dark:border-amber-700/50">
+                  {t("contactEventsRetentionNote")}
+                </p>
+              </>
+            )}
+            <SettingRow
+              settingKey="scheduleSentNoticeEnabled"
+              label={t("scheduleSentNotice")}
+              description={t("scheduleSentNoticeDesc")}
+            />
+            <p id="note-scheduleSentNoticeEnabled" className="js-setting-hint text-xs text-muted-foreground -mt-2 mb-3 ml-1 pl-3 border-l-2 border-amber-300 dark:border-amber-700/50">
+              {t("scheduleSentNoticeNote")}
+            </p>
             <GroupHeading id="group-groupReopen" label={t("groupReopen")} />
             {/* botReopenGraceSeconds: valor numérico (segundos) no tenant — switch derivado
                 de valor > 0; NÃO usar SettingRow/isEnabled (trataria "30" como desligado) */}

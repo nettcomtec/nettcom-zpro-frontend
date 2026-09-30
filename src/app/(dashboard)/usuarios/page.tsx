@@ -28,9 +28,11 @@ import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import {
   Search, Plus, Pencil, Trash2, Users, Shield, ShieldCheck, User, UserCog, Phone,
   GitBranch, Smartphone, UserX, UserCheck, ChevronRight, Clock, PhoneCall, Loader2, Mail,
+  AlertTriangle,
 } from "lucide-react";
 import { toast } from "sonner";
 import { cn, getInitials } from "@/lib/utils";
+import { formatDateTime } from "@/lib/format";
 import { useTableDensity } from "@/hooks/use-table-density";
 import { TableDensityToggle } from "@/components/ui/table-density-toggle";
 import { fetchAllUsers, fetchUser, createUser, updateUser, updateUserConfigs, deleteUser, inactivateUser, reactivateUser, updateUserIsOnline, resendUserInvite, type User as UserType } from "@/services/users";
@@ -48,14 +50,14 @@ import { PhoneInput } from "@/components/ui/phone-input";
 
 // ── Menu permission keys (labels resolved inside component via t()) ─────────
 const ALL_MENU_PERMISSION_KEYS = [
-  "massa", "grupo", "chat-privado", "kanban", "tarefas", "sessoes",
+  "massa", "grupo", "chat-privado", "kanban", "funil", "tarefas", "agenda", "sessoes",
   "relatorios", "painel-atendimentos", "filas", "equipes", "mensagens-rapidas", "chat-flow",
   "agendamentos", "aniversarios", "fechamento", "etiquetas", "notas",
   "protocolos", "avaliacoes", "horarioAtendimento", "campanhas", "contatos",
   "google-calendar", "agendamento-publico", "email-marketing",
 ];
 
-const USER_ONLY_PERMS = ["massa", "campanhas", "grupo", "chat-privado", "kanban", "tarefas", "contatos"];
+const USER_ONLY_PERMS = ["massa", "campanhas", "grupo", "chat-privado", "kanban", "funil", "tarefas", "agenda", "contatos"];
 
 const DEFAULT_MENU: Record<string, boolean> = Object.fromEntries(
   ALL_MENU_PERMISSION_KEYS.map((k) => [k, true])
@@ -89,6 +91,7 @@ interface ExtUser extends UserType {
   sipUsername?: string;
   sipPassword?: string;
   sipServer?: string;
+  sipDomain?: string;
   sipPort?: number;
   sipTransport?: string;
   businessHours?: BusinessHour[];
@@ -109,6 +112,7 @@ interface FormState {
   sipUsername: string;
   sipPassword: string;
   sipServer: string;
+  sipDomain: string;
   sipPort: number;
   sipTransport: "wss" | "ws" | "udp";
   menuPermissions: Record<string, boolean>;
@@ -120,7 +124,7 @@ interface FormState {
 const EMPTY_FORM: FormState = {
   name: "", email: "", password: "", profile: "user", phone: "",
   blockWavoip: false, restrictedUser: "disabled",
-  sipEnabled: false, sipUsername: "", sipPassword: "", sipServer: "", sipPort: 8089, sipTransport: "wss",
+  sipEnabled: false, sipUsername: "", sipPassword: "", sipServer: "", sipDomain: "", sipPort: 8089, sipTransport: "wss",
   menuPermissions: { ...DEFAULT_MENU },
   businessHours: getDefaultBusinessHours(),
   supervisorViewDept: false,
@@ -153,7 +157,9 @@ export default function UsuariosPage() {
     "grupo": t("menuGrupo"),
     "chat-privado": t("menuChatPrivado"),
     "kanban": t("menuKanban"),
+    "funil": tSidebar("item.funil"),
     "tarefas": t("menuTarefas"),
+    "agenda": tSidebar("item.agenda"),
     "sessoes": t("menuSessoes"),
     "relatorios": t("menuRelatorios"),
     "filas": t("menuFilas"),
@@ -346,8 +352,11 @@ export default function UsuariosPage() {
   function openEdit(u: ExtUser) {
     setEditing(u);
     const rawMenu = u.menuPermissions;
+    // Usuário salvo antes da chave "agenda" existir teve o acesso ao Agenda regido
+    // por "kanban" — herdar esse valor preserva o acesso efetivo atual; o default
+    // `true` do spread concederia Agenda a quem tem Kanban desmarcado.
     const menu = (rawMenu && typeof rawMenu === "object" && !Array.isArray(rawMenu))
-      ? { ...DEFAULT_MENU, ...rawMenu }
+      ? { ...DEFAULT_MENU, agenda: rawMenu.kanban === true, ...rawMenu }
       : { ...DEFAULT_MENU };
     const uConfigs = (u as { configs?: { supervisorViewDept?: string } }).configs;
     setForm({
@@ -359,6 +368,7 @@ export default function UsuariosPage() {
       sipUsername: u.sipUsername ?? "",
       sipPassword: u.sipPassword ?? "",
       sipServer: u.sipServer ?? "",
+      sipDomain: u.sipDomain ?? "",
       sipPort: u.sipPort ?? 8089,
       sipTransport: (["wss", "ws", "udp"].includes(u.sipTransport ?? "") ? (u.sipTransport as "wss" | "ws" | "udp") : "wss"),
       menuPermissions: menu,
@@ -417,6 +427,7 @@ export default function UsuariosPage() {
         payload.sipUsername = form.sipUsername;
         payload.sipPassword = form.sipPassword;
         payload.sipServer = form.sipServer;
+        payload.sipDomain = form.sipDomain.trim();
         payload.sipPort = form.sipPort;
         payload.sipTransport = form.sipTransport;
         payload.businessHours = form.businessHours;
@@ -469,7 +480,8 @@ export default function UsuariosPage() {
               (err as { response?: { data?: { error?: string } } })?.response?.data ??
               (err as { data?: { error?: string } })?.data;
             const errMsg = (errData?.error ?? "").toString();
-            if (errMsg === "ERR_USER_LIMIT_USER_CREATION") {
+            // O backend responde ERR_NO_PERMISSION_USER_LIMIT; o nome antigo fica aceito.
+            if (errMsg === "ERR_NO_PERMISSION_USER_LIMIT" || errMsg === "ERR_USER_LIMIT_USER_CREATION") {
               toast.error(t("userLimitReached"));
               setSaving(false);
               return;
@@ -537,7 +549,19 @@ export default function UsuariosPage() {
       toast.success(t("userRemoved"));
       setDeleting(null);
       load();
-    } catch { toast.error(t("errorRemoving")); }
+    } catch (err) {
+      // O backend responde 409 quando o usuario tem registros vinculados que impedem
+      // a remocao. Nesse caso o payload vem em `message` (nao em `error`).
+      const errData =
+        (err as { response?: { data?: { error?: string; message?: string } } })?.response?.data ??
+        (err as { data?: { error?: string; message?: string } })?.data;
+      const code = (errData?.error ?? errData?.message ?? "").toString();
+      toast.error(
+        code === "ERR_USER_HAS_LINKED_RECORDS"
+          ? t("errorRemovingLinkedRecords")
+          : t("errorRemoving")
+      );
+    }
     finally { setDeletingUser(false); }
   }
 
@@ -552,7 +576,10 @@ export default function UsuariosPage() {
         toast.success(t("userDeactivated"));
       }
       await load();
-    } catch { toast.error(t("errorToggleStatus")); }
+    } catch (err) {
+      const code = ((err as { data?: { error?: string } })?.data?.error ?? "").toString();
+      toast.error(code === "ERR_NO_PERMISSION_USER_LIMIT" ? t("userLimitReached") : t("errorToggleStatus"));
+    }
     finally { setTogglingId(null); }
   }
 
@@ -706,6 +733,7 @@ export default function UsuariosPage() {
                 <TableHead>{t("colProfile")}</TableHead>
                 <TableHead>{t("colStatus")}</TableHead>
                 <TableHead className="w-28">{t("colActions")}</TableHead>
+                <TableHead>{t("colLastLogin")}</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -735,6 +763,8 @@ export default function UsuariosPage() {
                       <Skeleton className="h-7 w-7 rounded-md" />
                     </div>
                   </TableCell>
+                  {/* Last login */}
+                  <TableCell><Skeleton className="h-4 w-28" /></TableCell>
                 </TableRow>
               ))}
             </TableBody>
@@ -769,6 +799,7 @@ export default function UsuariosPage() {
                 <SortableTableHead sortKey="inactive" currentSortKey={sortKey} sortDir={sortDir} onSort={handleSort}>{t("colStatus")}</SortableTableHead>
                 <TableHead>{t("colOnline")}</TableHead>
                 <TableHead className="w-28">{t("colActions")}</TableHead>
+                <SortableTableHead sortKey="lastLogin" currentSortKey={sortKey} sortDir={sortDir} onSort={handleSort}>{t("colLastLogin")}</SortableTableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -925,6 +956,11 @@ export default function UsuariosPage() {
                         </Button>
                         <Button variant="ghost" size="icon" className="h-7 w-7" title={tCommon("delete")} aria-label={tCommon("delete")} onClick={() => setDeleting(u)}><Trash2 className="h-3 w-3 text-destructive" /></Button>
                       </div>
+                    </TableCell>
+                    <TableCell className={cn("text-sm tabular-nums whitespace-nowrap", cellClassName)}>
+                      {u.lastLogin
+                        ? formatDateTime(u.lastLogin, { dateStyle: "short", timeStyle: "short" })
+                        : <span className="text-muted-foreground text-xs">{t("lastLoginNever")}</span>}
                     </TableCell>
                   </TableRow>
                 );
@@ -1207,6 +1243,12 @@ export default function UsuariosPage() {
                     </SelectContent>
                   </Select>
                   <p className="text-xs text-muted-foreground">{t("sipTransportHelp")}</p>
+                  {form.sipTransport === "udp" && (
+                    <p className="flex items-start gap-1.5 rounded-md border border-amber-500/40 bg-amber-500/10 p-2 text-xs text-amber-700 dark:text-amber-400">
+                      <AlertTriangle className="h-3.5 w-3.5 mt-0.5 shrink-0" />
+                      <span>{t("sipTransportUdpWarning")}</span>
+                    </p>
+                  )}
                 </div>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   <div className="space-y-1.5">
@@ -1224,6 +1266,11 @@ export default function UsuariosPage() {
                   <div className="space-y-1.5">
                     <Label>{t("sipPort")}</Label>
                     <Input type="number" value={form.sipPort} onChange={(e) => setF("sipPort", Number(e.target.value))} disabled={!form.sipEnabled} />
+                  </div>
+                  <div className="space-y-1.5 sm:col-span-2">
+                    <Label>{t("sipDomain")}</Label>
+                    <Input value={form.sipDomain} onChange={(e) => setF("sipDomain", e.target.value)} placeholder={form.sipServer || undefined} disabled={!form.sipEnabled} />
+                    <p className="text-xs text-muted-foreground">{t("sipDomainHelp")}</p>
                   </div>
                 </div>
               </CollapsibleContent>

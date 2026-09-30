@@ -1,4 +1,11 @@
 import { fetchContacts } from "@/services/contacts";
+import {
+  type AddressFilter,
+  AddressFilterUnsupportedError,
+  hasAddressFilterEcho,
+  isAddressFilterActive,
+  toAddressQuery,
+} from "@/lib/address-filter";
 
 export interface MassaContact {
   id?: number;
@@ -31,15 +38,31 @@ export async function fetchAllContacts(): Promise<MassaContact[]> {
 
 /**
  * Busca todos os contatos de uma carteira paginando o endpoint /contacts?walletId=X.
+ * Com filtro de endereço ativo, toda página precisa do eco `addressFilter: true` (backend
+ * antigo ignora os params e devolveria a carteira inteira): sem ele lança
+ * AddressFilterUnsupportedError, conferido antes de mapear as linhas e lançado fora do try.
+ * `isCurrent` (opcional) para a paginação quando quem pediu já descartou a carga.
  */
-export async function fetchAllContactsForWallet(walletId: number | string): Promise<MassaContact[]> {
+export async function fetchAllContactsForWallet(
+  walletId: number | string,
+  addressFilter?: AddressFilter | null,
+  isCurrent?: () => boolean
+): Promise<MassaContact[]> {
+  const addressQuery = toAddressQuery(addressFilter);
+  const requireEcho = isAddressFilterActive(addressFilter);
   const all: MassaContact[] = [];
+  let unsupported = false;
   let page = 1;
   const pageSize = 500;
   const maxPages = 200;
   while (page <= maxPages) {
+    if (isCurrent && !isCurrent()) break;
     try {
-      const { data } = await fetchContacts({ pageNumber: page, pageSize, walletId: Number(walletId) });
+      const { data } = await fetchContacts({ pageNumber: page, pageSize, walletId: Number(walletId), ...addressQuery });
+      if (requireEcho && !hasAddressFilterEcho(data)) {
+        unsupported = true;
+        break;
+      }
       const list = ((data as { contacts?: MassaContact[] })?.contacts ?? (Array.isArray(data) ? (data as MassaContact[]) : [])) as MassaContact[];
       if (list.length === 0) break;
       all.push(...list.map((c) => ({ id: c.id, number: c.number, name: c.name })));
@@ -50,5 +73,7 @@ export async function fetchAllContactsForWallet(walletId: number | string): Prom
       break;
     }
   }
+  // Fora do try: o catch da paginação engoliria o erro e a massa sairia sem aviso.
+  if (unsupported) throw new AddressFilterUnsupportedError();
   return all;
 }

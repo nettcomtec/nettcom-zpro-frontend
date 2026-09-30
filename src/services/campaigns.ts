@@ -71,11 +71,25 @@ export interface ContactsReportCampaignParams {
   wallets?: number[] | string[];
   ddds?: string[];
   searchParam?: string;
+  // Filtro por endereço do cadastro (bairro e cidade por "contém", UF do cadastro). A UF vai
+  // em CSV numa chave só ("SP,RJ"), nunca como array: o serializer abaixo repete a chave de
+  // array e o qs do backend a transforma em objeto acima do arrayLimit. Nunca reaproveitar
+  // `ddds`, que carrega a UF deduzida do DDD.
+  addressBairro?: string;
+  addressCidade?: string;
+  addressUfs?: string;
 }
 
-export async function fetchContactsReportCampaign(params: ContactsReportCampaignParams) {
+// `addressFilter: true` = o backend aplicou addressBairro/addressCidade/addressUfs. Sem o eco,
+// com filtro ativo, a tela aborta: backend antigo ignora os params e devolveria o público todo.
+export interface ContactsReportCampaignResponse<C = Record<string, unknown>> {
+  contacts: C[];
+  addressFilter?: boolean;
+}
+
+export async function fetchContactsReportCampaign<C = Record<string, unknown>>(params: ContactsReportCampaignParams) {
   // Serialize arrays as repeated params without brackets: tags=1&tags=2 (Express expects this)
-  return api.get("/contacts-report-campaign", {
+  return api.get<ContactsReportCampaignResponse<C>>("/contacts-report-campaign", {
     params,
     paramsSerializer: (p) => {
       const parts: string[] = [];

@@ -5,7 +5,6 @@ import { formatDateTime } from "@/lib/format";
 import React, { useState, useEffect, useCallback } from "react";
 import { PageHeader } from "@/components/layout/page-header";
 import { Card, CardContent } from "@/components/ui/card";
-import { Alert, AlertTitle, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -20,7 +19,7 @@ import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
   MessageCircle, Search, RefreshCw, Reply, Trash2, ExternalLink,
-  Instagram, Image, Film, LayoutGrid, Info, Plus, Send, Upload, X,
+  Instagram, Image, Film, LayoutGrid, Plus, Send, Upload, X,
   Grid3x3, MessagesSquare, Pencil, CalendarClock, FileText, Cloud, Home,
 } from "lucide-react";
 import { toast } from "sonner";
@@ -106,8 +105,6 @@ export default function InstagramComentariosPage() {
   const selectedMedia = mediaList.find((m) => m.id === selectedMediaId);
   const selectedConn = connections.find((c) => String(c.id) === selectedConnection);
   const connectionName = selectedConn?.name || "";
-  // Banner só faz sentido para canal via OAuth (Tech Provider). App próprio já tem as permissões.
-  const showOauthLimit = !selectedConn || isOAuthChannel(selectedConn);
 
   const loadConnections = useCallback(async () => {
     try {
@@ -631,14 +628,6 @@ export default function InstagramComentariosPage() {
           { title: t("helpS2T"), items: [t("helpS2I0"), t("helpS2I1")] },
         ],
       }} />
-
-      {showOauthLimit && (
-        <Alert variant="warning">
-          <Info className="h-4 w-4" />
-          <AlertTitle>{t("oauthLimitTitle")}</AlertTitle>
-          <AlertDescription>{t("oauthLimitDescription")}</AlertDescription>
-        </Alert>
-      )}
 
       <Card>
         <CardContent className="pt-6">

@@ -54,6 +54,8 @@ import {
   Images,
   FileText,
   AlertTriangle,
+  ChevronLeft,
+  ChevronRight,
 } from "lucide-react";
 import { toast } from "sonner";
 import { add, format } from "date-fns";
@@ -363,6 +365,14 @@ export default function AgendamentosPage() {
   const [loading, setLoading] = useState(true);
   const [data, setData] = useState<ScheduleMessage[]>([]);
   const [search, setSearch] = useState("");
+  // A lista vem paginada do servidor (40 por página): sem navegar entre as
+  // páginas, só os 40 agendamentos mais recentes apareciam.
+  const [debouncedSearch, setDebouncedSearch] = useState("");
+  const [page, setPage] = useState(1);
+  const [totalPages, setTotalPages] = useState(1);
+  const [total, setTotal] = useState(0);
+  const [listLoading, setListLoading] = useState(false);
+  const loadSeqRef = useRef(0);
 
   const [dialogOpen, setDialogOpen] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -449,18 +459,44 @@ export default function AgendamentosPage() {
   // ── Data loading ─────────────────────────────────────────────────────────────
 
   const loadData = useCallback(async () => {
+    const seq = ++loadSeqRef.current;
+    setListLoading(true);
     try {
-      const schedules = await fetchSchedules();
-      setData(schedules);
+      const res = await fetchSchedules(page, debouncedSearch.trim() || undefined);
+      if (seq !== loadSeqRef.current) return;
+      // Página que deixou de existir (ex.: excluiu o último item da última
+      // página): volta para a última que existe, e o efeito recarrega.
+      if (page > res.totalPages) {
+        setPage(res.totalPages);
+        return;
+      }
+      setData(res.messages);
+      setTotal(res.total);
+      setTotalPages(res.totalPages);
     } catch {
-      toast.error(t("toastErrorLoad"));
+      if (seq === loadSeqRef.current) toast.error(t("toastErrorLoad"));
     } finally {
-      setLoading(false);
+      if (seq === loadSeqRef.current) {
+        setLoading(false);
+        setListLoading(false);
+      }
     }
-  }, []);
+  }, [page, debouncedSearch]);
 
   useEffect(() => {
     loadData();
+  }, [loadData]);
+
+  useEffect(() => {
+    if (search === debouncedSearch) return;
+    const timer = setTimeout(() => {
+      setDebouncedSearch(search);
+      setPage(1);
+    }, 400);
+    return () => clearTimeout(timer);
+  }, [search]);
+
+  useEffect(() => {
     fetchWhatsapps()
       .then((res) => {
         const all: Whatsapp[] = Array.isArray(res.data) ? res.data : [];
@@ -502,7 +538,7 @@ export default function AgendamentosPage() {
         );
       })
       .catch(() => {});
-  }, [loadData]);
+  }, []);
 
   // Load BSP templates (WABA/Gupshup/Dialog360) when a BSP channel is selected
   useEffect(() => {
@@ -849,10 +885,13 @@ export default function AgendamentosPage() {
 
   // ── Filter ────────────────────────────────────────────────────────────────────
 
+  // A busca roda no servidor; este filtro só cobre backend antigo, que ignora
+  // o termo e devolve a página sem filtrar.
   const filtered = data.filter(
     (s) =>
       (s.contact?.name || "").toLowerCase().includes(search.toLowerCase()) ||
-      s.body.toLowerCase().includes(search.toLowerCase())
+      (s.contact?.number || "").includes(search.trim()) ||
+      (s.body || "").toLowerCase().includes(search.toLowerCase())
   );
 
   const { sortKey, sortDir, handleSort, sortedData } = useSortable(
@@ -1040,6 +1079,34 @@ export default function AgendamentosPage() {
             </Table>
           </CardContent>
         </Card>
+      )}
+
+      {totalPages > 1 && (
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <span className="text-sm text-muted-foreground">{t("paginationTotal", { total })}</span>
+          <div className="flex items-center gap-2">
+            {listLoading && <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />}
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={page <= 1 || listLoading}
+              onClick={() => setPage((p) => Math.max(1, p - 1))}
+              aria-label={t("paginationPrevious")}
+            >
+              <ChevronLeft className="h-4 w-4" />
+            </Button>
+            <span className="text-sm whitespace-nowrap">{t("paginationPage", { page, totalPages })}</span>
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={page >= totalPages || listLoading}
+              onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+              aria-label={t("paginationNext")}
+            >
+              <ChevronRight className="h-4 w-4" />
+            </Button>
+          </div>
+        </div>
       )}
 
       {/* ── Dialog: Novo agendamento ──────────────────────────────────────── */}

@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
@@ -21,7 +21,7 @@ import {
 import {
   Collapsible, CollapsibleContent, CollapsibleTrigger,
 } from "@/components/ui/collapsible";
-import { X, Plus, Trash2, RefreshCw, Bot, Loader2, Search, ChevronDown } from "lucide-react";
+import { X, Plus, Trash2, RefreshCw, Bot, Loader2, ChevronDown, AtSign } from "lucide-react";
 import { toast } from "sonner";
 import { useTranslations } from "next-intl";
 import {
@@ -34,11 +34,16 @@ import { fetchWallets, type Wallet } from "@/services/wallets";
 import { fetchQueues, type Queue } from "@/services/queues";
 import { cn } from "@/lib/utils";
 import { formatBirthdayInput } from "@/lib/birthday-format";
+import { ContactAddressFields, addressPayloadFrom, isAddressBlockDirty } from "@/components/contatos/contact-address-fields";
 
 // Validation messages are set dynamically in the component via useTranslations
 const contactSchema = z.object({
   name: z.string().min(2, "nameMin"),
-  number: z.string().min(8, "numberMin"),
+  // Telefone opcional no schema: contato criado por canal que nao entrega numero
+  // (WhatsApp oficial com nome de usuario, Instagram, Messenger, Telegram...)
+  // precisa poder salvar tag, carteira e e-mail. A obrigatoriedade volta no
+  // refinamento abaixo, so quando o contato CARREGADO ja tinha telefone.
+  number: z.string().optional(),
   email: z.string().email("emailInvalid").or(z.literal("")).optional(),
   cpf: z.string().optional(),
   birthDate: z.string().optional(),
@@ -51,6 +56,10 @@ const contactSchema = z.object({
   instagramPK: z.string().optional(),
   hubWhatsapp: z.string().optional(),
   cep: z.string().optional(),
+  logradouro: z.string().optional(),
+  numeroEndereco: z.string().optional(),
+  complemento: z.string().optional(),
+  bairro: z.string().optional(),
   cidade: z.string().optional(),
   estado: z.string().optional(),
   telegramId: z.string().optional(),
@@ -94,16 +103,36 @@ export function ContactEditDialog({ contactId, open, onClose, onSaved }: Contact
   const [extraInfo, setExtraInfo] = useState<{ name: string; value: string }[]>([]);
   const [isLidForm, setIsLidForm] = useState(false);
   const [loading, setLoading] = useState(false);
-  const [cepLoading, setCepLoading] = useState(false);
+  // Carga do contato falhou: o formulário pode estar vazio ou com o contato aberto antes, então
+  // nada que grava a partir dele pode rodar até uma carga dar certo.
+  const [loadFailed, setLoadFailed] = useState(false);
+  const loadSeqRef = useRef(0);
   const [extrasOpen, setExtrasOpen] = useState(false);
+  // Identidade do contato CARREGADO: se ele ja tinha telefone (define se o campo
+  // segue obrigatorio) e o nome de usuario, unica identidade legivel de quem
+  // conversa sem numero.
+  const [loadedHasNumber, setLoadedHasNumber] = useState(false);
+  const [loadedUsername, setLoadedUsername] = useState("");
+
+  // Contato que ja tinha telefone continua exigindo o minimo — assim ninguem apaga
+  // por engano o numero de quem tem. Contato que chegou sem telefone salva sem ele.
+  const formSchema = useMemo(
+    () =>
+      contactSchema.superRefine((values, ctx) => {
+        if (loadedHasNumber && (values.number ?? "").trim().length < 8) {
+          ctx.addIssue({ code: "custom", path: ["number"], message: "numberMin" });
+        }
+      }),
+    [loadedHasNumber]
+  );
 
   const form = useForm<ContactForm>({
-    resolver: zodResolver(contactSchema),
+    resolver: zodResolver(formSchema),
     defaultValues: {
       name: "", number: "", email: "", cpf: "", birthDate: "",
       firstName: "", lastName: "", businessName: "",
       lid: "", isLid: false, messengerId: "", instagramPK: "", hubWhatsapp: "",
-      cep: "", cidade: "", estado: "",
+      cep: "", logradouro: "", numeroEndereco: "", complemento: "", bairro: "", cidade: "", estado: "",
       telegramId: "", webchatId: "", mercadolivreId: "", linkedinId: "",
       youtubeChannelId: "", tiktokId: "",
       hubMercadolivre: "", hubTiktok: "", hubLikedin: "", hubOlx: "", hubYoutube: "",
@@ -122,12 +151,20 @@ export function ContactEditDialog({ contactId, open, onClose, onSaved }: Contact
   // Load contact when dialog opens
   useEffect(() => {
     if (!open || !contactId) return;
+    // Resposta de uma carga anterior (outro contato ou reabertura) que chega depois é descartada.
+    const seq = ++loadSeqRef.current;
     setLoading(true);
+    setLoadFailed(false);
+    setLoadedHasNumber(false);
+    setLoadedUsername("");
     fetchContact(contactId)
       .then(({ data }) => {
+        if (seq !== loadSeqRef.current) return;
         const fc = (data as { contact?: typeof data })?.contact ?? data;
         const c = fc as Record<string, unknown>;
         setIsLidForm(!!c.isLid);
+        setLoadedHasNumber(!!(c.number as string | undefined));
+        setLoadedUsername((c.username as string) || "");
         form.reset({
           name: (c.name as string) || "",
           number: (c.number as string) || "",
@@ -143,6 +180,10 @@ export function ContactEditDialog({ contactId, open, onClose, onSaved }: Contact
           instagramPK: (c.instagramPK as string) || "",
           hubWhatsapp: (c.hubWhatsapp as string) || "",
           cep: (c.cep as string) || "",
+          logradouro: (c.logradouro as string) || "",
+          numeroEndereco: (c.numeroEndereco as string) || "",
+          complemento: (c.complemento as string) || "",
+          bairro: (c.bairro as string) || "",
           cidade: (c.cidade as string) || "",
           estado: (c.estado as string) || "",
           telegramId: (c.telegramId as string) || "",
@@ -172,33 +213,17 @@ export function ContactEditDialog({ contactId, open, onClose, onSaved }: Contact
         setSelectedQueueId((c.queueId as number | null | undefined) ?? null);
         const ei = c.extraInfo as { name?: string; value?: string }[] | undefined;
         setExtraInfo(Array.isArray(ei) ? ei.map((x) => ({ name: x.name ?? "", value: x.value ?? "" })) : []);
+        setLoadFailed(false);
       })
-      .catch(() => toast.error(t("errors.loadContact")))
-      .finally(() => setLoading(false));
+      .catch(() => {
+        if (seq !== loadSeqRef.current) return;
+        setLoadFailed(true);
+        toast.error(t("errors.loadContact"));
+      })
+      .finally(() => {
+        if (seq === loadSeqRef.current) setLoading(false);
+      });
   }, [open, contactId]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  const handleCepSearch = async () => {
-    const cep = form.getValues("cep")?.replace(/\D/g, "");
-    if (!cep || cep.length !== 8) {
-      toast.error(t("errors.invalidCep"));
-      return;
-    }
-    setCepLoading(true);
-    try {
-      const res = await fetch(`https://viacep.com.br/ws/${cep}/json/`);
-      const data = await res.json();
-      if (data.erro) {
-        toast.error(t("errors.cepNotFound"));
-        return;
-      }
-      form.setValue("cidade", data.localidade || "");
-      form.setValue("estado", data.uf || "");
-    } catch {
-      toast.error(t("errors.cepSearch"));
-    } finally {
-      setCepLoading(false);
-    }
-  };
 
   const handleRefreshLid = async () => {
     if (!contactId) return;
@@ -211,7 +236,7 @@ export function ContactEditDialog({ contactId, open, onClose, onSaved }: Contact
   };
 
   const handleUpdateName = async () => {
-    if (!contactId) return;
+    if (!contactId || loadFailed) return;
     const value = form.getValues("name")?.trim();
     if (!value || value.length < 2) {
       toast.error(t("validation.nameMin"));
@@ -234,7 +259,7 @@ export function ContactEditDialog({ contactId, open, onClose, onSaved }: Contact
   };
 
   const handleUpdateNumber = async () => {
-    if (!contactId) return;
+    if (!contactId || loadFailed) return;
     const value = form.getValues("number")?.trim();
     if (!value) {
       toast.error(t("errors.numberRequired"));
@@ -267,7 +292,7 @@ export function ContactEditDialog({ contactId, open, onClose, onSaved }: Contact
   };
 
   const onSubmit = async (values: ContactForm) => {
-    if (!contactId) return;
+    if (!contactId || loadFailed) return;
     const names = extraInfo.filter((e) => e.name.trim()).map((e) => e.name.trim());
     const dupes = names.filter((n, i) => names.indexOf(n) !== i);
     if (dupes.length > 0) {
@@ -277,11 +302,14 @@ export function ContactEditDialog({ contactId, open, onClose, onSaved }: Contact
     try {
       // Strings vazias viram undefined: evita escrever "" em colunas que devem ficar NULL
       // (webchatId="" some do list de contatos por causa do filtro IS NULL).
-      // name e number sao required (validados pelo schema), passam direto.
+      // `number` entra no blank() pelo mesmo motivo, com um agravante: "" no telefone
+      // colide no indice unico (tenantId, number) e funde contatos sem telefone.
+      // Omitido, o PUT parcial preserva o que estiver gravado.
+      // name e required (validado pelo schema) e passa direto.
       const blank = (v: string | undefined) => (v && v.length > 0 ? v : undefined);
-      const payload: ContactPayload & Record<string, unknown> = {
+      const payload: Partial<ContactPayload> & Record<string, unknown> = {
         name: values.name,
-        number: values.number,
+        number: blank(values.number),
         email: blank(values.email),
         cpf: blank(values.cpf),
         birthdayDate: blank(values.birthDate),
@@ -293,9 +321,9 @@ export function ContactEditDialog({ contactId, open, onClose, onSaved }: Contact
         messengerId: blank(values.messengerId),
         instagramPK: blank(values.instagramPK),
         hubWhatsapp: blank(values.hubWhatsapp),
-        cep: blank(values.cep),
-        cidade: blank(values.cidade),
-        estado: blank(values.estado),
+        // Endereço fora do blank(): vai o bloco inteiro, cru, só quando algum campo dele foi
+        // mexido — aí "" apaga de verdade. Sem mexer, nada do bloco vai e o que está gravado fica.
+        ...(isAddressBlockDirty(form) ? addressPayloadFrom(values) : {}),
         telegramId: blank(values.telegramId),
         webchatId: blank(values.webchatId),
         mercadolivreId: blank(values.mercadolivreId),
@@ -364,22 +392,33 @@ export function ContactEditDialog({ contactId, open, onClose, onSaved }: Contact
                 <Label>{t("labels.name")}</Label>
                 <div className="flex gap-2">
                   <Input {...form.register("name")} placeholder={t("placeholders.name")} />
-                  <Button type="button" variant="ghost" size="icon" title={t("refreshNameTitle")} onClick={handleUpdateName}>
+                  <Button type="button" variant="ghost" size="icon" title={t("refreshNameTitle")} onClick={handleUpdateName} disabled={loadFailed}>
                     <RefreshCw className="h-4 w-4" />
                   </Button>
                 </div>
                 {form.formState.errors.name && <p className="text-xs text-destructive">{t(`validation.${form.formState.errors.name.message}`)}</p>}
               </div>
               <div className="space-y-2">
-                <Label>{t("labels.number")}</Label>
+                {/* Sem telefone o campo deixa de ser obrigatorio — o asterisco do
+                    rotulo traduzido sai junto para nao prometer o contrario. */}
+                <Label>{loadedHasNumber ? t("labels.number") : t("labels.number").replace(/\s*\*\s*$/, "")}</Label>
                 <div className="flex gap-2">
                   <Input {...form.register("number")} placeholder="5511999999999" />
-                  <Button type="button" variant="ghost" size="icon" title={t("refreshNumberTitle")} onClick={handleUpdateNumber}>
+                  <Button type="button" variant="ghost" size="icon" title={t("refreshNumberTitle")} onClick={handleUpdateNumber} disabled={loadFailed}>
                     <RefreshCw className="h-4 w-4" />
                   </Button>
                 </div>
                 {form.formState.errors.number && <p className="text-xs text-destructive">{t(`validation.${form.formState.errors.number.message}`)}</p>}
+                {!loadedHasNumber && <p className="text-xs text-muted-foreground">{t("numberOptionalNote")}</p>}
               </div>
+              {!loadedHasNumber && !!loadedUsername && (
+                <div className="space-y-1 rounded-md border bg-muted/40 px-3 py-2 sm:col-span-2">
+                  <p className="flex items-center gap-1 text-xs text-muted-foreground">
+                    <AtSign className="h-3 w-3" /> {t("whatsappUserLabel")}
+                  </p>
+                  <p className="break-all text-sm font-medium">@{loadedUsername}</p>
+                </div>
+              )}
               <div className="space-y-2">
                 <Label>{t("labels.firstName")}</Label>
                 <Input {...form.register("firstName")} placeholder={t("placeholders.firstName")} />
@@ -394,6 +433,8 @@ export function ContactEditDialog({ contactId, open, onClose, onSaved }: Contact
                 {form.formState.errors.email && <p className="text-xs text-destructive">{t(`validation.${form.formState.errors.email.message}`)}</p>}
               </div>
             </div>
+
+            <ContactAddressFields form={form} />
 
             <Collapsible open={extrasOpen} onOpenChange={setExtrasOpen}>
               <CollapsibleTrigger asChild>
@@ -415,23 +456,6 @@ export function ContactEditDialog({ contactId, open, onClose, onSaved }: Contact
                   <div className="space-y-2">
                     <Label>{t("labels.businessName")}</Label>
                     <Input {...form.register("businessName")} placeholder={t("placeholders.businessName")} />
-                  </div>
-                  <div className="space-y-2">
-                    <Label>{t("labels.cep")}</Label>
-                    <div className="flex gap-2">
-                      <Input {...form.register("cep")} placeholder={t("placeholders.cep")} maxLength={9} />
-                      <Button type="button" variant="outline" size="icon" title={t("searchCepTitle")} onClick={handleCepSearch} disabled={cepLoading}>
-                        {cepLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Search className="h-4 w-4" />}
-                      </Button>
-                    </div>
-                  </div>
-                  <div className="space-y-2">
-                    <Label>{t("labels.cidade")}</Label>
-                    <Input {...form.register("cidade")} placeholder={t("placeholders.cidade")} />
-                  </div>
-                  <div className="space-y-2">
-                    <Label>{t("labels.estado")}</Label>
-                    <Input {...form.register("estado")} placeholder={t("placeholders.estado")} maxLength={2} />
                   </div>
                   <div className="space-y-2">
                     <Label>{t("labels.messengerId")}</Label>
@@ -639,9 +663,12 @@ export function ContactEditDialog({ contactId, open, onClose, onSaved }: Contact
               </Button>
             </div>
 
+            {loadFailed && (
+              <p className="text-xs text-destructive" role="alert">{t("errors.loadContact")}</p>
+            )}
             <DialogFooter>
               <Button variant="outline" type="button" onClick={onClose}>{t("cancel")}</Button>
-              <Button type="submit" disabled={form.formState.isSubmitting}>
+              <Button type="submit" disabled={form.formState.isSubmitting || loadFailed}>
                 {form.formState.isSubmitting ? t("savingButton") : t("save")}
               </Button>
             </DialogFooter>

@@ -2,9 +2,17 @@
 
 import React, { useState, useEffect, useCallback } from "react";
 import { useTranslations } from "next-intl";
-import { CHANNEL_TYPES as CHANNELS, BETA_CHANNEL_TYPES } from "@/lib/channel-types";
+import {
+  CHANNEL_TYPES as CHANNELS,
+  BETA_CHANNEL_TYPES,
+  CHANNEL_LIMIT_TYPES,
+  canonicalChannelType,
+  getEffectiveTypeLimit,
+  setTypeLimit,
+  limitsSumForTypes,
+} from "@/lib/channel-types";
 import { setBaseTitle } from "@/lib/tab-title";
-import { formatDateTime } from "@/lib/format";
+import { formatCentsBRL, formatDateTime } from "@/lib/format";
 import { PageHeader } from "@/components/layout/page-header";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -33,7 +41,7 @@ import {
 } from "@/components/ui/select";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Tooltip, TooltipContent, TooltipTrigger, TooltipProvider } from "@/components/ui/tooltip";
-import { Building2, Plus, Search, Pencil, AlertTriangle, FileText, MoreVertical, Trash2, FolderSearch, BarChart3, Trash, ArrowUpRight, ArrowDownLeft, CircleDot, CheckCircle2, Clock, Calendar, Users, MessageSquare, SlidersHorizontal, Globe, Image, Upload, X, ChevronDown, Eye, EyeOff, Info } from "lucide-react";
+import { Building2, Plus, Search, Pencil, AlertTriangle, FileText, MoreVertical, Trash2, FolderSearch, BarChart3, Trash, ArrowUpRight, ArrowDownLeft, CircleDot, CheckCircle2, Clock, Calendar, Coins, Users, MessageSquare, SlidersHorizontal, Globe, Image, Upload, X, ChevronDown, Eye, EyeOff, Info } from "lucide-react";
 import { Collapsible, CollapsibleTrigger, CollapsibleContent } from "@/components/ui/collapsible";
 import {
   DropdownMenu,
@@ -70,6 +78,13 @@ import { AcceptTermsModal } from "@/components/layout/accept-terms-modal";
 import { useAuthStore } from "@/stores/auth-store";
 import { useBrandingStore } from "@/stores/branding-store";
 import { TenantTypographyBlock } from "@/components/tenants/tenant-typography-block";
+import { TenantResellerTermsBlock } from "@/components/tenants/tenant-reseller-terms-block";
+import { AiCreditsTenantDialog } from "@/components/tenants/ai-credits-tenant-dialog";
+import { fetchAiTenantsBalances, type AiTenantBalanceRow } from "@/services/ai-platform";
+import {
+  fetchResellerTermsTenantsStatus,
+  type ResellerTermsTenantsStatusResponse,
+} from "@/services/reseller-terms";
 
 interface Tenant {
   id: number;
@@ -174,8 +189,10 @@ const MENU_GROUPS: { catKey: string; items: { key: string; labelKey: string }[] 
   ] },
   { catKey: "cat.automacao", items: [
     { key: "agendamentos", labelKey: "item.agendamentos" },
+    { key: "agentes-ia", labelKey: "item.aiAgents" },
     { key: "aniversarios", labelKey: "item.aniversarios" },
     { key: "chat-flow", labelKey: "item.chatFlow" },
+    { key: "creditos-ia", labelKey: "item.aiCredits" },
     { key: "instagram-automacao", labelKey: "item.instagramAutomacao" },
   ] },
   { catKey: "cat.gestaoComercial", items: [
@@ -261,6 +278,8 @@ function CollapsibleSection({ title, defaultOpen = false, children }: { title: s
 
 export default function TenantsPage() {
   const t = useTranslations("tenantsPage");
+  // Aviso de saldo remanescente na exclusão: o texto mora no namespace do diálogo.
+  const tAiCredits = useTranslations("aiCreditsTenantDialog");
   const { user } = useAuthStore();
 
   // Labels dos "Menus Visíveis" reusam o namespace do sidebar (já traduzido em todos os locales).
@@ -317,6 +336,14 @@ export default function TenantsPage() {
   // principal loga). Começa em false — enquanto não houver confirmação do
   // servidor, a tela funciona como sempre funcionou.
   const [singleTenantLicense, setSingleTenantLicense] = useState(false);
+  // Aceite dos termos do revendedor por empresa (rota aditiva). null = backend
+  // antigo, erro ou licença de empresa única → coluna e seção não aparecem.
+  const [termsStatus, setTermsStatus] = useState<ResellerTermsTenantsStatusResponse | null>(null);
+  // Créditos de IA por empresa (UMA chamada por carga da tela, chaveada pelo id). null =
+  // backend antigo (404), banco sem a migration (503) ou qualquer outra falha → a coluna
+  // e a ação simplesmente não aparecem, sem toast.
+  const [aiCreditsBalances, setAiCreditsBalances] = useState<Record<string, AiTenantBalanceRow> | null>(null);
+  const [aiCreditsTenant, setAiCreditsTenant] = useState<Tenant | null>(null);
   const logoInputRef = React.useRef<HTMLInputElement>(null);
   const logoDarkInputRef = React.useRef<HTMLInputElement>(null);
   const faviconInputRef = React.useRef<HTMLInputElement>(null);
@@ -347,6 +374,39 @@ export default function TenantsPage() {
       .then((res) => setSingleTenantLicense(res.data?.singleTenant === true))
       .catch(() => setSingleTenantLicense(false));
   }, [user?.profile]);
+
+  // Status dos termos do revendedor — efeito PRÓPRIO, fora do `load`: backend
+  // antigo responde 404 e a tela segue como era (sem coluna e sem toast).
+  useEffect(() => {
+    if (user?.profile !== "superadmin" || singleTenantLicense) {
+      setTermsStatus(null);
+      return;
+    }
+    let cancelled = false;
+    fetchResellerTermsTenantsStatus()
+      .then((res) => { if (!cancelled) setTermsStatus(res.data ?? null); })
+      .catch(() => { if (!cancelled) setTermsStatus(null); });
+    return () => { cancelled = true; };
+  }, [user?.profile, singleTenantLicense]);
+
+  // Saldos de Créditos de IA — efeito PRÓPRIO, fora do `load`: uma consulta para todas
+  // as empresas, relida quando o diálogo muda saldo ou interruptor.
+  const loadAiCreditsBalances = useCallback(() => {
+    if (user?.profile !== "superadmin") {
+      setAiCreditsBalances(null);
+      return;
+    }
+    fetchAiTenantsBalances()
+      .then((res) => {
+        const rows = Array.isArray(res.data) ? res.data : [];
+        const map: Record<string, AiTenantBalanceRow> = {};
+        rows.forEach((row) => { map[String(row.tenantId)] = row; });
+        setAiCreditsBalances(map);
+      })
+      .catch(() => setAiCreditsBalances(null));
+  }, [user?.profile]);
+
+  useEffect(() => { loadAiCreditsBalances(); }, [loadAiCreditsBalances]);
 
   // Carrega a config GLOBAL de cobrança no cadastro (payment-config.json).
   useEffect(() => {
@@ -508,6 +568,14 @@ export default function TenantsPage() {
     if (editing.id === 1 && editing.status === "inactive") { toast.error(t("deactivateProtected")); return; }
     if (!editing.name?.trim()) { toast.error(t("errorNameRequired")); return; }
     if (!editing.maxUsers || !editing.maxConnections) { toast.error(t("errorFillMaxFields")); return; }
+    // Duração vazia gravava null e o job somava zero dia ao createdAt: o trial
+    // vencia na hora e o tenant caía inativo na primeira passagem.
+    if (editing.trial === "enabled") {
+      const days = Number(editing.trialPeriod);
+      if (!editing.trialPeriod || !Number.isFinite(days) || days < 1) {
+        toast.error(t("errorTrialDurationRequired")); return;
+      }
+    }
     const gw = editing.paymentGateway === "stripe" ? "stripe" :
       editing.paymentGateway === "pagarme" ? "pagarme" :
       editing.paymentGateway === "mercadopago" ? "mercadopago" :
@@ -722,8 +790,69 @@ export default function TenantsPage() {
 
   // Aviso de inconsistência: soma dos limites por tipo (canais permitidos) não pode exceder maxConnections.
   const tenantMaxConn = Number(editing.maxConnections) || 0;
-  const tenantChannelSum = selectedChannels.reduce((acc, c) => acc + (Number(channelLimits[c]) > 0 ? Number(channelLimits[c]) : 0), 0);
+  const tenantChannelSum = limitsSumForTypes(channelLimits, selectedChannels.map(canonicalChannelType));
   const showTenantChannelOverflow = tenantMaxConn > 0 && tenantChannelSum > tenantMaxConn;
+
+  // Coluna "Termos" só existe depois que o revendedor publica a 1ª versão.
+  const showTermsColumn = termsStatus?.currentVersion != null;
+
+  // Coluna e ação de Créditos de IA só existem quando o servidor respondeu os saldos.
+  const showAiCreditsColumn = aiCreditsBalances !== null;
+
+  function renderAiCreditsCell(tenant: Tenant) {
+    const row = aiCreditsBalances?.[String(tenant.id)];
+    // Empresa sem o recurso liberado não tem saldo a mostrar.
+    if (!row || row.enabled !== true) return <span className="text-muted-foreground">—</span>;
+    const cents = Number(row.balanceCents) || 0;
+    const dotClass =
+      row.state === "negative" ? "text-destructive"
+        : row.state === "low" ? "text-warning"
+          : row.state === "zero" ? "text-muted-foreground"
+            : "text-success";
+    return (
+      <span className="inline-flex items-center gap-1.5 tabular-nums">
+        <CircleDot className={`h-3 w-3 shrink-0 ${dotClass}`} aria-hidden />
+        <span className={row.state === "negative" ? "text-destructive" : undefined}>
+          {formatCentsBRL(cents)}
+        </span>
+      </span>
+    );
+  }
+
+  function renderResellerTermsBadge(tenant: Tenant) {
+    if (!termsStatus) return null;
+    if (Number(tenant.id) === 1) {
+      return <Badge variant="info-soft">{t("resellerTermsExempt")}</Badge>;
+    }
+    // Empresa sem aceite nem administrador não aparece no mapa → 0 administradores.
+    const item = termsStatus.items?.[String(tenant.id)];
+    const adminCount = Number(item?.adminCount ?? 0);
+    if (adminCount === 0) {
+      return <Badge variant="secondary">{t("resellerTermsNoAdmin")}</Badge>;
+    }
+    const lastVersion = item?.lastVersion ?? null;
+    const requiredVersion = termsStatus.requiredVersion;
+    if (lastVersion != null && requiredVersion != null && lastVersion >= requiredVersion) {
+      return <Badge variant="success">{t("resellerTermsAccepted", { version: lastVersion })}</Badge>;
+    }
+    if (termsStatus.required) {
+      return (
+        <TooltipProvider>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <span className="inline-flex cursor-help">
+                <Badge variant="warning">{t("resellerTermsPending")}</Badge>
+              </span>
+            </TooltipTrigger>
+            <TooltipContent side="top">
+              <p className="max-w-[220px] text-xs">{t("resellerTermsPendingTip")}</p>
+            </TooltipContent>
+          </Tooltip>
+        </TooltipProvider>
+      );
+    }
+    return <Badge variant="warning-soft">{t("resellerTermsPendingNotRequired")}</Badge>;
+  }
 
   return (
     <div className="space-y-6">
@@ -731,7 +860,10 @@ export default function TenantsPage() {
         description: t("helpDesc"),
         sections: [
           { title: t("helpS0T"), items: [t("helpS0I0"), t("helpS0I1"), t("helpS0I2")] },
-          { title: t("helpS1T"), items: [t("helpS1I0"), t("helpS1I1")] },
+          // A dica dos Créditos de IA só aparece quando o servidor tem o recurso
+          { title: t("helpS1T"), items: [t("helpS1I0"), t("helpS1I1"), ...(showAiCreditsColumn ? [t("helpS1I3")] : [])] },
+          { title: t("helpS2T"), items: [t("helpS2I0"), t("helpS2I1"), t("helpS2I2"), t("helpS2I3")] },
+          ...(singleTenantLicense ? [] : [{ title: t("helpS3T"), items: [t("helpS3I0"), t("helpS3I1")] }]),
         ],
       }}>
         <div className="flex flex-wrap gap-2">
@@ -794,6 +926,8 @@ export default function TenantsPage() {
                   <SortableTableHead sortKey="maxUsers" currentSortKey={sortKey} sortDir={sortDir} onSort={handleSort}>{t("colUsers")}</SortableTableHead>
                   <SortableTableHead sortKey="maxConnections" currentSortKey={sortKey} sortDir={sortDir} onSort={handleSort}>{t("colConnections")}</SortableTableHead>
                   <SortableTableHead sortKey="createdAt" currentSortKey={sortKey} sortDir={sortDir} onSort={handleSort}>{t("colCreatedAt")}</SortableTableHead>
+                  {showTermsColumn && <TableHead className="whitespace-nowrap">{t("resellerTermsColumn")}</TableHead>}
+                  {showAiCreditsColumn && <TableHead className="whitespace-nowrap">{t("aiCreditsColumn")}</TableHead>}
                   <TableHead className="w-[80px]">{t("colActions")}</TableHead>
                 </TableRow></TableHeader>
                 <TableBody>
@@ -812,6 +946,12 @@ export default function TenantsPage() {
                       <TableCell className="text-muted-foreground text-sm">
                         {tenant.createdAt ? formatDateTime(tenant.createdAt as string) : "—"}
                       </TableCell>
+                      {showTermsColumn && (
+                        <TableCell className="whitespace-nowrap">{renderResellerTermsBadge(tenant)}</TableCell>
+                      )}
+                      {showAiCreditsColumn && (
+                        <TableCell className="whitespace-nowrap">{renderAiCreditsCell(tenant)}</TableCell>
+                      )}
                       <TableCell>
                         <div className="flex items-center justify-end gap-1">
                           <Button
@@ -849,6 +989,12 @@ export default function TenantsPage() {
                                 <SlidersHorizontal className="mr-2 h-4 w-4" />
                                 {t("actionCleanByFilter")}
                               </DropdownMenuItem>
+                              {showAiCreditsColumn && (
+                                <DropdownMenuItem onClick={() => setAiCreditsTenant(tenant)}>
+                                  <Coins className="mr-2 h-4 w-4" />
+                                  {t("aiCreditsAction")}
+                                </DropdownMenuItem>
+                              )}
                               <DropdownMenuItem onClick={() => handleCleanFiles(tenant)} className="text-destructive">
                                 <Trash className="mr-2 h-4 w-4" />
                                 {t("actionDeleteFiles")}
@@ -1023,7 +1169,19 @@ export default function TenantsPage() {
             {/* Trial */}
             <CollapsibleSection title={t("trialPeriodTitle")}>
               <div className="flex items-center justify-between rounded-lg border p-3 mb-2">
-                <Label>{editing.trial === "enabled" ? t("trialEnabled") : t("trialDisabled")}</Label>
+                <Label className="whitespace-nowrap">
+                  {editing.trial === "enabled" ? t("trialEnabled") : t("trialDisabled")}
+                  <TooltipProvider>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <Info className="ml-1 inline-block h-3.5 w-3.5 align-[-2px] text-muted-foreground cursor-help" />
+                      </TooltipTrigger>
+                      <TooltipContent side="top">
+                        <p className="max-w-[240px] text-xs">{t("trialEnabledHelp")}</p>
+                      </TooltipContent>
+                    </Tooltip>
+                  </TooltipProvider>
+                </Label>
                 <Switch
                   checked={editing.trial === "enabled"}
                   onCheckedChange={(v) => set("trial", v ? "enabled" : "disabled")}
@@ -1031,8 +1189,21 @@ export default function TenantsPage() {
               </div>
               {editing.trial === "enabled" && (
                 <div className="space-y-1.5">
-                  <Label>{t("labelTrialDuration")}</Label>
-                  <Input value={editing.trialPeriod || ""} onChange={(e) => set("trialPeriod", e.target.value)} placeholder={t("trialDurationPlaceholder")} />
+                  <Label className="whitespace-nowrap">
+                    {t("labelTrialDuration")}
+                    <TooltipProvider>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <Info className="ml-1 inline-block h-3.5 w-3.5 align-[-2px] text-muted-foreground cursor-help" />
+                        </TooltipTrigger>
+                        <TooltipContent side="top">
+                          <p className="max-w-[240px] text-xs">{t("trialDurationHelp")}</p>
+                        </TooltipContent>
+                      </Tooltip>
+                    </TooltipProvider>
+                  </Label>
+                  <Input type="number" min={1} value={editing.trialPeriod || ""} onChange={(e) => set("trialPeriod", e.target.value)} placeholder={t("trialDurationPlaceholder")} />
+                  <p className="text-xs text-muted-foreground">{t("trialDurationNote")}</p>
                 </div>
               )}
               {editing.id === 1 && (
@@ -1414,6 +1585,7 @@ export default function TenantsPage() {
             {/* Channel Connection Limits */}
             <CollapsibleSection title={t("channelLimitsTitle")}>
               <p className="text-xs text-muted-foreground mb-3">{t("channelLimitsHint")}</p>
+              <p className="text-xs text-muted-foreground mb-3">{t("channelLimitsCanonicalNote")}</p>
               {showTenantChannelOverflow && (
                 <div className="mb-3 rounded-md border border-warning/30 bg-warning/10 p-2.5 text-xs text-foreground">
                   {t("channelLimitsOverflowWarning", { sum: tenantChannelSum, max: tenantMaxConn })}
@@ -1429,8 +1601,8 @@ export default function TenantsPage() {
                 </button>
               </div>
               <div className="grid grid-cols-2 gap-x-4 gap-y-2">
-                {CHANNELS.map((ch) => {
-                  const limit = Number(channelLimits[ch.value]) || 0;
+                {CHANNEL_LIMIT_TYPES.map((ch) => {
+                  const limit = getEffectiveTypeLimit(channelLimits, ch.value);
                   const unlimited = limit <= 0; // 0/ausente = ilimitado
                   return (
                     <div key={ch.value} className="space-y-1">
@@ -1440,7 +1612,7 @@ export default function TenantsPage() {
                           <Checkbox
                             checked={unlimited}
                             onCheckedChange={(v) =>
-                              setChannelLimits((prev) => ({ ...prev, [ch.value]: v ? 0 : 1 }))
+                              setChannelLimits((prev) => setTypeLimit(prev, ch.value, v ? 0 : 1))
                             }
                           />
                           {t("channelQtyUnlimited")}
@@ -1453,7 +1625,7 @@ export default function TenantsPage() {
                           placeholder="—"
                           onChange={(e) => {
                             const val = Math.max(1, Number(e.target.value) || 1);
-                            setChannelLimits((prev) => ({ ...prev, [ch.value]: val }));
+                            setChannelLimits((prev) => setTypeLimit(prev, ch.value, val));
                           }}
                           className="h-7 w-16 text-sm"
                         />
@@ -1684,6 +1856,15 @@ export default function TenantsPage() {
 
                   <Separator className="my-4" />
                   <TenantTypographyBlock tenantId={editing.id as number} />
+                </CollapsibleSection>
+              </>
+            )}
+
+            {editing.id && termsStatus != null && (
+              <>
+                <Separator />
+                <CollapsibleSection title={t("resellerTermsSectionTitle")}>
+                  <TenantResellerTermsBlock tenantId={editing.id as number} />
                 </CollapsibleSection>
               </>
             )}
@@ -1943,6 +2124,16 @@ export default function TenantsPage() {
               {t("externalStorageNoticeAction")}
             </div>
           )}
+          {/* D35: saldo remanescente de Créditos de IA fica à vista antes de excluir */}
+          {confirmDialog?.type === "deleteTenant" && (() => {
+            const cents = Number(aiCreditsBalances?.[String(confirmDialog?.tenant.id)]?.balanceCents) || 0;
+            if (cents === 0) return null;
+            return (
+              <div className="mt-2 rounded-lg border border-warning/30 bg-warning/5 px-3 py-2 text-xs text-foreground">
+                {tAiCredits("deleteWarning", { value: formatCentsBRL(cents) })}
+              </div>
+            );
+          })()}
           <DialogFooter className="gap-2 sm:gap-0">
             <Button variant="outline" onClick={() => setConfirmDialog(null)}>
               {t("btnCancel")}
@@ -1953,6 +2144,15 @@ export default function TenantsPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* Créditos de IA da empresa — saldo, liberação, ajuste manual e extrato */}
+      <AiCreditsTenantDialog
+        open={aiCreditsTenant !== null}
+        onOpenChange={(open) => { if (!open) setAiCreditsTenant(null); }}
+        tenantId={aiCreditsTenant?.id ?? null}
+        tenantName={aiCreditsTenant?.name}
+        onChanged={loadAiCreditsBalances}
+      />
 
       {/* Bulk OAuth Dialog */}
       <Dialog open={bulkOAuthOpen} onOpenChange={setBulkOAuthOpen}>

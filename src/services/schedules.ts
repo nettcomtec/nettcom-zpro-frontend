@@ -30,11 +30,17 @@ interface ScheduleListResponse {
   totalPages: number;
 }
 
-export async function fetchSchedules(page = 1) {
+export async function fetchSchedules(page = 1, searchParam?: string) {
   const { data } = await api.get<ScheduleListResponse>("/scheduleMessages/", {
-    params: { page },
+    params: { page, ...(searchParam ? { searchParam } : {}) },
   });
-  return data?.messages ?? [];
+  const messages = data?.messages ?? [];
+  return {
+    messages,
+    total: data?.total ?? messages.length,
+    page: data?.page ?? page,
+    totalPages: Math.max(1, data?.totalPages ?? 1),
+  };
 }
 
 /** Non-WABA channels: POST /messagesSchedule/ */

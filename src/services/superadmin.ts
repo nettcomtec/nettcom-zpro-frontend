@@ -251,8 +251,9 @@ export async function updateAppRocketChat(id: number, data: Record<string, unkno
 export async function deleteAppRocketChat(id: number) {
   return api.delete(`/app-rocketchat/${id}`);
 }
-export async function validateAppRocketChat(id: number) {
-  return api.post(`/app-rocketchat/${id}/validate`);
+// `data` = valores ainda não salvos do formulário; campo vazio testa o valor salvo.
+export async function validateAppRocketChat(id: number, data?: Record<string, unknown>) {
+  return api.post(`/app-rocketchat/${id}/validate`, data ?? {});
 }
 export async function updateTenantRocketChatEnabled(tenantId: number, data: { rocketChatEnabled: string }) {
   return api.put(`/tenantsRocketChatEnabled/${tenantId}`, data);
@@ -361,8 +362,18 @@ export async function reprocessQueue(queueName: string) {
 }
 
 // Backup
+// O backup roda por minutos no servidor (dump do banco + zip da pasta do tenant). Hoje a
+// rota responde 202 e o trabalho segue em background, mas backend antigo só responde no
+// fim: com o timeout global de 30s o axios abortava e a tela acusava "erro ao iniciar
+// backup" num backup que estava indo bem.
+const BACKUP_REQUEST_TIMEOUT = 600000;
+
 export async function backupAllTenants() {
-  return api.post("/backup/all");
+  return api.post("/backup/all", undefined, { timeout: BACKUP_REQUEST_TIMEOUT });
+}
+// Rota aditiva: backend antigo responde 404 e a tela só não mostra o aviso de andamento.
+export async function fetchRunningBackups() {
+  return api.get("/backup/running");
 }
 export async function fetchBackupStatistics() {
   return api.get("/statistics");
@@ -411,12 +422,12 @@ export async function uploadFavicon(formData: FormData) {
 export async function updateAppName(name: string) {
   return api.post("/custom/updateName", { name });
 }
-// Atualiza nome no frontendNovo (manifest.json + layout.tsx) e no Vue
+// Atualiza nome no frontendNovo (manifest.json + layout.tsx) e no front legado
 export async function updateAppNameNovo(name: string) {
   return api.post("/custom/updateNameNovo", { name });
 }
 
-// Branding frontendNovo – fazem upload para frontendNovo/public/ e espelham no frontend Vue
+// Branding frontendNovo – fazem upload para frontendNovo/public/ e espelham no frontend legado
 export async function uploadLogoNovo(formData: FormData) {
   return api.post("/custom/uploadLogoNovo", formData, { headers: { "Content-Type": "multipart/form-data" }, timeout: 300000 });
 }
@@ -438,7 +449,7 @@ export async function fetchBranding() {
 // Branding público (sem auth) – para login page e dashboard
 export async function fetchPublicBranding() {
   // frontendNovo usa o endpoint Novo (inclui fontFamily/Weights/Source + avatarShape).
-  // /publicBranding (sem sufixo) é mantido sem alteração para o Vue legado.
+ // /publicBranding (sem sufixo) é mantido sem alteração para o front legado.
   return api.get("/publicBrandingNovo");
 }
 
@@ -535,9 +546,6 @@ export async function deleteFaviconNovo() {
   return api.delete("/custom/deleteFaviconNovo");
 }
 
-export async function triggerSystemUpdate() {
-  return api.post("/custom/update");
-}
 export async function triggerMigration() {
   return api.post("/custom/migrate");
 }
@@ -570,7 +578,7 @@ export async function listMigrationLogs(id: number) {
 
 // Backup por tenant
 export async function backupTenant(tenantId: number) {
-  return api.post(`/backup/tenant/${tenantId}`);
+  return api.post(`/backup/tenant/${tenantId}`, undefined, { timeout: BACKUP_REQUEST_TIMEOUT });
 }
 export async function listAvailableBackups(tenantId?: number) {
   return tenantId ? api.get(`/backups/tenant/${tenantId}`) : api.get("/backups");

@@ -34,6 +34,7 @@ import { Collapsible, CollapsibleTrigger, CollapsibleContent } from "@/component
 import { sanitize } from "@/lib/sanitize";
 import { formatBulkSendError } from "@/lib/bulk-send-error-format";
 import { parseOAuthLicenseError, OAUTH_LICENSE_COOLDOWN_MS } from "@/lib/oauth-license-error";
+import { channelCreateErrorKey } from "@/lib/channel-create-error";
 import { type GalleryItem } from "@/services/gallery";
 import { GalleryPickerWithUploadDialog, wabaHeaderFormatToGalleryParams } from "@/components/gallery/gallery-picker-with-upload-dialog";
 import { ORDER_DETAILS_BUTTON_TEXT } from "@/lib/order-details";
@@ -60,6 +61,7 @@ import { generateTemplateViaCopilot } from "@/services/copilot";
 import { useMetaProxyPopup, type MetaProxyHijackPayload } from "@/hooks/use-meta-proxy-popup";
 import { HijackTakeoverDialog } from "@/components/common/hijack-takeover-dialog";
 import { DiagnoseModal } from "@/components/sessoes/diagnose-modal";
+import { WabaSendHealthNotice } from "@/components/sessoes/waba-send-health-notice";
 import { invalidateWabaPinPendingCache } from "@/hooks/use-waba-pin-pending";
 import { takeoverRegistry } from "@/lib/registry-hijack";
 import { useOAuthProxyDomain } from "@/hooks/use-oauth-proxy-domain";
@@ -171,6 +173,9 @@ export default function MetaPage() {
   const t = useTranslations("metaPage");
   const tCommon = useTranslations("common");
   const tHealth = useTranslations("metaHealth");
+  // Erros de criacao de canal (limite geral, limite por tipo, tipo nao permitido)
+  // reusam as chaves de sessoesPage — mesmo texto da tela /sessoes.
+  const tSess = useTranslations("sessoesPage");
   const metaProxy = useMetaProxyPopup();
   const tHijack = useTranslations("channelHijack");
   const [hijackState, setHijackState] = useState<MetaProxyHijackPayload | null>(null);
@@ -833,9 +838,10 @@ export default function MetaPage() {
           try { loadWABAs(); } catch { /* ignore */ }
         }
       },
-      onError: (msg, hijack) => {
+      onError: (msg, hijack, code) => {
         if (hijack) { setHijackState(hijack); return; }
-        toast.error(msg || t("wabaConnectError") || "Erro ao conectar WABA");
+        const key = channelCreateErrorKey(code || msg);
+        toast.error(key ? tSess(key) : (msg || t("wabaConnectError") || "Erro ao conectar WABA"));
       },
       onCancelled: () => { /* silencioso — user fechou popup */ },
     });
@@ -858,9 +864,10 @@ export default function MetaPage() {
       // ativo no proxy — este backend suporta canal Instagram (EAA).
       credentials: { ...buildMetaCredentials(), ...resolveOwnAppCtx(), igViaFacebook: true },
       onSuccess: () => toast.success(t("instagramConnectSuccess") || "Instagram conectado"),
-      onError: (msg, hijack) => {
+      onError: (msg, hijack, code) => {
         if (hijack) { setHijackState(hijack); return; }
-        toast.error(msg || t("instagramConnectError") || "Erro ao conectar Instagram");
+        const key = channelCreateErrorKey(code || msg);
+        toast.error(key ? tSess(key) : (msg || t("instagramConnectError") || "Erro ao conectar Instagram"));
       },
       onCancelled: () => { /* silencioso */ },
     });
@@ -888,9 +895,10 @@ export default function MetaPage() {
           ? (t("messengerConnectSuccessWithInstagram", { count: igCount }) || `Facebook Messenger conectado + ${igCount} Instagram`)
           : (t("messengerConnectSuccess") || "Facebook Messenger conectado"));
       },
-      onError: (msg, hijack) => {
+      onError: (msg, hijack, code) => {
         if (hijack) { setHijackState(hijack); return; }
-        toast.error(msg || t("messengerConnectError") || "Erro ao conectar Messenger");
+        const key = channelCreateErrorKey(code || msg);
+        toast.error(key ? tSess(key) : (msg || t("messengerConnectError") || "Erro ao conectar Messenger"));
       },
       onCancelled: () => { /* silencioso */ },
     });
@@ -1042,7 +1050,8 @@ export default function MetaPage() {
       const r = await fetchWhatsapps(true); // pós-mutação: fura cache TTL 1500ms
       setWhatsapps(r.data);
     } catch (err: any) {
-      toast.error(t("errorCreateChannel"));
+      const errKey = channelCreateErrorKey(err?.data?.error || err?.response?.data?.error);
+      toast.error(errKey ? tSess(errKey) : t("errorCreateChannel"));
     } finally {
       setCreatingChannels((prev) => ({ ...prev, [key]: false }));
     }
@@ -2804,6 +2813,7 @@ Include only the components listed above. Do not add components that were not re
                           <CollapsibleContent className="pt-2">
                             <Card>
                               <CardContent className="space-y-2 text-sm pt-4">
+                                <WabaSendHealthNotice whatsappId={conn.id} variant="panel" />
                                 <div className="flex justify-between"><span className="text-muted-foreground shrink-0">{t("labelName")}:</span><span className="ml-2 truncate">{conn.name}</span></div>
                                 <div className="flex justify-between"><span className="text-muted-foreground shrink-0">{t("labelStatus")}:</span><Badge variant="outline">{conn.status}</Badge></div>
                                 {conn.wabaId && <div className="flex flex-col gap-0.5"><span className="text-muted-foreground text-xs">WABA ID:</span><span className="font-mono text-xs break-all">{conn.wabaId}</span></div>}
@@ -4178,12 +4188,18 @@ Include only the components listed above. Do not add components that were not re
                                       </SelectContent>
                                     </Select>
                                     {(comp.format === "TEXT" || !comp.format) && (
-                                      <Input
-                                        value={comp.text || ""}
-                                        onChange={(e) => updateComponent(idx, { text: e.target.value })}
-                                        placeholder={t("placeholderHeaderText")}
-                                        maxLength={WABA_LIMITS.templateHeaderText}
-                                      />
+                                      <>
+                                        <Input
+                                          value={comp.text || ""}
+                                          onChange={(e) => updateComponent(idx, { text: e.target.value })}
+                                          placeholder={t("placeholderHeaderText")}
+                                          maxLength={WABA_LIMITS.templateHeaderText}
+                                        />
+                                        <div className="-mt-1.5 flex items-center justify-between gap-2 text-xs text-muted-foreground">
+                                          <span>{t("headerTextHint", { max: WABA_LIMITS.templateHeaderText })}</span>
+                                          <span>{(comp.text || "").length}/{WABA_LIMITS.templateHeaderText}</span>
+                                        </div>
+                                      </>
                                     )}
                                     {(comp.format === "IMAGE" || comp.format === "VIDEO" || comp.format === "DOCUMENT") && (
                                       <div className="flex gap-2 items-center">
@@ -4488,13 +4504,19 @@ Include only the components listed above. Do not add components that were not re
                             </SelectContent>
                           </Select>
                           {fbTplForm.headerType === "text" && (
-                            <Input
-                              value={fbTplForm.headerText}
-                              onChange={(e) => setFbTplForm((p) => ({ ...p, headerText: e.target.value }))}
-                              placeholder={t("fbTpl.headerTextPlaceholder")}
-                              maxLength={60}
-                              className="h-9 text-sm"
-                            />
+                            <>
+                              <Input
+                                value={fbTplForm.headerText}
+                                onChange={(e) => setFbTplForm((p) => ({ ...p, headerText: e.target.value }))}
+                                placeholder={t("fbTpl.headerTextPlaceholder")}
+                                maxLength={WABA_LIMITS.templateHeaderText}
+                                className="h-9 text-sm"
+                              />
+                              <div className="flex items-center justify-between gap-2 text-[10px] text-muted-foreground">
+                                <span>{t("headerTextHint", { max: WABA_LIMITS.templateHeaderText })}</span>
+                                <span>{fbTplForm.headerText.length}/{WABA_LIMITS.templateHeaderText}</span>
+                              </div>
+                            </>
                           )}
                           {(fbTplForm.headerType === "image" || fbTplForm.headerType === "video" || fbTplForm.headerType === "document") && (
                             <div className="space-y-1">

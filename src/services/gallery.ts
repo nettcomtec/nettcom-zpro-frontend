@@ -164,11 +164,17 @@ export interface UploadFailure {
 }
 
 function extractUploadFailureReason(err: unknown): { status?: number; code: UploadFailureCode } {
-  const ax = err as AxiosError<{ error?: string; message?: string }> | undefined;
-  const status = ax?.response?.status;
+  // lib/api.ts rejeita com `error.response || error`: com resposta HTTP, status e corpo
+  // chegam na RAIZ (o objeto É a resposta); só o AxiosError cru (sem resposta) traz
+  // `response` vazio + `code`/`message`. Ler só `ax.response` dava sempre "unknown".
+  type UploadErrorBody = { error?: string; message?: string };
+  const ax = err as
+    | (AxiosError<UploadErrorBody> & { status?: number; data?: UploadErrorBody })
+    | undefined;
+  const status = ax?.status ?? ax?.response?.status;
   if (status) {
-    const body = ax?.response?.data;
-    const backendCode = body?.error || body?.message || "";
+    const body = ax?.data ?? ax?.response?.data;
+    const backendCode = (body && typeof body === "object" ? body.error || body.message : "") || "";
     if (backendCode === "ERR_GALLERY_QUOTA_EXCEEDED") return { status, code: "quota" };
     if (status === 413 || backendCode === "FILE_TOO_LARGE") return { status, code: "too_large" };
     if (status === 415 || backendCode === "CHAT_FILE_TYPE_NOT_ALLOWED") return { status, code: "unsupported" };

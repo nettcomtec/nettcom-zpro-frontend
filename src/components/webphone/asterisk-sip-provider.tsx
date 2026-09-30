@@ -2,7 +2,7 @@
 
 /**
  * AsteriskSipProvider — background SIP UA manager.
- * Always mounted in the dashboard layout when sipEnabled, mirroring Vue's
+ * Always mounted in the dashboard layout when sipEnabled, mirroring the legacy front's
  * AsteriskWebphone in MainLayout (always mounted, visually hidden).
  *
  * Registers on page load so incoming calls arrive even before the modal opens.
@@ -10,11 +10,49 @@
  */
 
 import { useEffect } from "react";
-import { UserAgent, Registerer, SessionState } from "sip.js";
+import { UserAgent, Registerer, SessionState, Web } from "sip.js";
+import { startCallRingtone } from "@/lib/call-ringtone";
 import { useAuthStore } from "@/stores/auth-store";
 import { useWebphoneStore } from "@/stores/webphone-store";
-import { sipSession } from "./sip-session";
+import { sipSession, SIP_MIC_TIMEOUT_ERROR } from "./sip-session";
 import { createCallLog } from "@/services/call-logs";
+
+const MIC_TIMEOUT_MS = 15_000;
+
+// getUserMedia fica pendente para sempre quando o usuário ignora o pedido de
+// microfone — o sip.js só monta o INVITE depois dele, então a tela ficava em
+// "Chamando..." sem nada no fio. Com o teto, invite()/accept() rejeitam e a UI
+// se libera. Stream que chega depois do teto é descartado (senão o microfone
+// ficaria aceso sem chamada).
+const micStreamFactory: Web.MediaStreamFactory = (constraints, sdh, options) => {
+  const base = Web.defaultMediaStreamFactory();
+  return new Promise<MediaStream>((resolve, reject) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      settled = true;
+      const err = new Error("Microphone request timed out");
+      err.name = SIP_MIC_TIMEOUT_ERROR;
+      reject(err);
+    }, MIC_TIMEOUT_MS);
+    base(constraints, sdh, options).then(
+      (stream) => {
+        clearTimeout(timer);
+        if (settled) {
+          stream.getTracks().forEach((track) => track.stop());
+          return;
+        }
+        settled = true;
+        resolve(stream);
+      },
+      (err) => {
+        clearTimeout(timer);
+        if (settled) return;
+        settled = true;
+        reject(err);
+      }
+    );
+  });
+};
 
 export function AsteriskSipProvider() {
   const { user } = useAuthStore();
@@ -24,39 +62,12 @@ export function AsteriskSipProvider() {
 
   const cfg = user?.sipConfig;
 
-  // Beep enquanto há chamada SIP recebida tocando — mesmo padrão usado em
-  // private-call-incoming-modal e waba-incoming-call-modal (Web Audio API).
+  // Toque enquanto há chamada SIP recebida — mesmo mecanismo das demais telas
+  // de chamada: arquivo de public/ quando existir, senão o beep sintetizado de
+  // sempre. Ver lib/call-ringtone.ts.
   useEffect(() => {
     if (callStatus !== "ringing" || incomingDirection !== "incoming") return;
-    const AudioCtx: typeof AudioContext | undefined =
-      typeof window !== "undefined"
-        ? window.AudioContext ?? (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext
-        : undefined;
-    if (!AudioCtx) return;
-    const ctx = new AudioCtx();
-    let stopped = false;
-
-    const beep = () => {
-      if (stopped) return;
-      try {
-        const osc = ctx.createOscillator();
-        const gain = ctx.createGain();
-        osc.connect(gain);
-        gain.connect(ctx.destination);
-        osc.frequency.value = 480;
-        gain.gain.setValueAtTime(0.3, ctx.currentTime);
-        gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.6);
-        osc.start(ctx.currentTime);
-        osc.stop(ctx.currentTime + 0.6);
-      } catch { /* ignore */ }
-      setTimeout(() => { if (!stopped) beep(); }, 1800);
-    };
-    beep();
-
-    return () => {
-      stopped = true;
-      try { ctx.close(); } catch { /* ignore */ }
-    };
+    return startCallRingtone();
   }, [callStatus, incomingDirection]);
 
   useEffect(() => {
@@ -64,11 +75,12 @@ export function AsteriskSipProvider() {
 
     let destroyed = false;
 
-    const uri = UserAgent.makeURI(`sip:${cfg.username}@${cfg.server}`);
+    // Domínio SIP do ramal pode diferir do servidor de conexão (SBC na frente do WebRTC).
+    const uri = UserAgent.makeURI(`sip:${cfg.username}@${cfg.domain || cfg.server}`);
     if (!uri) return;
 
     // setTimeout(0) — defer so React StrictMode's synchronous fake-unmount fires
-    // clearTimeout before any WebSocket is opened. Mirrors Vue's single mounted() call.
+ // clearTimeout before any WebSocket is opened. Mirrors the legacy front's single mounted() call.
     const timerId = setTimeout(async () => {
       if (destroyed) return;
 
@@ -114,6 +126,7 @@ export function AsteriskSipProvider() {
         authorizationUsername: cfg.username,
         authorizationPassword: cfg.password,
         logLevel: "error",
+        sessionDescriptionHandlerFactory: Web.defaultSessionDescriptionHandlerFactory(micStreamFactory),
         sessionDescriptionHandlerFactoryOptions: {
           constraints: { audio: true, video: false },
         },
@@ -125,7 +138,7 @@ export function AsteriskSipProvider() {
               invitation.remoteIdentity.uri.user || "Desconhecido";
             // startCall sets isVisible=true in the store → WebphoneModal opens
             startCall({ phone: remoteUri, direction: "incoming" });
-            // Vue: handleIncomingCall → CriarCallLog('Received')
+ // Front legado: handleIncomingCall → CriarCallLog('Received')
             createCallLog({
               userId: user!.userId,
               tenantId: user!.tenantId,
@@ -175,7 +188,7 @@ export function AsteriskSipProvider() {
       setSipRegistered(false);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [cfg?.server, cfg?.port, cfg?.username, cfg?.password]);
+  }, [cfg?.server, cfg?.domain, cfg?.port, cfg?.username, cfg?.password]);
 
   return null;
 }

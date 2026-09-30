@@ -17,7 +17,7 @@ import {
   Settings, Webhook, MessageSquare, Bot, Brain, Globe, Cpu, Zap,
   Phone, Mail, CreditCard, Server, AlertCircle,
   Tag, Variable, MessageCircle, Network, Key, Calendar, Layers,
-  TrendingUp, FileDown,
+  TrendingUp, FileDown, Handshake,
   Linkedin, ShoppingBag, Youtube, Music2,
 } from "lucide-react";
 
@@ -119,6 +119,7 @@ export const CONFIG_TAB_GROUPS: ConfigTabDef[] = [
       { label: "Lanes", href: "/configuracoes/lanes", icon: Layers },
       { labelKey: "linkMotivos", href: "/configuracoes/motivos", icon: AlertCircle },
       { labelKey: "linkVariaveis", href: "/configuracoes/variaveis", icon: Variable },
+      { labelKey: "linkRelacionamento", href: "/configuracoes/relacionamento", icon: Handshake },
     ],
   },
   {

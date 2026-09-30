@@ -10,9 +10,9 @@ import {
   AlertDialog, AlertDialogContent, AlertDialogHeader, AlertDialogTitle,
   AlertDialogDescription, AlertDialogFooter, AlertDialogAction, AlertDialogCancel,
 } from "@/components/ui/alert-dialog";
-import { AlertTriangle, RefreshCw, Database, Trash2, Loader2 } from "lucide-react";
+import { AlertTriangle, Database, Trash2, Loader2 } from "lucide-react";
 import { toast } from "sonner";
-import { triggerSystemUpdate, triggerMigration, triggerClean } from "@/services/superadmin";
+import { triggerMigration, triggerClean } from "@/services/superadmin";
 
 export default function AtualizarPage() {
   const t = useTranslations("atualizarPage");
@@ -52,7 +52,6 @@ export default function AtualizarPage() {
         help={{
           description: t("helpDesc"),
           sections: [
-            { title: t("helpS0T"), items: [t("helpS0I0"), t("helpS0I1"), t("helpS0I2")] },
             { title: t("helpS1T"), items: [t("helpS1I0"), t("helpS1I1"), t("helpS1I2")] },
             { title: t("helpS2T"), items: [t("helpS2I0"), t("helpS2I1")] },
           ],
@@ -66,26 +65,7 @@ export default function AtualizarPage() {
         </AlertDescription>
       </Alert>
 
-      <div className="grid gap-4 md:grid-cols-3">
-        <Card>
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2 text-base">
-              <RefreshCw className="h-5 w-5 text-primary" /> {t("updateSystemTitle")}
-            </CardTitle>
-            <CardDescription>{t("updateSystemDescription")}</CardDescription>
-          </CardHeader>
-          <CardContent>
-            <Alert variant="warning" className="mb-4">
-              <AlertTriangle className="h-4 w-4" />
-              <AlertDescription className="text-xs">{t("updateSystemWarning")}</AlertDescription>
-            </Alert>
-            <Button className="w-full" disabled={busy} onClick={() => run(t("updateSystemTitle"), triggerSystemUpdate)}>
-              {updatingStep === t("updateSystemTitle") ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <RefreshCw className="mr-2 h-4 w-4" />}
-              {t("startUpdate")}
-            </Button>
-          </CardContent>
-        </Card>
-
+      <div className="grid gap-4 md:grid-cols-2">
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-base">

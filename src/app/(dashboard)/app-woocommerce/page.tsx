@@ -36,6 +36,7 @@ import { getWooCommerceProxyCallbackUrl } from "@/config/oauth-proxy";
 import { useOAuthProxyDomain } from "@/hooks/use-oauth-proxy-domain";
 import { useAuthStore } from "@/stores/auth-store";
 import api from "@/lib/api";
+import { channelCreateErrorKey } from "@/lib/channel-create-error";
 
 interface AppWooCommerce {
   id: number;
@@ -45,6 +46,7 @@ interface AppWooCommerce {
   webhookSecret?: string;
   syncProducts?: boolean;
   autoCloseCompleted?: boolean;
+  updateContactFromOrder?: boolean;
   description?: string;
   tenantId?: number | null;
   whatsappId?: number | null;
@@ -76,6 +78,7 @@ function PasswordInput({ value, onChange, placeholder }: { value: string; onChan
 export default function AppWooCommercePage() {
   const t = useTranslations("appWooCommercePage");
   const tCommon = useTranslations("common");
+  const tSess = useTranslations("sessoesPage");
   const { customDomain: oauthCustomDomain } = useOAuthProxyDomain();
   const user = useAuthStore((s) => s.user);
   const isSuperadmin = user?.profile === "superadmin";
@@ -97,6 +100,11 @@ export default function AppWooCommercePage() {
   const [oauthCooldownUntil, setOauthCooldownUntil] = useState<number | null>(null);
 
   const set = (k: keyof AppWooCommerce, v: unknown) => setEditing((p) => ({ ...p, [k]: v }));
+
+  // Chave presente no GET = backend e banco com o recurso; ausente = esconde e não envia
+  const updateContactFromOrderSupported = editing.id
+    ? "updateContactFromOrder" in editing
+    : apps.some((a) => "updateContactFromOrder" in a);
 
   async function load() {
     try {
@@ -138,6 +146,7 @@ export default function AppWooCommercePage() {
       webhookSecret: "",
       syncProducts: false,
       autoCloseCompleted: false,
+      updateContactFromOrder: true,
       description: "",
       whatsappId: null,
       isActive: true
@@ -180,6 +189,7 @@ export default function AppWooCommercePage() {
             void _tid;
             return rest as Record<string, unknown>;
           })();
+      if (!updateContactFromOrderSupported) delete payload.updateContactFromOrder;
       if (editing.id) {
         await updateAppWooCommerce(editing.id, payload);
         toast.success(t("appUpdated"));
@@ -291,7 +301,9 @@ export default function AppWooCommercePage() {
         const msg    = String(data?.error || data?.message || err?.message || "");
         // Sequelize unique violation -> tenta proximo nome
         if ((status === 400 || status === 409) && /exist|duplic|unique|já/i.test(msg)) continue;
-        toast.error(t("pipelineErrorChannel", { error: msg || "" }));
+        // Limite de conexões / por tipo / tipo fora do plano: mesmo texto da tela de conexões
+        const limitKey = channelCreateErrorKey(msg);
+        toast.error(t("pipelineErrorChannel", { error: limitKey ? tSess(limitKey) : msg || "" }));
         return;
       }
     }
@@ -680,6 +692,19 @@ export default function AppWooCommercePage() {
                   <p className="text-xs text-muted-foreground">{t("autoCloseHint")}</p>
                 </div>
               </div>
+
+              {updateContactFromOrderSupported && (
+                <div className="flex items-center gap-3 py-2">
+                  <Switch
+                    checked={editing.updateContactFromOrder !== false}
+                    onCheckedChange={(v) => set("updateContactFromOrder", v)}
+                  />
+                  <div>
+                    <Label>{t("updateContactFromOrder")}</Label>
+                    <p className="text-xs text-muted-foreground">{t("updateContactFromOrderHint")}</p>
+                  </div>
+                </div>
+              )}
 
               <div className="flex items-center gap-3 pb-2 border-b">
                 <Switch

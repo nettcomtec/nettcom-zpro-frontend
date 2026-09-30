@@ -220,11 +220,18 @@ function buildComponentsForSave(template: WABATemplate | null, vars: Record<stri
 }
 
 export default function FunilAcaoTicketPage() {
+  // Gate isolado num wrapper: sair com `return` no meio dos hooks do conteúdo
+  // quebrava o React ("Rendered fewer hooks than expected") quando a permissão
+  // caía com a página montada — o teto do tenant chega após o 1º render.
+  const allowed = usePageAccess("funil", { alsoAccept: ["kanban"] });
+  if (!allowed) return <AccessDenied />;
+  return <FunilAcaoTicketPageContent />;
+}
+
+function FunilAcaoTicketPageContent() {
   const t = useTranslations("funilAcaoTicketPage");
   const tErrors = useTranslations("errors");
   const tOrder = useTranslations("orderDetails");
-  const allowed = usePageAccess("funil", { alsoAccept: ["kanban"] });
-  if (!allowed) return <AccessDenied />;
 
   const ACTION_TYPES: { value: ActionTypeValue; label: string }[] = [
     { value: "message",       label: t("actionTypeMessage") },

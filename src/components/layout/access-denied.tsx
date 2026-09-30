@@ -5,7 +5,7 @@ import { useTranslations } from "next-intl";
 
 /**
  * Componente exibido quando o usuário não tem permissão para acessar a página.
- * Equivalente ao banner vermelho do Vue: v-if="pageAllowed" / <q-banner class="bg-red">
+ * Equivalente ao banner vermelho do front legado: v-if="pageAllowed" / <q-banner class="bg-red">
  */
 export function AccessDenied() {
   const t = useTranslations("accessDenied");

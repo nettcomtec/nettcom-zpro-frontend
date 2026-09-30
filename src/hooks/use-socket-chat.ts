@@ -54,7 +54,7 @@ export function useSocketChat() {
         .catch(() => { /* silenciar */ });
     }
 
-    const handlePrivateMessage = (data: { action: string; data: { receiverId?: number; groupId?: number | null; memberIds?: number[]; senderId: number; text?: string; id?: number; timestamp?: number; mediaType?: string; mediaUrl?: string; mediaName?: string; sender?: { id: number; name: string }; quotedMsgId?: number | null; quotedMsg?: import("@/stores/chat-store").PrivateMessage | null } }) => {
+    const handlePrivateMessage = (data: { action: string; data: { receiverId?: number; groupId?: number | null; memberIds?: number[]; senderId: number; text?: string; id?: number; timestamp?: number; createdAt?: string; mediaType?: string; mediaUrl?: string; mediaName?: string; sender?: { id: number; name: string }; quotedMsgId?: number | null; quotedMsg?: import("@/stores/chat-store").PrivateMessage | null } }) => {
       // Gate de membership: em mensagem de grupo, só processa se o usuário for membro.
       // Se memberIds não vier (backend antigo), mantém o comportamento anterior por compat.
       const isGroupMsg = data.data.groupId != null;
@@ -80,6 +80,7 @@ export function useSocketChat() {
           groupId: data.data.groupId ?? undefined,
           read: false,
           timestamp: data.data.timestamp || Date.now(),
+          createdAt: data.data.createdAt,
           mediaType: data.data.mediaType,
           mediaUrl: data.data.mediaUrl,
           mediaName: data.data.mediaName,
@@ -186,7 +187,7 @@ export function useSocketChat() {
       }
     };
 
-    // Vue: MainLayout.vue:1690 — SET_USERS_APP atualiza lista de usuários online no chat
+ // Front legado: front legado — SET_USERS_APP atualiza lista de usuários online no chat
     const handleUpdateOnlineBubbles = (data: { id: number; name: string; status?: string }[]) => {
       if (!Array.isArray(data)) return;
       setUsers(data.filter((u) => u.id).map((u) => ({ id: u.id, name: u.name, status: u.status })));

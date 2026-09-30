@@ -182,7 +182,7 @@ export default function AppWabaPage() {
 
   function openEdit(a: AppWaba) {
     const isManual = !!a.apiVersion && !FIXED_VERSIONS.includes(a.apiVersion);
-    // Vue: redirectUri sempre sobrescrito pelo valor padrão (window.location.origin) ao abrir edição
+ // Front legado: redirectUri sempre sobrescrito pelo valor padrão (window.location.origin) ao abrir edição
     setEditing({
       ...a,
       redirectUri: uris.redirectUri,

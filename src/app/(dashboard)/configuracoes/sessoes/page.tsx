@@ -4,6 +4,7 @@ import React, { useState, useEffect, useCallback, useRef } from "react";
 import { useTranslations } from "next-intl";
 import { getProxyBaseUrl, OAUTH_PROXY_URL } from "@/config/oauth-proxy";
 import { useOAuthProxyDomain } from "@/hooks/use-oauth-proxy-domain";
+import { channelCreateErrorKey } from "@/lib/channel-create-error";
 import { PageHeader } from "@/components/layout/page-header";
 import { Card, CardContent, CardHeader, CardTitle, CardFooter } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -219,6 +220,8 @@ function getStatusGroup(status: string) {
 export default function ConfigSessoesPage() {
   const t = useTranslations("configSessoesPage");
   const tw = useTranslations("webchatPage");
+  // Erros de criacao de canal do popup OAuth reusam as chaves de sessoesPage.
+  const tSess = useTranslations("sessoesPage");
   const { user } = useAuthStore();
   const tenantId = user?.tenantId ?? 1;
   const { whatsapps: channels, setWhatsapps, removeWhatsapp: removeWhatsappFromStore } = useWhatsappStore();
@@ -378,7 +381,7 @@ export default function ConfigSessoesPage() {
     function handleProxyMessage(event: MessageEvent) {
       if (event.origin !== OAUTH_PROXY_URL) return;
       const metaExpectedOrigin = OAUTH_PROXY_URL;
-      const { type, error } = (event.data || {}) as { type?: string; error?: string; data?: unknown };
+      const { type, error, errorCode } = (event.data || {}) as { type?: string; error?: string; errorCode?: string | null; data?: unknown };
       if (type === "proxy:ready") {
         const popup = proxyPopupRef.current;
         if (!popup || popup.closed) return;
@@ -402,14 +405,16 @@ export default function ConfigSessoesPage() {
         setAddingChannel(false);
         proxyPopupRef.current = null;
       } else if (type === "proxy:error") {
-        toast.error(error || t("errorWhatsappOAuth"));
+        // Proxy novo manda errorCode; proxy antigo so a mensagem — mesmo mapa.
+        const key = channelCreateErrorKey(errorCode || error);
+        toast.error(key ? tSess(key) : (error || t("errorWhatsappOAuth")));
         setAddingChannel(false);
         proxyPopupRef.current = null;
       }
     }
     window.addEventListener("message", handleProxyMessage);
     return () => window.removeEventListener("message", handleProxyMessage);
-  }, [selectedAppWabaId, appWaba, loadChannels, t, oauthCustomDomain]);
+  }, [selectedAppWabaId, appWaba, loadChannels, t, tSess, oauthCustomDomain]);
 
   function buildMetaPopupUrl(channel: "waba" | "instagram" | "facebook"): string {
     const cb = encodeURIComponent(window.location.origin);

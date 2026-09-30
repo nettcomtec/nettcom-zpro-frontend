@@ -24,8 +24,19 @@ import {
   DialogTitle,
   DialogFooter,
 } from "@/components/ui/dialog";
-import { Send, RefreshCw, X, Search, Loader2, Pause, PlayCircle, Images, Upload, AlertCircle, Info } from "lucide-react";
+import { Send, RefreshCw, X, Search, Loader2, Pause, PlayCircle, Images, Upload, AlertCircle, Info, ChevronDown, MapPin } from "lucide-react";
 import { toast } from "sonner";
+import { Collapsible, CollapsibleTrigger } from "@/components/ui/collapsible";
+import { AddressFilterFields } from "@/components/contatos/address-filter-fields";
+import {
+  type AddressFilter,
+  AddressFilterUnsupportedError,
+  EMPTY_ADDRESS_FILTER,
+  addressFilterActiveCount,
+  assertAddressFilterEcho,
+  sameAddressFilter,
+  toAddressQuery,
+} from "@/lib/address-filter";
 import { fetchWhatsapps, type Whatsapp } from "@/services/whatsapp";
 import { filterWhatsappsForCurrentUser } from "@/lib/whatsapp-user-access";
 import { fetchContacts, createContact, type Contact } from "@/services/contacts";
@@ -358,6 +369,7 @@ export default function MassaTemplatePage() {
   const tErrors = useTranslations("errors");
   const tCsv = useTranslations("bulkCsvImport");
   const tOrder = useTranslations("orderDetails");
+  const tAddr = useTranslations("addressFilter");
   const allowed = usePageAccess("massa");
   if (!allowed) return <AccessDenied />;
   const { isLiveMode } = useLiveMode();
@@ -453,6 +465,19 @@ export default function MassaTemplatePage() {
   const [wallets, setWallets] = useState<{ id: number; name: string }[]>([]);
   const [selectedWallet, setSelectedWallet] = useState<string>("");
   const [loadingWallet, setLoadingWallet] = useState(false);
+
+  // Endereço (bairro, cidade, UF do cadastro): estreita etiqueta, kanban, carteira e todos.
+  // Só o filtro APLICADO entra nas cargas; digitar não recarrega nada.
+  const [addressFilter, setAddressFilter] = useState<AddressFilter>(EMPTY_ADDRESS_FILTER);
+  const [addressOpen, setAddressOpen] = useState(false);
+  const [addressUnsupported, setAddressUnsupported] = useState(false);
+  // Filtro digitado e ainda não aplicado: o envio espera o "Aplicar".
+  const [addressDraftPending, setAddressDraftPending] = useState(false);
+  // Retrato do filtro com que a lista foi montada: o envio exige que seja o aplicado.
+  const [listAddressFilter, setListAddressFilter] = useState<AddressFilter | null>(null);
+  // Geração da carga de contatos: carga nova ou troca de modo invalida a anterior, e o
+  // resultado de carga velha é descartado.
+  const loadGenRef = useRef(0);
 
   const [selectedContacts, setSelectedContacts] = useState<ContactOption[]>([]);
   const [contactSearch, setContactSearch] = useState("");
@@ -569,7 +594,8 @@ export default function MassaTemplatePage() {
   const loadAssignQueues = useCallback(async () => {
     try {
       const res = await fetchQueues();
-      const sorted = [...(res.data || [])].sort((a, b) =>
+      // Fila desativada recusa o ticket (400 ERR_QUEUE_INACTIVE) em toda linha do disparo.
+      const sorted = [...(res.data || [])].filter((q) => q.isActive !== false).sort((a, b) =>
         (a.name || "").toLowerCase().localeCompare((b.name || "").toLowerCase())
       );
       setQueues(sorted);
@@ -589,55 +615,109 @@ export default function MassaTemplatePage() {
     }
   }, []);
 
+  // Invalida a carga de contatos em andamento (a que terminar depois é descartada) e zera os
+  // indicadores de carga de todos os modos.
+  const invalidateContactsLoad = () => {
+    loadGenRef.current += 1;
+    setLoadingTag(false);
+    setLoadingKanban(false);
+    setLoadingWallet(false);
+    setLoadingAllContacts(false);
+    return loadGenRef.current;
+  };
+
+  // Início de carga: geração nova, lista vazia e sem retrato até a carga terminar.
+  const beginContactsLoad = (setLoadingFlag: (value: boolean) => void) => {
+    const gen = invalidateContactsLoad();
+    setLoadingFlag(true);
+    setSelectedContacts([]);
+    setListAddressFilter(null);
+    return gen;
+  };
+
+  const isCurrentLoad = (gen: number) => gen === loadGenRef.current;
+
+  const finishContactsLoad = (list: ContactOption[], filter: AddressFilter) => {
+    setSelectedContacts(list);
+    setListAddressFilter(filter);
+    setAddressUnsupported(false);
+  };
+
+  // Resposta sem o eco com filtro ativo: backend antigo ignoraria o filtro e devolveria o
+  // público inteiro. A carga para, a lista fica vazia e o aviso aparece.
+  const failAddressUnsupported = () => {
+    setSelectedContacts([]);
+    setListAddressFilter(null);
+    setAddressUnsupported(true);
+    setAddressOpen(true);
+    toast.error(tAddr("unsupported"));
+  };
+
   const filterContactsByWallet = useCallback(async () => {
     if (!selectedWallet) return;
-    setLoadingWallet(true);
-    setSelectedContacts([]);
+    const gen = beginContactsLoad(setLoadingWallet);
+    const filter = addressFilter;
     try {
-      const list = await fetchAllContactsForWallet(selectedWallet);
-      setSelectedContacts(list.map((c) => ({ label: c.name ?? c.number, value: c.number })));
-    } catch {
+      const list = await fetchAllContactsForWallet(selectedWallet, filter, () => isCurrentLoad(gen));
+      if (!isCurrentLoad(gen)) return;
+      finishContactsLoad(list.map((c) => ({ label: c.name ?? c.number, value: c.number })), filter);
+    } catch (err) {
+      if (!isCurrentLoad(gen)) return;
+      if (err instanceof AddressFilterUnsupportedError) {
+        failAddressUnsupported();
+        return;
+      }
       toast.error(t("errorFilterByWallet"));
     } finally {
-      setLoadingWallet(false);
+      if (isCurrentLoad(gen)) setLoadingWallet(false);
     }
-  }, [selectedWallet]);
+  }, [selectedWallet, addressFilter]);
 
   const filterContactsByTag = useCallback(async () => {
     if (!selectedTag) return;
-    setLoadingTag(true);
-    setSelectedContacts([]);
+    const gen = beginContactsLoad(setLoadingTag);
+    const filter = addressFilter;
     const all: ContactOption[] = [];
     let page = 1;
     const pageSize = 500;
     try {
       while (true) {
-        const res = await fetchContacts({ pageNumber: page, tagId: Number(selectedTag), pageSize });
+        const res = await fetchContacts({ pageNumber: page, tagId: Number(selectedTag), pageSize, ...toAddressQuery(filter) });
+        if (!isCurrentLoad(gen)) return;
+        assertAddressFilterEcho(filter, res.data);
         const data = res.data as { contacts: { name: string; number: string }[] };
         const list = data.contacts || [];
         all.push(...list.map((c) => ({ label: c.name, value: c.number })));
         if (list.length < pageSize) break;
         page++;
         await new Promise((r) => setTimeout(r, 200));
+        if (!isCurrentLoad(gen)) return;
       }
-      setSelectedContacts(all);
-    } catch {
+      finishContactsLoad(all, filter);
+    } catch (err) {
+      if (!isCurrentLoad(gen)) return;
+      if (err instanceof AddressFilterUnsupportedError) {
+        failAddressUnsupported();
+        return;
+      }
       toast.error(t("errorFilterByTag"));
     } finally {
-      setLoadingTag(false);
+      if (isCurrentLoad(gen)) setLoadingTag(false);
     }
-  }, [selectedTag]);
+  }, [selectedTag, addressFilter]);
 
   const filterContactsByKanban = useCallback(async () => {
     if (!selectedKanban) return;
-    setLoadingKanban(true);
-    setSelectedContacts([]);
+    const gen = beginContactsLoad(setLoadingKanban);
+    const filter = addressFilter;
     const allContacts: ContactOption[] = [];
     let page = 1;
     const pageSize = 500;
     try {
       while (true) {
-        const res = await fetchContacts({ pageNumber: page, pageSize });
+        const res = await fetchContacts({ pageNumber: page, pageSize, ...toAddressQuery(filter) });
+        if (!isCurrentLoad(gen)) return;
+        assertAddressFilterEcho(filter, res.data);
         const data = res.data as { contacts: { name: string; number: string; kanban?: number }[] };
         const list = data.contacts || [];
         const filtered = list.filter((c) => String(c.kanban) === selectedKanban);
@@ -645,26 +725,34 @@ export default function MassaTemplatePage() {
         if (list.length < pageSize) break;
         page++;
         await new Promise((r) => setTimeout(r, 200));
+        if (!isCurrentLoad(gen)) return;
       }
-      setSelectedContacts(allContacts);
-    } catch {
+      finishContactsLoad(allContacts, filter);
+    } catch (err) {
+      if (!isCurrentLoad(gen)) return;
+      if (err instanceof AddressFilterUnsupportedError) {
+        failAddressUnsupported();
+        return;
+      }
       toast.error(t("errorFilterByKanban"));
     } finally {
-      setLoadingKanban(false);
+      if (isCurrentLoad(gen)) setLoadingKanban(false);
     }
-  }, [selectedKanban]);
+  }, [selectedKanban, addressFilter]);
 
   const filterAllContacts = useCallback(async () => {
-    setLoadingAllContacts(true);
+    const gen = beginContactsLoad(setLoadingAllContacts);
+    const filter = addressFilter;
     setAllContactsLoadedCount(0);
-    setSelectedContacts([]);
     const all: ContactOption[] = [];
     let page = 1;
     const pageSize = 500;
     const maxPages = 200;
     try {
       while (page <= maxPages) {
-        const res = await fetchContacts({ pageNumber: page, pageSize });
+        const res = await fetchContacts({ pageNumber: page, pageSize, ...toAddressQuery(filter) });
+        if (!isCurrentLoad(gen)) return;
+        assertAddressFilterEcho(filter, res.data);
         const list = (res.data as { contacts?: { name: string; number: string }[] })?.contacts ?? [];
         if (list.length === 0) break;
         const opts = list.map((c) => ({ label: c.name, value: c.number }));
@@ -673,14 +761,32 @@ export default function MassaTemplatePage() {
         if (list.length < pageSize) break;
         page += 1;
         await new Promise((r) => setTimeout(r, 200));
+        if (!isCurrentLoad(gen)) return;
       }
-      setSelectedContacts(all);
-    } catch {
+      finishContactsLoad(all, filter);
+    } catch (err) {
+      if (!isCurrentLoad(gen)) return;
+      if (err instanceof AddressFilterUnsupportedError) {
+        failAddressUnsupported();
+        return;
+      }
       toast.error(t("errorLoadContacts"));
     } finally {
-      setLoadingAllContacts(false);
+      if (isCurrentLoad(gen)) setLoadingAllContacts(false);
     }
-  }, []);
+  }, [addressFilter]);
+
+  // Filtro aplicado mudou: a lista atual deixa de valer e é esvaziada. Como as cargas dependem
+  // do filtro aplicado, o efeito do modo ativo roda de novo e recarrega uma vez.
+  const handleAddressFilterChange = (next: AddressFilter) => {
+    if (sameAddressFilter(next, addressFilter)) return;
+    invalidateContactsLoad();
+    setSelectedContacts([]);
+    setListAddressFilter(null);
+    setAllContactsLoadedCount(0);
+    setAddressUnsupported(false);
+    setAddressFilter(next);
+  };
 
   const handleContactSearchChange = (value: string) => {
     setContactSearch(value);
@@ -846,22 +952,56 @@ export default function MassaTemplatePage() {
     throw new Error(`Não foi possível criar contato: ${number}`);
   };
 
-  /** Cria ou obtém ticket existente (trata 409); retorna o id */
-  const findOrCreateTicketId = async (contactId: number, whatsappId: number): Promise<number> => {
+  /** Cria ou obtém ticket existente (trata 409); `created` = nasceu neste disparo.
+   *  O ticket nasce com quem dispara como dono (como Nova Conversa, Contatos e
+   *  Kanban): sem dono e sem fila, o guard de acesso do envio barrava com 403
+   *  ERR_NO_TICKET_ACCESS o atendente, o supervisor por departamento e o usuário
+   *  com canais restritos — e o ticket ficava aberto, sem template e sem destino. */
+  const findOrCreateTicketId = async (
+    contactId: number,
+    whatsappId: number,
+    senderUserId: number | null
+  ): Promise<{ id: number; created: boolean }> => {
     try {
-      const res = await createTicket({ contactId, isActiveDemand: true, channel: "waba", channelId: whatsappId, status: "open" });
-      if (res.data?.id) return res.data.id;
+      const res = await createTicket({
+        contactId,
+        isActiveDemand: true,
+        channel: "waba",
+        channelId: whatsappId,
+        status: "open",
+        ...(senderUserId ? { userId: senderUserId } : {}),
+      });
+      if (res.data?.id) return { id: res.data.id, created: true };
     } catch (err: unknown) {
       // O interceptor do axios rejeita com error.response diretamente,
       // então err já é o objeto response: { status, data, ... }
       const d = (err as { data?: { ticket?: { id: number }; error?: unknown } })?.data;
-      if (d?.ticket?.id) return d.ticket.id;
+      if (d?.ticket?.id) return { id: d.ticket.id, created: false };
       if (d?.error) {
         const t = typeof d.error === "string" ? JSON.parse(d.error) : d.error;
-        if ((t as { id?: number })?.id) return (t as { id: number }).id;
+        if ((t as { id?: number })?.id) return { id: (t as { id: number }).id, created: false };
       }
     }
     throw new Error(`Não foi possível criar ticket para contato ${contactId}`);
+  };
+
+  /** Aplica o destino pós-envio (pendente/fila/usuário). Plano B: se falhar num
+   *  ticket criado pelo disparo, solta para pendente sem dono — senão ele ficaria
+   *  aberto com quem disparou, contando no limite de atendimentos dele. */
+  const applyTicketDestination = async (
+    ticketId: number,
+    updates: Record<string, unknown>,
+    createdByDispatch: boolean
+  ) => {
+    try {
+      await updateTicket(ticketId, updates);
+    } catch {
+      if (!createdByDispatch) return;
+      const isAlreadyFallback =
+        updates.status === "pending" && updates.userId === null && updates.queueId === undefined;
+      if (isAlreadyFallback) return;
+      await updateTicket(ticketId, { status: "pending", userId: null }).catch(() => {});
+    }
   };
 
   const handleSend = async (isMarketing = false) => {
@@ -889,6 +1029,16 @@ export default function MassaTemplatePage() {
     }
     if (loadingAllContacts || loadingTag || loadingKanban || loadingWallet) {
       toast.warning(t("loadingAllContacts"));
+      return;
+    }
+    // Lista montada com outro filtro de endereço (ou filtro digitado sem "Aplicar"): nunca envia.
+    if (
+      (useTags || useKanban || useWallet || useAllContacts) &&
+      selectedContacts.length > 0 &&
+      (addressDraftPending || !sameAddressFilter(listAddressFilter, addressFilter))
+    ) {
+      if (addressDraftPending) setAddressOpen(true);
+      toast.warning(tAddr("staleList"));
       return;
     }
     // Camada 1a — dedupe defensivo da lista de numeros do dispatch. CSV/colagem
@@ -935,6 +1085,7 @@ export default function MassaTemplatePage() {
     // outra grafia do MESMO telefone bloquearia as linhas seguintes (auto-bloqueio).
     // Bloqueado NÃO memoiza: re-checa (reconcilia por linha e re-verifica).
     const approvedNumbers = new Set<string>();
+    const senderUserId = useAuthStore.getState().user?.userId ?? null;
 
     // Cria registro de tracking
     let bulkDispatchId: number | null = null;
@@ -1096,9 +1247,12 @@ export default function MassaTemplatePage() {
 
       let contactId: number;
       let ticketId: number;
+      let ticketCreatedNow = false;
       try {
         contactId = await findOrCreateContactId(number);
-        ticketId = await findOrCreateTicketId(contactId, selectedConnection.id);
+        const ticketRef = await findOrCreateTicketId(contactId, selectedConnection.id, senderUserId);
+        ticketId = ticketRef.id;
+        ticketCreatedNow = ticketRef.created;
       } catch (err) {
         logger.error(`Erro de setup para ${number} (ignorado):`, err);
         setFailedCount((c) => c + 1);
@@ -1190,8 +1344,15 @@ export default function MassaTemplatePage() {
           const willAssignUser = assignUser && selectedAssignUserId;
           const updates: Record<string, unknown> = { status: willAssignUser ? "open" : "pending" };
           if (assignQueue && selectedAssignQueueId) updates.queueId = Number(selectedAssignQueueId);
-          if (willAssignUser) updates.userId = Number(selectedAssignUserId);
-          await updateTicket(ticketId, updates).catch(() => {});
+          if (willAssignUser) {
+            updates.userId = Number(selectedAssignUserId);
+          } else if (ticketCreatedNow) {
+            // Ticket deste disparo nasce com quem disparou como dono; o retorno a
+            // pendente só solta o dono com forcePendingUser desligado. Ticket
+            // reaproveitado (409) segue com o payload de sempre.
+            updates.userId = null;
+          }
+          await applyTicketDestination(ticketId, updates, ticketCreatedNow);
         }
         setSentCount((c) => c + 1);
         setSendSuccessLog((prev) => [...prev, { number, timestamp: new Date() }]);
@@ -1199,6 +1360,12 @@ export default function MassaTemplatePage() {
         logger.error(`Erro ao enviar template para ${number}:`, err);
         setFailedCount((c) => c + 1);
         setSendErrorLog((prev) => [...prev, { number, error: formatBulkSendError(err), timestamp: new Date() }]);
+        // Envio falhou: o ticket que ESTE disparo criou fecha sem despedida (mesmo
+        // efeito de "Fechar ticket após envio") em vez de ficar aberto sem template.
+        // Ticket reaproveitado (409) é de outra conversa e não é tocado.
+        if (ticketCreatedNow) {
+          await updateTicket(ticketId, { status: "closed", userId: null, skipFarewell: true }).catch(() => {});
+        }
       }
 
       if (i < numbers.length - 1) {
@@ -1223,7 +1390,9 @@ export default function MassaTemplatePage() {
     setMinDelay("");
     setMaxDelay("");
     setSelectedConnection(null);
+    invalidateContactsLoad();
     setSelectedContacts([]);
+    setListAddressFilter(null);
     setUseAllContacts(false);
     setAllContactsLoadedCount(0);
     setUseKanban(false);
@@ -1411,7 +1580,7 @@ export default function MassaTemplatePage() {
               <Switch
                 id="contatosImportar"
                 checked={contatosImportar}
-                onCheckedChange={(v) => { setContatosImportar(v); if (v) { setUseTags(false); setUseKanban(false); setUseWallet(false); setUseAllContacts(false); } }}
+                onCheckedChange={(v) => { invalidateContactsLoad(); setContatosImportar(v); if (v) { setUseTags(false); setUseKanban(false); setUseWallet(false); setUseAllContacts(false); } }}
               />
               <Label htmlFor="contatosImportar">{t("importContacts")}</Label>
             </div>
@@ -1419,7 +1588,7 @@ export default function MassaTemplatePage() {
               <Switch
                 id="useTags"
                 checked={useTags}
-                onCheckedChange={(v) => { setUseTags(v); if (v) { setContatosImportar(false); setUseKanban(false); setUseWallet(false); setUseAllContacts(false); } }}
+                onCheckedChange={(v) => { invalidateContactsLoad(); setUseTags(v); if (v) { setContatosImportar(false); setUseKanban(false); setUseWallet(false); setUseAllContacts(false); } }}
               />
               <Label htmlFor="useTags">{t("filterByTag")}</Label>
             </div>
@@ -1427,7 +1596,7 @@ export default function MassaTemplatePage() {
               <Switch
                 id="useKanban"
                 checked={useKanban}
-                onCheckedChange={(v) => { setUseKanban(v); if (v) { setContatosImportar(false); setUseTags(false); setUseWallet(false); setUseAllContacts(false); } }}
+                onCheckedChange={(v) => { invalidateContactsLoad(); setUseKanban(v); if (v) { setContatosImportar(false); setUseTags(false); setUseWallet(false); setUseAllContacts(false); } }}
               />
               <Label htmlFor="useKanban">{t("kanban")}</Label>
             </div>
@@ -1435,7 +1604,7 @@ export default function MassaTemplatePage() {
               <Switch
                 id="useWallet"
                 checked={useWallet}
-                onCheckedChange={(v) => { setUseWallet(v); if (v) { setContatosImportar(false); setUseTags(false); setUseKanban(false); setUseAllContacts(false); } }}
+                onCheckedChange={(v) => { invalidateContactsLoad(); setUseWallet(v); if (v) { setContatosImportar(false); setUseTags(false); setUseKanban(false); setUseAllContacts(false); } }}
               />
               <Label htmlFor="useWallet">{t("filterByWallet")}</Label>
             </div>
@@ -1443,11 +1612,55 @@ export default function MassaTemplatePage() {
               <Switch
                 id="useAllContacts"
                 checked={useAllContacts}
-                onCheckedChange={(v) => { setUseAllContacts(v); if (v) { setContatosImportar(false); setUseTags(false); setUseKanban(false); setUseWallet(false); } }}
+                onCheckedChange={(v) => { invalidateContactsLoad(); setUseAllContacts(v); if (v) { setContatosImportar(false); setUseTags(false); setUseKanban(false); setUseWallet(false); } }}
               />
               <Label htmlFor="useAllContacts">{t("allContacts")}</Label>
             </div>
           </div>
+
+          {/* Endereço: estreita etiqueta, kanban, carteira e todos (fora de importar e da lista manual) */}
+          {(useTags || useKanban || useWallet || useAllContacts) && (
+            <Collapsible open={addressOpen} onOpenChange={setAddressOpen} className="rounded-md border">
+              <CollapsibleTrigger asChild>
+                <button
+                  type="button"
+                  className="flex w-full items-center justify-between gap-2 px-3 py-2 text-sm font-medium"
+                >
+                  <span className="flex min-w-0 items-center gap-2">
+                    <MapPin className="h-4 w-4 shrink-0 text-muted-foreground" />
+                    <span className="truncate">{tAddr("title")}</span>
+                  </span>
+                  <span className="flex shrink-0 items-center gap-2">
+                    {!addressOpen && addressFilterActiveCount(addressFilter) > 0 && (
+                      <Badge variant="secondary" className="text-xs">
+                        {tAddr("activeCount", { count: addressFilterActiveCount(addressFilter) })}
+                      </Badge>
+                    )}
+                    <ChevronDown className={cn("h-4 w-4 transition-transform", addressOpen && "rotate-180")} />
+                  </span>
+                </button>
+              </CollapsibleTrigger>
+              {/* Montado mesmo com o bloco fechado (só escondido): o Radix desmontaria os campos e o
+                  filtro digitado sem "Aplicar" sumiria sem aviso. */}
+              <div className={cn("space-y-3 border-t px-3 py-3", !addressOpen && "hidden")}>
+                {addressUnsupported && (
+                  <Alert variant="destructive">
+                    <AlertCircle className="h-4 w-4" />
+                    <AlertDescription>{tAddr("unsupported")}</AlertDescription>
+                  </Alert>
+                )}
+                <AddressFilterFields
+                  value={addressFilter}
+                  onChange={handleAddressFilterChange}
+                  mode="apply"
+                  layout="row"
+                  showHint
+                  disabled={sending}
+                  onPendingChange={setAddressDraftPending}
+                />
+              </div>
+            </Collapsible>
+          )}
 
           {/* Wallet selector */}
           {useWallet && (

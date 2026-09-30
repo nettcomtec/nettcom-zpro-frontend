@@ -63,6 +63,7 @@ const MENU_GROUPS: { id: string; keys: string[] }[] = [
     id: "organization",
     keys: [
       "agenda",
+      "agentes-ia",
       "campanhas",
       "email-marketing",
       "funil",
@@ -112,7 +113,7 @@ const MENU_GROUPS: { id: string; keys: string[] }[] = [
   },
   {
     id: "admin",
-    keys: ["configuracoes", "equipes", "usuarios"].sort(),
+    keys: ["configuracoes", "creditos-ia", "equipes", "usuarios"].sort(),
   },
 ];
 
@@ -155,6 +156,8 @@ const MENU_REQUIRES: Partial<Record<string, PermissionKey[]>> = {
   notas: ["notes_manage"],
   "chat-flow": ["chat_flow_manage"],
   "auto-resposta": ["chat_flow_manage"],
+  "agentes-ia": ["ai_agents_manage"],
+  "creditos-ia": ["ai_credits_manage"],
   "agendamento-publico": ["booking_manage"],
   funil: ["funnel_manage"],
   agenda: ["scheduled_messages_manage"],
@@ -168,14 +171,12 @@ const MENU_REQUIRES: Partial<Record<string, PermissionKey[]>> = {
 // então um perfil só-leitura é legítimo — avisar ali seria orientação errada.
 
 /**
- * Chave de menu -> OUTRA chave de menu exigida pela página. `funil` e `agenda`
- * chamam `usePageAccess("kanban")`, então marcar só a própria chave mostra o item
- * na sidebar e entrega tela de acesso negado.
+ * Chave de menu -> OUTRA chave de menu exigida pela página. Vazio hoje: `funil` e
+ * `agenda` passaram a aceitar a própria chave como principal no usePageAccess
+ * (`kanban` ficou só como alias legado de concessão), então marcar só a chave da
+ * página já dá acesso — o aviso de dependência viraria orientação errada.
  */
-const MENU_REQUIRES_MENU: Partial<Record<string, string[]>> = {
-  funil: ["kanban"],
-  agenda: ["kanban"],
-};
+const MENU_REQUIRES_MENU: Partial<Record<string, string[]>> = {};
 
 // Grupos de customPermissions — ordem alfabética dentro de cada grupo
 const PERMISSION_GROUPS: { id: string; keys: PermissionKey[] }[] = [
@@ -221,7 +222,7 @@ const PERMISSION_GROUPS: { id: string; keys: PermissionKey[] }[] = [
   {
     id: "kanbanFunnel",
     keys: (
-      ["attendance_panel_view_all", "funnel_manage", "kanban_manage"] as PermissionKey[]
+      ["attendance_panel_view_all", "funnel_manage", "kanban_manage", "relationship_manage"] as PermissionKey[]
     ).sort(),
   },
   {
@@ -236,6 +237,8 @@ const PERMISSION_GROUPS: { id: string; keys: PermissionKey[] }[] = [
     id: "modules",
     keys: (
       [
+        "ai_agents_manage",
+        "ai_credits_manage",
         "booking_manage",
         "business_hours_manage",
         "campaigns_manage",
@@ -468,22 +471,25 @@ function ProfileFormDialog({
   // permissão "voip_wavoip". `voip_webphone` (SIP) permanece — não é WaVoIP.
   // Os valores já gravados no perfil não são tocados; religar o recurso os revela.
   const wavoipEnabled = useAuthStore((s) => s.isWavoipEnabled());
-  const menuGroups = useMemo(
-    () =>
-      wavoipEnabled
-        ? MENU_GROUPS
-        : MENU_GROUPS.map((g) => ({ ...g, keys: g.keys.filter((k) => k !== "wavoip") }))
-            .filter((g) => g.keys.length > 0),
-    [wavoipEnabled]
-  );
-  const permissionGroups = useMemo(
-    () =>
-      wavoipEnabled
-        ? PERMISSION_GROUPS
-        : PERMISSION_GROUPS.map((g) => ({ ...g, keys: g.keys.filter((k) => k !== "voip_wavoip") }))
-            .filter((g) => g.keys.length > 0),
-    [wavoipEnabled]
-  );
+  // Créditos de IA: mesmo molde, FAIL-CLOSED — a chave de menu "creditos-ia" e a
+  // permissão "ai_credits_manage" só aparecem com o recurso ligado na empresa.
+  const aiCreditsEnabled = useAuthStore((s) => s.isAiCreditsEnabled());
+  const menuGroups = useMemo(() => {
+    const hiddenMenus: string[] = [];
+    if (!wavoipEnabled) hiddenMenus.push("wavoip");
+    if (!aiCreditsEnabled) hiddenMenus.push("creditos-ia");
+    if (hiddenMenus.length === 0) return MENU_GROUPS;
+    return MENU_GROUPS.map((g) => ({ ...g, keys: g.keys.filter((k) => !hiddenMenus.includes(k)) }))
+      .filter((g) => g.keys.length > 0);
+  }, [wavoipEnabled, aiCreditsEnabled]);
+  const permissionGroups = useMemo(() => {
+    const hiddenPerms: PermissionKey[] = [];
+    if (!wavoipEnabled) hiddenPerms.push("voip_wavoip");
+    if (!aiCreditsEnabled) hiddenPerms.push("ai_credits_manage");
+    if (hiddenPerms.length === 0) return PERMISSION_GROUPS;
+    return PERMISSION_GROUPS.map((g) => ({ ...g, keys: g.keys.filter((k) => !hiddenPerms.includes(k)) }))
+      .filter((g) => g.keys.length > 0);
+  }, [wavoipEnabled, aiCreditsEnabled]);
 
   // Copiloto §26
   const [aiPrompt, setAiPrompt] = useState("");

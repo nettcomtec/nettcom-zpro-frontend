@@ -72,6 +72,105 @@ export async function fetchDailyProductivity(params: {
   });
 }
 
+// Relatórios de relacionamento (PLANO_CRM_CONTATO D21). Mesmo corte de período da
+// produtividade diária: startDate/endDate no dia local + tzOffset. Backend sem as
+// rotas responde 404 — as telas mostram o estado de erro.
+export interface CrmReportParams {
+  startDate: string;
+  endDate: string;
+  userId?: number;
+}
+
+function crmReportParams(params: CrmReportParams) {
+  return { ...params, tzOffset: -new Date().getTimezoneOffset() };
+}
+
+export interface RelationshipByTypeRow {
+  userId: number | null;
+  userName: string | null;
+  typeId: number;
+  typeName: string | null;
+  count: number;
+}
+
+export interface RelationshipByTypeTotal {
+  typeId: number;
+  typeName: string | null;
+  count: number;
+}
+
+export interface RelationshipByTypeReport {
+  rows: RelationshipByTypeRow[];
+  totalsByType: RelationshipByTypeTotal[];
+  total: number;
+}
+
+export async function fetchRelationshipByTypeReport(
+  params: CrmReportParams
+): Promise<{ data: RelationshipByTypeReport }> {
+  return api.get("/statistics-relationship-by-type", { params: crmReportParams(params) });
+}
+
+export interface TasksByUserRow {
+  userId: number | null;
+  userName: string | null;
+  pending: number;
+  completed: number;
+  overdue: number;
+  total: number;
+}
+
+export interface TasksByUserReport {
+  rows: TasksByUserRow[];
+}
+
+export async function fetchTasksByUserReport(
+  params: CrmReportParams
+): Promise<{ data: TasksByUserReport }> {
+  return api.get("/statistics-tasks-by-user", { params: crmReportParams(params) });
+}
+
+export interface FunnelByUserRow {
+  userId: number | null;
+  userName: string | null;
+  won: number;
+  lost: number;
+  wonValue: number;
+  lostValue: number;
+  conversion: number | null;
+}
+
+export interface FunnelByUserReport {
+  rows: FunnelByUserRow[];
+  /** Oportunidades fechadas sem data de fechamento — ficam fora do período. */
+  withoutCloseDate: number;
+}
+
+export async function fetchFunnelByUserReport(
+  params: CrmReportParams
+): Promise<{ data: FunnelByUserReport }> {
+  return api.get("/statistics-funnel-by-user", { params: crmReportParams(params) });
+}
+
+export interface ActionsUntilSaleRow {
+  typeId: number;
+  typeName: string | null;
+  total: number;
+  average: number;
+}
+
+export interface ActionsUntilSaleReport {
+  /** Oportunidades ganhas no período. */
+  opportunities: number;
+  rows: ActionsUntilSaleRow[];
+}
+
+export async function fetchActionsUntilSaleReport(
+  params: CrmReportParams
+): Promise<{ data: ActionsUntilSaleReport }> {
+  return api.get("/statistics-actions-until-sale", { params: crmReportParams(params) });
+}
+
 // Legacy aliases kept for backward compatibility
 export async function fetchReportContactsByTags(params: Record<string, unknown>) {
   return fetchReportContacts(params);

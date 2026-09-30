@@ -9,13 +9,14 @@ import { isMenuRouteHidden } from "@/lib/menu-visibility";
 
 const PUBLIC_ROUTES = ["/login", "/signup", "/reset", "/masterkey", "/validate-a2f"];
 
-// Mapeamento pathname → routeName (igual ao Vue router/index.js:70 — menuVisibility[to.name])
+// Mapeamento pathname → routeName (igual ao front legado router/index.js:70 — menuVisibility[to.name])
 const PATHNAME_TO_ROUTE_NAME: Record<string, string> = {
   "/atendimento": "atendimento",
   "/contatos": "contatos",
   "/chat-privado": "chat-privado",
   "/campanhas": "campanhas",
   "/email-marketing": "email-marketing",
+  "/agentes-ia": "agentes-ia",
   "/massa": "massa",
   "/galeria": "galeria",
   "/grupo": "grupo",
@@ -46,7 +47,10 @@ const PATHNAME_TO_ROUTE_NAME: Record<string, string> = {
   "/dashboard": "dashboard",
   "/auto-resposta": "auto-resposta",
   "/audit-log": "audit-log",
-  "/agenda": "kanban",
+  // /agenda usa a chave própria — o mapeamento legado para "kanban" fazia o
+  // interruptor Kanban (painel do tenant ou permissão do usuário) bloquear o
+  // link direto do Agenda mesmo com o item visível na sidebar (chave "agenda").
+  "/agenda": "agenda",
   "/facebook-comentarios": "facebookComentarios",
   "/instagram-mencoes": "instagramMencoes",
   "/tiktok-comentarios": "tiktokComentarios",
@@ -63,7 +67,15 @@ const PATHNAME_TO_ROUTE_NAME: Record<string, string> = {
   "/cobrancas": "cobrancas",
   "/agendamento-publico": "agendamento-publico",
   "/chat-interno-rc": "chat-interno-rc",
+  "/creditos-ia": "creditos-ia",
 };
+
+/**
+ * Perfil do contato. Não exige a chave de menu `contatos` nem o teto do tenant — o
+ * acesso é decidido pelo backend; usuário restrito é barrado pela própria página.
+ * A lista `/contatos` continua casando a chave normalmente.
+ */
+const CONTACT_PROFILE_ROUTE = /^\/contatos\/[^/]+$/;
 
 /**
  * Rotas exclusivas do superadmin.
@@ -85,6 +97,7 @@ const SUPERADMIN_ONLY_ROUTES = [
   "/notificacao",
   "/configuracoesTenant",
   "/backup",
+  "/banco-de-dados",
   "/migration",
   "/provedores-globais",
   "/app-waba",
@@ -103,6 +116,7 @@ const SUPERADMIN_ONLY_ROUTES = [
   "/app-woocommerce",
   "/app-nuvemshop",
   "/app-youtube",
+  "/ia-plataforma",
 ];
 
 /**
@@ -115,6 +129,7 @@ const TENANT_ONLY_ROUTES = [
   "/chat-privado",
   "/campanhas",
   "/email-marketing",
+  "/agentes-ia",
   "/massa",
   "/galeria",
   "/grupo",
@@ -159,13 +174,14 @@ const TENANT_ONLY_ROUTES = [
   "/nuvemshop-pedidos",
   "/nuvemshop",
   "/google-calendar",
+  "/creditos-ia",
 ];
 
 export function useAuthGuard() {
   const t = useTranslations("useAuthGuard");
   const router = useRouter();
   const pathname = usePathname();
-  const { isAuthenticated, user, menuVisibility, paymentOverdue, billingState, isWavoipEnabled } = useAuthStore();
+  const { isAuthenticated, user, menuVisibility, tenantMenuVisibility, paymentOverdue, billingState, isWavoipEnabled, tenantConfigsLoaded, isAiCreditsEnabled, canManageAiCredits } = useAuthStore();
 
   useEffect(() => {
     const isPublicRoute = PUBLIC_ROUTES.some((route) => pathname.startsWith(route));
@@ -214,6 +230,18 @@ export function useAuthGuard() {
       }
     }
 
+    // Termos do revendedor pendentes (só admin) — prende em /aceite-termos. O
+    // backend nega o resto com 403 ERR_RESELLER_TERMS_PENDING (interceptor do
+    // api.ts). Ordem pagamento → senha → termos: com inadimplência ou senha
+    // pendente este bloco não roda, senão a flag persistida faria vaivém entre
+    // as páginas de bloqueio (o backend também não cobra termos nesses estados).
+    if (user?.resellerTermsPending && profile === "admin" && !isBlocked && !user?.mustChangePassword) {
+      if (pathname !== "/aceite-termos") {
+        router.replace("/aceite-termos");
+        return;
+      }
+    }
+
     // Superadmin tenta acessar rota de tenant → redireciona para /assinatura
     if (profile === "superadmin") {
       const isTenantRoute = TENANT_ONLY_ROUTES.some((r) => pathname === r || pathname.startsWith(r + "/"));
@@ -233,14 +261,31 @@ export function useAuthGuard() {
       }
     }
 
-    // Vue router/index.js:62-75 — bloqueia rotas com menuVisibility[routeName] === false (exceto superadmin).
+ // Front legado router/index.js:62-75 — bloqueia rotas com menuVisibility[routeName] === false (exceto superadmin).
     // isMenuRouteHidden também checa o alias (2 grafias) — mesma lógica da sidebar (lib/menu-visibility),
     // p/ o toggle do perfil custom (ex.: woocommerce-produtos) bloquear a URL direta, não só esconder o menu.
     if (profile !== "superadmin" && menuVisibility) {
-      const routeName = PATHNAME_TO_ROUTE_NAME[pathname] ??
-        Object.entries(PATHNAME_TO_ROUTE_NAME).find(([path]) => pathname.startsWith(path))?.[1];
+      // Fallback por prefixo: o prefixo MAIS LONGO vence — sem o sort, uma futura
+      // subrota /agendamento-publico/x casaria "/agenda" (chave de outra feature).
+      // Perfil do contato (/contatos/<id>) fica fora do menu e do teto do tenant:
+      // quem decide o acesso é o backend (carteira ou atendimento que o usuário abre).
+      const routeName = CONTACT_PROFILE_ROUTE.test(pathname)
+        ? undefined
+        : PATHNAME_TO_ROUTE_NAME[pathname] ??
+          Object.entries(PATHNAME_TO_ROUTE_NAME)
+            .sort(([a], [b]) => b.length - a.length)
+            .find(([path]) => pathname.startsWith(path))?.[1];
 
       if (routeName && isMenuRouteHidden(menuVisibility, routeName)) {
+        toast.error(t("accessDenied"));
+        router.replace("/");
+        return;
+      }
+
+      // Teto do TENANT: para user/super/custom o `menuVisibility` acima é o
+      // menuPermissions do próprio usuário (sobrescrito no boot/refresh do
+      // layout) — o que o superadmin desligou em /tenants só vive neste mapa.
+      if (routeName && isMenuRouteHidden(tenantMenuVisibility || {}, routeName)) {
         toast.error(t("accessDenied"));
         router.replace("/");
         return;
@@ -254,8 +299,19 @@ export function useAuthGuard() {
         router.replace("/");
         return;
       }
+
+      // Créditos de IA: recurso ligado no tenant (plano + interruptor, FAIL-CLOSED) e
+      // perfil que pode gerenciar (admin, ou custom com a permissão). Só decide depois
+      // da carga do tenant: antes dela o gate é sempre false e redirecionar aqui
+      // perderia o `?topup=` de quem volta do pagamento. Nesse intervalo a própria
+      // página mostra acesso negado e não faz request nenhum.
+      if (routeName === "creditos-ia" && tenantConfigsLoaded && !(isAiCreditsEnabled() && canManageAiCredits())) {
+        toast.error(t("accessDenied"));
+        router.replace("/");
+        return;
+      }
     }
-  }, [isAuthenticated, pathname, router, user, menuVisibility, paymentOverdue, billingState, isWavoipEnabled]);
+  }, [isAuthenticated, pathname, router, user, menuVisibility, tenantMenuVisibility, paymentOverdue, billingState, isWavoipEnabled, tenantConfigsLoaded, isAiCreditsEnabled, canManageAiCredits]);
 
   return { isAuthenticated };
 }

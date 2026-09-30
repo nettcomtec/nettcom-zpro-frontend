@@ -159,7 +159,10 @@ export default function AuditLogPage() {
         ...rows.map(log => [
           // CSV mantém formato fixo pt-BR (conteúdo do arquivo exportado, não exibição)
           escape(new Date(log.createdAt).toLocaleString("pt-BR", { dateStyle: "short", timeStyle: "medium" })),
-          escape(log.user?.name ?? log.userId),
+          escape(
+            log.user?.name ??
+              (log.systemActor ? `${t("table.systemActor")} (${log.systemActor})` : log.userId)
+          ),
           escape(log.user?.email ?? ""),
           escape(log.tenantId),
           escape(log.action),
@@ -399,6 +402,11 @@ export default function AuditLogPage() {
                             <span className="font-medium">{log.user.name}</span>
                             <span className="text-muted-foreground text-[10px]">{log.user.email}</span>
                           </div>
+                        ) : log.systemActor ? (
+                          <div className="flex flex-col">
+                            <span className="font-medium">{t("table.systemActor")}</span>
+                            <span className="text-muted-foreground text-[10px] font-mono">{log.systemActor}</span>
+                          </div>
                         ) : (
                           <span className="text-muted-foreground">#{log.userId ?? "—"}</span>
                         )}
@@ -519,7 +527,15 @@ export default function AuditLogPage() {
           {detail && (
             <div className="flex flex-col gap-4 mt-2">
               <div className="grid grid-cols-2 gap-3 text-xs">
-                <div><span className="text-muted-foreground">{t("table.user")}: </span>{detail.user?.name || `#${detail.userId}`}</div>
+                <div>
+                  <span className="text-muted-foreground">{t("table.user")}: </span>
+                  {detail.user?.name ||
+                    (detail.systemActor
+                      ? `${t("table.systemActor")} (${detail.systemActor})`
+                      : detail.userId != null
+                      ? `#${detail.userId}`
+                      : "—")}
+                </div>
                 <div><span className="text-muted-foreground">{t("table.action")}: </span>{detail.action}</div>
                 {detail.tenantId != null && (
                   <div>

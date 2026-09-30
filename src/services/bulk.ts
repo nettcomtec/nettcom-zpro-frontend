@@ -1,4 +1,4 @@
-import api from "@/lib/api";
+import api, { BACKGROUND_REQUEST } from "@/lib/api";
 
 export interface BulkDispatch {
   id: number;
@@ -26,11 +26,15 @@ export interface BulkDispatch {
     sentContacts?: { contact: string; timestamp: string }[];
     [key: string]: unknown;
   };
-  errors?: { contact: string; error: string; timestamp: string }[];
+  errors?: { contact: string; error: string; timestamp: string; code?: string; status?: number }[];
   createdAt: string;
   startedAt?: string;
   completedAt?: string;
   updatedAt?: string;
+  cancellationReason?: string | null;
+  userId?: number | null;
+  user?: { id: number; name: string } | null;
+  whatsapp?: { id: number; name: string; type: string } | null;
 }
 
 export interface WabaTemplate {
@@ -203,19 +207,135 @@ export interface SmsBulkPayload {
   importContact?: boolean;
 }
 
+/**
+ * Resposta do envio em massa. Backend anterior a 2026-09-25 devolve só `message`
+ * (Conecta/BHI) ou `summary` sem `notAttempted` (Comtele).
+ */
+export interface SmsBulkResult {
+  message?: string;
+  summary?: { total: number; success: number; errors: number; notAttempted?: number };
+  aborted?: boolean;
+  code?: string;
+  errors?: { phoneNumber: string; error: string; status?: number; code?: string }[];
+}
+
+// O servidor responde só depois do último número, esperando o intervalo entre
+// cada um: o teto padrão de 30 s cortava listas a partir de ~3 números.
+const BULK_SMS_REQUEST = { timeout: 0 };
+
 /** Comtele */
 export async function sendBulkSms(data: SmsBulkPayload) {
-  return api.post("/bulkSms", data);
+  return api.post<SmsBulkResult>("/bulkSms", data, BULK_SMS_REQUEST);
 }
 
 /** ConectaStartup */
 export async function sendBulkSmsConecta(data: SmsBulkPayload) {
-  return api.post("/bulkSmsConecta", data);
+  return api.post<SmsBulkResult>("/bulkSmsConecta", data, BULK_SMS_REQUEST);
 }
 
 /** BHI / Livson */
 export async function sendBulkSmsLivson(data: SmsBulkPayload) {
-  return api.post("/bulkSmsLivson", data);
+  return api.post<SmsBulkResult>("/bulkSmsLivson", data, BULK_SMS_REQUEST);
+}
+
+// ── SMS em massa em SEGUNDO PLANO (docs/PLANO_SMS_MASSA_SEGUNDO_PLANO.md §5.1) ──
+// O servidor responde na hora (202) e envia sozinho; a tela acompanha por consulta.
+// Backend antigo não tem estas rotas (404 sem código) → a tela usa as funções
+// síncronas acima, exatamente como antes.
+
+export type SmsBulkProvider = "comtele" | "conecta" | "livson";
+
+export interface SmsBulkDispatchStartPayload {
+  provider: SmsBulkProvider;
+  arrayNumbers: string[];
+  message: string;
+  minDelay: number;
+  maxDelay: number;
+}
+
+export interface SmsBulkDispatchStartResult {
+  bulkDispatchId: number;
+  total: number;
+  removedDuplicates: number;
+}
+
+/** Retorno enxuto (sem a lista de números): usado no acompanhamento. */
+export interface SmsBulkDispatchLean {
+  id: number;
+  userId: number | null;
+  status: "pending" | "processing" | "completed" | "failed" | "cancelled";
+  totalMessages: number;
+  sentMessages: number;
+  failedMessages: number;
+  pendingMessages: number;
+  startedAt: string | null;
+  completedAt: string | null;
+  /** `user`, `ERR_SMS_INVALID_KEY`, `ERR_SMS_PROVIDER_REJECTED`, `ERR_SMS_BULK_INTERRUPTED` */
+  cancellationReason: string | null;
+  errors?: { contact: string; error: string; timestamp: string; code?: string; status?: number }[];
+}
+
+/** Disparo ainda rodando no servidor. */
+export const isSmsBulkDispatchActive = (d: Pick<SmsBulkDispatchLean, "status"> | null | undefined) =>
+  !!d && (d.status === "pending" || d.status === "processing");
+
+/**
+ * Código de erro da resposta. O interceptor rejeita com o `response` do axios
+ * (`err.data`); AppError 409 chega como `{message: <código>}`, os demais como
+ * `{error: <código>}`.
+ */
+export function readBulkSmsErrorCode(err: unknown): string | undefined {
+  const e = err as {
+    data?: { error?: unknown; message?: unknown };
+    response?: { data?: { error?: unknown; message?: unknown } };
+  } | null;
+  const data = e?.data ?? e?.response?.data;
+  const code = data?.error ?? data?.message;
+  return typeof code === "string" ? code : undefined;
+}
+
+export function readBulkSmsErrorStatus(err: unknown): number | undefined {
+  const e = err as { status?: number; response?: { status?: number } } | null;
+  return e?.status ?? e?.response?.status;
+}
+
+/** Corpo extra do erro (ex.: `bulkDispatchId` do 409 "já em andamento"). */
+export function readBulkSmsErrorData(err: unknown): Record<string, unknown> | undefined {
+  const e = err as { data?: unknown; response?: { data?: unknown } } | null;
+  const data = e?.data ?? e?.response?.data;
+  return data && typeof data === "object" ? (data as Record<string, unknown>) : undefined;
+}
+
+/** 404 sem código `ERR_*` = rota inexistente (backend anterior a esta entrega). */
+export function isLegacyBackend404(err: unknown): boolean {
+  if (readBulkSmsErrorStatus(err) !== 404) return false;
+  const code = readBulkSmsErrorCode(err);
+  return !code || !code.startsWith("ERR_");
+}
+
+/** Códigos que mandam a tela para o envio síncrono de antes. */
+export const SMS_BULK_FALLBACK_CODES = [
+  "ERR_SMS_BULK_BACKGROUND_DISABLED",
+  "ERR_SMS_BULK_BACKGROUND_UNAVAILABLE",
+];
+
+export async function startBulkSmsDispatch(data: SmsBulkDispatchStartPayload) {
+  return api.post<SmsBulkDispatchStartResult>("/bulkSmsDispatch", data);
+}
+
+export async function fetchActiveBulkSmsDispatch() {
+  return api.get<{ dispatch: SmsBulkDispatchLean | null }>("/bulkSmsDispatch/active", BACKGROUND_REQUEST);
+}
+
+export async function fetchBulkSmsDispatch(id: number, opts?: { withErrors?: boolean }) {
+  return api.get<SmsBulkDispatchLean>(`/bulkSmsDispatch/${id}`, {
+    ...BACKGROUND_REQUEST,
+    params: opts?.withErrors ? { withErrors: 1 } : undefined,
+  });
+}
+
+export async function cancelBulkSmsDispatch(id: number) {
+  return api.post<{ id: number; status: string }>(`/bulkSmsDispatch/${id}/cancel`);
 }
 
 export async function sendWabaTemplate(data: {

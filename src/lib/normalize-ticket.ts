@@ -101,6 +101,9 @@ export function normalizeTicket(raw: Record<string, unknown>): Ticket {
       pushname: (contact.pushname ?? t.contactPushname ?? undefined) as string | undefined,
       lid: (contact.lid ?? t.contactLid ?? undefined) as string | undefined,
       isLid: (contact.isLid ?? t.contactIsLid ?? undefined) as boolean | undefined,
+      // Identificador WABA de contato sem telefone (username privado). Sem ele o
+      // envio pelo atendimento aborta antes de chamar o backend, que sabe usá-lo.
+      bsuid: (contact.bsuid ?? t.contactBsuid ?? undefined) as string | undefined,
       instagramPK: contact.instagramPK ?? undefined,
       messengerId: contact.messengerId ?? undefined,
       email: (contact.email ?? t.email ?? "") as string,
@@ -111,6 +114,13 @@ export function normalizeTicket(raw: Record<string, unknown>): Ticket {
       firstName: (contact.firstName as string) || undefined,
       lastName: (contact.lastName as string) || undefined,
       businessName: (contact.businessName as string) || undefined,
+      cep: (contact.cep as string) || undefined,
+      logradouro: (contact.logradouro as string) || undefined,
+      numeroEndereco: (contact.numeroEndereco as string) || undefined,
+      complemento: (contact.complemento as string) || undefined,
+      bairro: (contact.bairro as string) || undefined,
+      cidade: (contact.cidade as string) || undefined,
+      estado: (contact.estado as string) || undefined,
       tags: (contact.tags ?? t.tags ?? []) as {
         id: number;
         name: string;

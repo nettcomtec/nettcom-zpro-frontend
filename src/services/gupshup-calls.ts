@@ -8,6 +8,9 @@ export interface GupshupCallInitiateParams {
   to: string
   sdpOffer: string
   bizOpaqueCallbackData?: string
+  // O controller de initiate resolve canal e destinatario pelo ticketId; os
+  // demais campos seguem sendo enviados (aditivo, backend ignora o que nao usa).
+  ticketId?: number
 }
 
 export interface GupshupCallActionParams {

@@ -60,10 +60,10 @@ const TIME_OPTIONS_VALUES = [
   { minutes: 10080, value: String(10080 * 60000) },
 ];
 
-function StarRating({ rating }: { rating: number }) {
+function StarRating({ rating, max = 5 }: { rating: number; max?: number }) {
   return (
     <div className="flex items-center gap-0.5">
-      {Array.from({ length: 5 }).map((_, i) => (
+      {Array.from({ length: Math.max(1, max) }).map((_, i) => (
         <Star
           key={i}
           className={`h-4 w-4 ${i < rating ? "fill-yellow-400 text-yellow-400" : "text-muted-foreground"}`}
@@ -71,6 +71,14 @@ function StarRating({ rating }: { rating: number }) {
       ))}
     </div>
   );
+}
+
+/** Nota gravada é STRING no backend e pode ser texto (pesquisa pendente) — nunca coagir às cegas. */
+function numericScore(value: unknown): number | null {
+  const s = String(value ?? "").trim();
+  if (s === "") return null;
+  const n = Number(s);
+  return Number.isFinite(n) ? n : null;
 }
 
 // ─── Config Tab ────────────────────────────────────────────────────
@@ -146,8 +154,10 @@ function ConfigTab() {
       .finally(() => setLoading(false));
   }, [tenantId]);
 
-  const updateRating = (idx: number, field: keyof RatingItem, value: string) => {
-    setRatings((prev) => prev.map((r, i) => i === idx ? { ...r, [field]: value } : r));
+  // Casa por identidade (r.rating), nunca por índice: os cards renderizam o array FILTRADO
+  // pelo teto e um array fora de ordem faria o índice editar o card errado.
+  const updateRating = (rating: number, field: keyof RatingItem, value: string) => {
+    setRatings((prev) => prev.map((r) => r.rating === rating ? { ...r, [field]: value } : r));
   };
 
   const handleSave = async () => {
@@ -288,17 +298,17 @@ function ConfigTab() {
         </CardHeader>
         <CardContent>
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-            {ratings.filter((r) => r.rating <= ratingMaxScore).map((r, i) => (
+            {ratings.filter((r) => r.rating <= ratingMaxScore).map((r) => (
               <div key={r.rating} className="rounded-lg border p-3 space-y-2">
                 <div className="flex items-center gap-2">
-                  <StarRating rating={r.rating} />
+                  <StarRating rating={r.rating} max={ratingMaxScore} />
                   <span className="text-sm font-medium">{t("ratingLabel")} {r.rating}</span>
                 </div>
                 <div className="space-y-1.5">
                   <Label className="text-xs">{t("labelFieldLabel")}</Label>
                   <Input
                     value={r.label}
-                    onChange={(e) => updateRating(i, "label", e.target.value)}
+                    onChange={(e) => updateRating(r.rating, "label", e.target.value)}
                     placeholder={t("labelFieldPlaceholder")}
                     className="h-8 text-sm"
                   />
@@ -307,7 +317,7 @@ function ConfigTab() {
                   <Label className="text-xs">{t("responseMessageLabel")}</Label>
                   <Textarea
                     value={r.message}
-                    onChange={(e) => updateRating(i, "message", e.target.value)}
+                    onChange={(e) => updateRating(r.rating, "message", e.target.value)}
                     placeholder={t("responseMessagePlaceholder")}
                     rows={2}
                     className="text-sm"
@@ -383,6 +393,7 @@ function ConfigTab() {
                   ))}
                 </SelectContent>
               </Select>
+              <p className="text-xs text-muted-foreground">{t("ratingMaxScoreNote")}</p>
             </div>
           </div>
           {ratingStoreTimePreset === "custom" && (
@@ -471,7 +482,18 @@ function ListTab() {
   const [deleting, setDeleting] = useState<TicketEvaluation | null>(null);
   const [spyOpen, setSpyOpen] = useState(false);
   const [spyTicket, setSpyTicket] = useState<TicketForSpy | null>(null);
+  const [maxScore, setMaxScore] = useState(5);
   const limit = 20;
+
+  useEffect(() => {
+    // Escala da avaliação (Pontuação máxima). Backend antigo sem o campo (ou falha) → 5 = comportamento atual.
+    fetchEvaluationConfig()
+      .then(({ data }) => {
+        const d = Array.isArray(data) ? data[0] : data;
+        if (d && typeof d.ratingMaxScore === "number") setMaxScore(d.ratingMaxScore);
+      })
+      .catch(() => { /* silencioso — a listagem não depende da config */ });
+  }, []);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -517,6 +539,10 @@ function ListTab() {
 
   const totalPages = Math.max(1, Math.ceil(totalCount / limit));
 
+  // Teto ÚNICO da tabela: escala atual OU a maior nota visível (histórico gravado com teto
+  // antigo nunca é truncado) — evita linhas com quantidades diferentes de estrelas.
+  const tableMax = Math.max(maxScore, ...items.map((ev) => numericScore(ev.evaluation) ?? 0));
+
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-end gap-3">
@@ -538,8 +564,8 @@ function ListTab() {
             <SelectTrigger className="w-28"><SelectValue placeholder={t("allRatings")} /></SelectTrigger>
             <SelectContent>
               <SelectItem value="all">{t("allRatings")}</SelectItem>
-              {[1, 2, 3, 4, 5].map((n) => (
-                <SelectItem key={n} value={String(n)}>{n} {n > 1 ? t("stars") : t("star")}</SelectItem>
+              {Array.from({ length: maxScore + 1 }, (_, i) => i).map((n) => (
+                <SelectItem key={n} value={String(n)}>{n} {n !== 1 ? t("stars") : t("star")}</SelectItem>
               ))}
             </SelectContent>
           </Select>
@@ -617,7 +643,7 @@ function ListTab() {
                             <span className="text-xs text-muted-foreground">{t("externalBadge")}</span>
                           )
                         ) : (
-                          <StarRating rating={ev.evaluation} />
+                          <StarRating rating={numericScore(ev.evaluation) ?? 0} max={tableMax} />
                         )}
                       </TableCell>
                       <TableCell className="text-muted-foreground">{formatDate(ev.createdAt)}</TableCell>

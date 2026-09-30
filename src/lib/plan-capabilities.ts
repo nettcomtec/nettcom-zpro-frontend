@@ -46,9 +46,12 @@ export const PLAN_CAPABILITIES: PlanCapability[] = [
   { key: "birthday",        category: "automation",    labelKey: "planCap.birthday",        menuRoutes: ["aniversarios"] },
 
   { key: "aiIntegrations",  category: "ai",            labelKey: "planCap.aiIntegrations",  menuRoutes: [] },
+  { key: "aiAgents",        category: "ai",            labelKey: "planCap.aiAgents",        menuRoutes: ["agentes-ia"] },
+  { key: "aiCredits",       category: "ai",            labelKey: "planCap.aiCredits",       menuRoutes: ["creditos-ia"] },
 
   { key: "funnelKanban",    category: "crm",           labelKey: "planCap.funnelKanban",    menuRoutes: ["funil", "kanban"] },
   { key: "tasks",           category: "crm",           labelKey: "planCap.tasks",           menuRoutes: ["tarefas"] },
+  { key: "relationship",    category: "crm",           labelKey: "planCap.relationship",    menuRoutes: [] },
   { key: "agenda",          category: "crm",           labelKey: "planCap.agenda",          menuRoutes: ["agenda"] },
   { key: "publicBooking",   category: "crm",           labelKey: "planCap.publicBooking",   menuRoutes: ["agendamento-publico"] },
   { key: "productCatalog",  category: "crm",           labelKey: "planCap.productCatalog",  menuRoutes: ["catalogo"] },

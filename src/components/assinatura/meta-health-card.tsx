@@ -59,7 +59,8 @@ interface MetaHealthData {
   lastComputedAt?: string | null;
   courtesy?: {
     available: boolean;
-    reason: "ok" | "not_blocked" | "blocking_numbers_present" | "cooldown";
+    // "manual_block": bloqueio feito pela equipe — a cortesia não se aplica.
+    reason: "ok" | "not_blocked" | "blocking_numbers_present" | "cooldown" | "manual_block";
     nextEligibleAt?: string | null;
     lastCourtesyUnblockAt?: string | null;
     liveBlockSeverity?: string;

@@ -14,6 +14,8 @@ import { getSocket } from "@/lib/socket";
 import { useAuthStore } from "@/stores/auth-store";
 import { useLiveMode } from "@/hooks/use-live-mode";
 import { cn } from "@/lib/utils";
+import { toast } from "sonner";
+import { isTicketAccessDenied } from "@/lib/ticket-access-denied";
 
 export interface TicketForSpy {
   id: number;
@@ -50,6 +52,8 @@ export function EspiarConversaDialog({
   onResolve?: (t: TicketForSpy) => void;
 }) {
   const t = useTranslations("espiarConversa");
+  // "Você não tem acesso a este atendimento" — mesma mensagem do guard de acesso da tela
+  const tAtdChat = useTranslations("atendimentoChat");
   const { isLiveMode } = useLiveMode();
   const [messages, setMessages] = useState<Message[]>([]);
   const [loading, setLoading] = useState(false);
@@ -99,8 +103,16 @@ export function EspiarConversaDialog({
         list.sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
         setMessages(list);
         setHasMore(!!data?.hasMore);
-      } catch {
-        if (!cancelled) setMessages([]);
+      } catch (err) {
+        if (!cancelled) {
+          setMessages([]);
+          // Acesso negado pelo backend: fecha o diálogo com o aviso certo, em vez de deixar uma
+          // conversa vazia que parece "atendimento sem mensagens".
+          if (isTicketAccessDenied(err)) {
+            toast.error(tAtdChat("noTicketAccess"));
+            onOpenChange(false);
+          }
+        }
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -228,12 +240,18 @@ export function EspiarConversaDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-lg max-h-[85vh] flex flex-col">
         <DialogHeader className="shrink-0">
-          <div className="flex items-center justify-between gap-2 pr-8">
-            <DialogTitle>
+          <div className="flex flex-col gap-2 pr-8 sm:flex-row sm:items-start sm:justify-between">
+            <DialogTitle className="min-w-0 flex-1 leading-snug">
               {t("title")} #{ticket?.id ?? ""}
               {ticket?.contact?.name && (
-                <span className={cn("text-muted-foreground font-normal ml-1", isLiveMode && "live-blur-text")}>
-                  — {ticket.contact.name}
+                <span
+                  className={cn(
+                    "block text-sm text-muted-foreground font-normal line-clamp-3 [overflow-wrap:anywhere]",
+                    isLiveMode && "live-blur-text"
+                  )}
+                  title={ticket.contact.name}
+                >
+                  {ticket.contact.name}
                 </span>
               )}
             </DialogTitle>

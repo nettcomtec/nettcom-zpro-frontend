@@ -67,6 +67,13 @@ type SystemField =
   | "businessName"
   | "cpf"
   | "birthdayDate"
+  | "cep"
+  | "logradouro"
+  | "numeroEndereco"
+  | "complemento"
+  | "bairro"
+  | "cidade"
+  | "estado"
   | string; // custom:FieldName
 
 interface MappingRow {
@@ -75,6 +82,39 @@ interface MappingRow {
   field: SystemField;
   updateBehavior: UpdateBehavior;
   newCustomFieldName?: string;
+}
+
+// Pistas do cabeçalho para a 2ª passada da detecção (loadPreview).
+interface HeaderHints {
+  bareNumber?: boolean;
+  explicitPhone?: boolean;
+}
+
+// Campos de endereço, conferidos ANTES das regras de nome e telefone: "Nome da rua" é a Rua e
+// "Número da casa" é o Nº. "Número" sozinho e "Número residencial" continuam telefone.
+// Recebe o cabeçalho em minúsculas e sem acento; null = não é endereço (segue a detecção de sempre).
+function detectAddressField(h: string): SystemField | null {
+  if (h.includes("mail") || h.includes("country") || /\b(pais|tipo|type|box|caixa)\b/.test(h)) return null;
+  if (/\bcep\b/.test(h) || h.includes("zip") || h.includes("postal")) return "cep";
+  if (h.includes("bairro") || h.includes("neighborhood")) return "bairro";
+  if (h.includes("complemento") || h.includes("extended") || /(address|endereco|street)[\s_-]*(line[\s_-]*)?2\b/.test(h))
+    return "complemento";
+  const mentionsStreet = /\brua\b/.test(h) || h.includes("logradouro") || h.includes("street");
+  const mentionsPhone = /fone|phone|whatsapp|celular/.test(h);
+  const mentionsNumber = h.includes("numero") || h.includes("number") || h.includes("nº") || h.includes("n°");
+  const sign = h.replace(/[\s.:]/g, "");
+  if (
+    !mentionsPhone &&
+    (sign === "nº" ||
+      sign === "n°" ||
+      /street[\s_-]*(number|no)\b/.test(h) ||
+      (!mentionsStreet && mentionsNumber && /casa|house|endereco|address/.test(h)))
+  )
+    return "numeroEndereco";
+  if (/\b(cidade|city)\b/.test(h) || h.includes("municipio")) return "cidade";
+  if (/\b(uf|state|region)\b/.test(h) || (/\bestado\b/.test(h) && !h.includes("civil"))) return "estado";
+  if (mentionsStreet || h.includes("endereco") || h.includes("address")) return "logradouro";
+  return null;
 }
 
 interface Props {
@@ -198,10 +238,23 @@ export function ImportWizardDialog({
       setTotalRows(result.totalRows);
       setDetectedDelimiter(result.delimiter ?? null);
 
+      const hints = result.headers.map((): HeaderHints => ({}));
+      const fields = result.headers.map((h, i) => autoDetectField(h, hints[i]));
+      // "Rua | Número | Bairro" com o telefone em outra coluna: o "Número" solto é o Nº da casa,
+      // não um segundo telefone. Sem coluna de rua ou sem outro telefone, ele segue telefone.
+      if (
+        fields.includes("logradouro") &&
+        !fields.includes("numeroEndereco") &&
+        hints.some((hint, i) => hint.explicitPhone && fields[i] === "number")
+      ) {
+        const bare = hints.findIndex((hint, i) => hint.bareNumber && fields[i] === "number");
+        if (bare >= 0) fields[bare] = "numeroEndereco";
+      }
+
       const autoMappings: MappingRow[] = result.headers.map((h, i) => ({
         columnIndex: i,
         headerLabel: h,
-        field: autoDetectField(h),
+        field: fields[i],
         updateBehavior: "always",
       }));
       setMappings(autoMappings);
@@ -224,8 +277,14 @@ export function ImportWizardDialog({
       ? tCsv("delimiterTab")
       : tCsv("delimiterPipe");
 
-  const autoDetectField = (header: string): SystemField => {
+  const autoDetectField = (header: string, hints?: HeaderHints): SystemField => {
     const h = header.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+    if (hints) {
+      hints.bareNumber = /^(numero|number|num)$/.test(h.replace(/[^a-z]/g, ""));
+      hints.explicitPhone = /fone|phone|whatsapp|celular/.test(h);
+    }
+    const addressField = detectAddressField(h);
+    if (addressField) return addressField;
     if (h.includes("nome") && !h.includes("primeiro") && !h.includes("ultimo") && !h.includes("empresa"))
       return "name";
     if (h === "name") return "name";
@@ -252,6 +311,13 @@ export function ImportWizardDialog({
     { value: "businessName", label: t("fieldBusinessName") },
     { value: "cpf", label: t("fieldCpf") },
     { value: "birthdayDate", label: t("fieldBirthday") },
+    { value: "cep", label: t("fieldCep") },
+    { value: "logradouro", label: t("fieldLogradouro") },
+    { value: "numeroEndereco", label: t("fieldNumeroEndereco") },
+    { value: "complemento", label: t("fieldComplemento") },
+    { value: "bairro", label: t("fieldBairro") },
+    { value: "cidade", label: t("fieldCidade") },
+    { value: "estado", label: t("fieldEstado") },
   ];
 
   const UPDATE_BEHAVIORS: { value: UpdateBehavior; label: string }[] = [

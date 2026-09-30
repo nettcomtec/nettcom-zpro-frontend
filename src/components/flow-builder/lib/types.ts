@@ -5,6 +5,7 @@ export interface FlowInteraction {
     | "media"
     | "delay"
     | "chatgpt"
+    | "agent"
     | "typebot"
     | "n8n"
     | "tag"
@@ -38,7 +39,7 @@ export interface FlowInteraction {
 
 export interface FlowCondition {
   id: string;
-  /** 0 = step, 1 = queue, 2 = user, 3 = close ticket, 4 = channel (mirrors Vue condition.action) */
+ /** 0 = step, 1 = queue, 2 = user, 3 = close ticket, 4 = channel (mirrors front legado condition.action) */
   action?: number;
   nextStepId: string;
   queueId?: string;
@@ -48,7 +49,7 @@ export interface FlowCondition {
   /** "A" = automático (auto-avanço ao entrar no nó); "V" = condição por variável de contexto */
   type: "US" | "R" | "T" | "A" | "V" | "contains" | "equals" | "startsWith" | "endsWith" | "regex";
   value: string;
-  /** multi-value chip list for type "R" — mirrors Vue's condition.condition array */
+ /** multi-value chip list for type "R" — mirrors the legacy front's condition.condition array */
   condition?: string[];
   comparisonType?: string;
   /** timeTable (type === "T"): dias da semana (0=Dom..6=Sáb) */
@@ -75,7 +76,7 @@ export interface FlowNodeData {
   ico?: string;
   viewOnly?: boolean;
   status?: string;
-  /** Visual style overrides (mirrors Vue's node.style) */
+ /** Visual style overrides (mirrors the legacy front's node.style) */
   style?: Record<string, unknown>;
   interactions: FlowInteraction[];
   conditions: FlowCondition[];
@@ -95,7 +96,7 @@ export interface FlowLine {
   from: string;
   to: string;
   label?: string;
-  /** Visual style used by Vue/jsPlumb (preserved on save for cross-platform compatibility) */
+ /** Visual style used by legacy/jsPlumb (preserved on save for cross-platform compatibility) */
   paintStyle?: { strokeWidth?: number; stroke?: string };
 }
 
@@ -150,6 +151,7 @@ export const INTERACTION_TYPES: {
   { type: "media", label: "Mídia", icon: "Image" },
   { type: "delay", label: "Atraso", icon: "Clock" },
   { type: "chatgpt", label: "ChatGPT", icon: "Bot" },
+  { type: "agent", label: "Agente de IA", icon: "Bot" },
   { type: "typebot", label: "Typebot", icon: "Blocks" },
   { type: "n8n", label: "n8n", icon: "Workflow" },
   { type: "tag", label: "Etiqueta", icon: "Tag" },
@@ -208,6 +210,13 @@ export function defaultInteractionData(type: FlowInteraction["type"]): Record<st
     // "o que se vê no editor = o que se salva = o que o backend executa".
     case "carencia":
       return { enabled: true, seconds: 3600, destinationType: "lastUser" };
+    // Bloquear Chatbot: o backend só executa a ação se o campo existir no data —
+    // sem esta semente a interação salva vazia e vira no-op silencioso.
+    case "chatBotBlock":
+      return { chatbotBlocked: true };
+    // Agente de IA: semear agentId para que "o que se vê no editor = o que se salva".
+    case "agent":
+      return { agentId: "" };
     default:
       return {};
   }

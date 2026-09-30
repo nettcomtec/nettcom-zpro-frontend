@@ -1,6 +1,6 @@
 /**
  * Converte áudio gravado (Blob webm) em MP3 para envio.
- * Mesma lógica do Vue frontend (InputMensagem.vue → convertToWav + convertToMp3).
+ * Mesma lógica do front legado (InputMensagem → convertToWav + convertToMp3).
  */
 import { Mp3Encoder } from "@breezystack/lamejs";
 
@@ -26,7 +26,7 @@ export async function convertWebmBlobToMp3(blob: Blob): Promise<Blob> {
   const sampleRate = audioBuffer.sampleRate;
   const numChannels = audioBuffer.numberOfChannels;
 
-  // Interleave channel data → flat Float32 (same as Vue convertToMp3)
+ // Interleave channel data → flat Float32 (same as front legado convertToMp3)
   const samples = new Float32Array(audioBuffer.length * numChannels);
   let idx = 0;
   for (let ch = 0; ch < numChannels; ch++) {

@@ -264,6 +264,11 @@ export function AudienceFields({ value, onChange }: Props) {
               </div>
 
               <div>
+                <p className="font-medium">{t("helpOutOfAudienceTitle")}</p>
+                <p className="text-muted-foreground">{t("helpOutOfAudience")}</p>
+              </div>
+
+              <div>
                 <p className="font-medium">{t("helpKeywordTitle")}</p>
                 <p className="text-muted-foreground">{t("helpKeyword")}</p>
               </div>

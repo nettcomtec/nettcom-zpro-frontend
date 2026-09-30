@@ -43,6 +43,15 @@ export interface Whatsapp {
   hybridMode?: string;
   // Canal de transporte vinculado (obrigatorio em coexistence; type baileys).
   linkedChannelId?: number | null;
+  // Coexistencia: botoes/listas seguem nativos pela API oficial (nao degradam
+  // para menu numerado no canal vinculado). Default backend = false.
+  hybridNativeInteractive?: boolean;
+  // Mercado Livre: trata reclamacoes (claims) e pedidos (orders_v2) alem de
+  // mensagens e perguntas. Default backend = false.
+  mlEventsEnabled?: boolean;
+  // Instagram: comentario em post/reels abre atendimento. Default backend = true;
+  // false = canal so com DM (automacoes de comentario seguem rodando).
+  igCommentsCreateTickets?: boolean;
 
   tokenAPI?: string;
   wabaId?: string;

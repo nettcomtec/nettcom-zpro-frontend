@@ -19,7 +19,7 @@ import { useTranslations } from "next-intl";
 import { toast } from "sonner";
 import { getSocket } from "@/lib/socket";
 import { useAuthStore } from "@/stores/auth-store";
-import type { PrivateMessage } from "@/stores/chat-store";
+import { comparePrivateMessages, getPrivateMessageTime, type PrivateMessage } from "@/stores/chat-store";
 import {
   fetchAuditUsers, fetchAuditConversations, fetchAuditGroups, fetchAuditMessages,
   type AuditUser, type AuditConversation, type AuditGroup,
@@ -37,11 +37,7 @@ function buildMediaUrl(mediaUrl: string) {
 }
 
 function sortAsc(msgs: PrivateMessage[]) {
-  return [...msgs].sort((a, b) => {
-    const ta = a.timestamp || (a.createdAt ? new Date(a.createdAt).getTime() : 0);
-    const tb = b.timestamp || (b.createdAt ? new Date(b.createdAt).getTime() : 0);
-    return ta - tb;
-  });
+  return [...msgs].sort(comparePrivateMessages);
 }
 
 export function ChatPrivadoAuditDialog({
@@ -219,7 +215,7 @@ export function ChatPrivadoAuditDialog({
       const d = evt.data as {
         id?: number; senderId?: number; receiverId?: number; groupId?: number | null;
         text?: string; mediaType?: string; mediaUrl?: string; mediaName?: string;
-        timestamp?: number; sender?: { id: number; name: string }; receiver?: { id: number; name: string };
+        timestamp?: number; createdAt?: string; sender?: { id: number; name: string }; receiver?: { id: number; name: string };
         quotedMsgId?: number | null; quotedMsg?: PrivateMessage | null;
       };
       if (!matches(d)) return;
@@ -231,7 +227,7 @@ export function ChatPrivadoAuditDialog({
         groupId: d.groupId ?? undefined,
         read: false,
         timestamp: d.timestamp ?? Date.now(),
-        createdAt: new Date().toISOString(),
+        createdAt: d.createdAt ?? new Date().toISOString(),
         mediaType: d.mediaType,
         mediaUrl: d.mediaUrl,
         mediaName: d.mediaName,
@@ -275,9 +271,8 @@ export function ChatPrivadoAuditDialog({
 
   // ── Helpers ──
   const formatTime = (msg: PrivateMessage) => {
-    let ts = msg.timestamp || (msg.createdAt ? new Date(msg.createdAt).getTime() : 0);
+    const ts = getPrivateMessageTime(msg);
     if (!ts) return "";
-    if (typeof ts === "string") { const p = Number(ts); ts = isNaN(p) ? new Date(ts).getTime() : p; }
     const d = new Date(ts);
     if (isNaN(d.getTime())) return "";
     const timeStr = d.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" });

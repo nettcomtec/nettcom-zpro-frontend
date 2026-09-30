@@ -507,6 +507,10 @@ const THEM_BG:      [number, number, number] = [255, 255, 255];
 const THEM_TEXT:    [number, number, number] = [26,  32,  44 ];
 const NOTE_BG:      [number, number, number] = [255, 249, 219];
 const NOTE_TEXT:    [number, number, number] = [120, 53,  15 ];
+// Aviso de disparo de mensagem agendada — linha de sistema, nao e nota do
+// atendente: verde para separar visualmente da caixa amarela de nota.
+const SCHED_BG:     [number, number, number] = [236, 253, 245];
+const SCHED_TEXT:   [number, number, number] = [6,   95,  70 ];
 const GRAY_MUTED:   [number, number, number] = [107, 114, 128];
 const GRAY_BORDER:  [number, number, number] = [218, 220, 224];
 const CHAT_BG:      [number, number, number] = [236, 239, 241];
@@ -517,6 +521,9 @@ const DELETED_TEXT: [number, number, number] = [160, 165, 170];
 // ─── types ────────────────────────────────────────────────────────────────────
 export interface ExportMessage {
   id: string;
+  // ID do canal/provedor (distinto do id do banco). Usado só para reconhecer o
+  // aviso de disparo de agendada, cujo prefixo é "sched_notice".
+  messageId?: string;
   body: string;
   fromMe: boolean;
   mediaType?: string;
@@ -563,6 +570,15 @@ function isTextMessage(type?: string): boolean {
   if (!type) return true;
   const TEXT_TYPES = ["chat", "extendedTextMessage", "conversation", "notes", "callNotes", "transfer", "transcription"];
   return TEXT_TYPES.some((t) => type === t || type.startsWith(t));
+}
+
+// Aviso automatico que o sistema insere no historico quando uma mensagem
+// agendada e efetivamente disparada. Chega com mediaType "notes" (e o que faz o
+// chat centralizar a linha), mas NAO e nota do atendente: nao entra no contador
+// de notas internas e ganha rotulo proprio no lugar da caixa "[Nota interna]".
+const SCHEDULE_NOTICE_LABEL = "Mensagem agendada enviada";
+function isScheduleNoticeMessage(m: ExportMessage): boolean {
+  return !!m.messageId?.startsWith("sched_notice");
 }
 
 // Tipos que embutem um arquivo (imagem, áudio, vídeo, documento, figurinha,
@@ -656,7 +672,11 @@ export async function exportChatPdf(ticket: Ticket, rawMessages: unknown[]): Pro
   const deletedCount  = messages.filter((m) =>  m.isDeleted).length;
   const sentByAgent   = nonDeleted.filter((m) =>  m.fromMe && m.mediaType !== "notes" && m.mediaType !== "callNotes").length;
   const sentByContact = nonDeleted.filter((m) => !m.fromMe).length;
-  const internalNotes = nonDeleted.filter((m) => m.mediaType === "notes" || m.mediaType === "callNotes").length;
+  // Aviso de disparo de agendada usa mediaType "notes" mas e linha de sistema —
+  // fora do contador de notas internas do atendente.
+  const internalNotes = nonDeleted.filter(
+    (m) => (m.mediaType === "notes" || m.mediaType === "callNotes") && !isScheduleNoticeMessage(m),
+  ).length;
 
   const firstContactMsg = messages.find((m) => !m.fromMe && !m.isDeleted);
   const firstAgentReply = messages.find(
@@ -1135,7 +1155,12 @@ export async function exportChatPdf(ticket: Ticket, rawMessages: unknown[]): Pro
     msgIndex++;
 
     const isDeleted = !!msg.isDeleted;
-    const isNote    = !isDeleted && (msg.mediaType === "notes" || msg.mediaType === "callNotes");
+    // Aviso de disparo de agendada: mesmo layout de linha de sistema da nota
+    // (largura total, à esquerda, sem rótulo de remetente), mas com cor e
+    // rótulo próprios — ver o bloco de rótulo mais abaixo.
+    const isSchedNotice = !isDeleted && isScheduleNoticeMessage(msg);
+    const isAgentNote   = !isDeleted && !isSchedNotice && (msg.mediaType === "notes" || msg.mediaType === "callNotes");
+    const isNote        = isAgentNote || isSchedNotice;
     const isMe      = msg.fromMe;
     const timeStr   = formatTime(msg.createdAt);
 
@@ -1203,7 +1228,9 @@ export async function exportChatPdf(ticket: Ticket, rawMessages: unknown[]): Pro
       : (msg.contact?.name ?? contact.name);
     const senderId    = isMe ? "__me__" : (msg.contact?.name ?? contact.name);
     const isNewSender = senderId !== prevSenderId;
-    const ackStr      = isMe ? resolveAckLabel(msg.ack) : "";
+    // Aviso de disparo nasce com ack 4 no banco, mas nunca foi entregue a
+    // ninguém — imprimir "Lido" numa linha de sistema enganaria quem lê o PDF.
+    const ackStr      = isMe && !isSchedNotice ? resolveAckLabel(msg.ack) : "";
 
     // ── build message body ──────────────────────────────────────────────────────
     const rawKind    = msg.mediaType ? getMediaKind(msg.mediaType) : "generic";
@@ -1232,7 +1259,9 @@ export async function exportChatPdf(ticket: Ticket, rawMessages: unknown[]): Pro
             ? `${label}: ${bodyText}`
             : label;
     }
-    if (!bodyText.trim()) bodyText = "(sem conteudo)";
+    // Aviso de disparo de agendada sem trecho (agendada de mídia sem legenda):
+    // fica só o rótulo — "(sem conteudo)" não faria sentido nessa linha.
+    if (!bodyText.trim()) bodyText = isSchedNotice ? "" : "(sem conteudo)";
 
     // ── layout metrics ──────────────────────────────────────────────────────────
     doc.setFontSize(8.5);
@@ -1284,7 +1313,7 @@ export async function exportChatPdf(ticket: Ticket, rawMessages: unknown[]): Pro
     let textLines: string[];
     if (useMediaBox) {
       textLines = [`[  ${mediaLabel(msg.mediaType ?? "").toUpperCase()}  ]`];
-    } else if (hasEmbeddedImg || kind === "audio" || isLottieSticker || isUnavailableMedia) {
+    } else if (!bodyText || hasEmbeddedImg || kind === "audio" || isLottieSticker || isUnavailableMedia) {
       textLines = [];
     } else {
       textLines = doc.splitTextToSize(bodyText, innerW);
@@ -1330,7 +1359,9 @@ export async function exportChatPdf(ticket: Ticket, rawMessages: unknown[]): Pro
     let textColor: [number, number, number];
     let tsColor:   [number, number, number];
 
-    if (isNote) {
+    if (isSchedNotice) {
+      bx = MARGIN;              bgColor = SCHED_BG; textColor = SCHED_TEXT; tsColor = SCHED_TEXT;
+    } else if (isNote) {
       bx = MARGIN;              bgColor = NOTE_BG;  textColor = NOTE_TEXT; tsColor = NOTE_TEXT;
     } else if (isMe) {
       bx = PAGE_W - MARGIN - bubbleW;    bgColor = ME_BG;   textColor = ME_TEXT;  tsColor = TS_ME;
@@ -1399,13 +1430,13 @@ export async function exportChatPdf(ticket: Ticket, rawMessages: unknown[]): Pro
       doc.text("(editada)", bx + 5, y + NUM_PAD + 5.5 + actualContentH + 1.5);
     }
 
-    // ── internal note label ───────────────────────────────────────────────────────
+    // ── internal note / schedule notice label ─────────────────────────────────────
     if (isNote) {
       doc.setFontSize(7);
       doc.setFont(fontName, "bold");
-      doc.setTextColor(...NOTE_TEXT);
+      doc.setTextColor(...(isSchedNotice ? SCHED_TEXT : NOTE_TEXT));
       doc.text(
-        sanitizeForPdf(`[Nota interna] ${senderName}`),
+        sanitizeForPdf(isSchedNotice ? `[${SCHEDULE_NOTICE_LABEL}]` : `[Nota interna] ${senderName}`),
         bx + 5,
         y + NUM_PAD + 5.5 + actualContentH + editedH + 0.5,
       );

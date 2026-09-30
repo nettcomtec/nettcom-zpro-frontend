@@ -23,9 +23,10 @@ export interface LoginResponse {
     filtrosAtendimento?: unknown;
     isDark?: boolean;
   };
-  // SIP — flat fields (igual ao Vue: usuarioAtualizado)
+ // SIP — flat fields (igual ao front legado: usuarioAtualizado)
   sipEnabled?: boolean;
   sipServer?: string;
+  sipDomain?: string;
   sipPort?: number;
   sipUsername?: string;
   sipPassword?: string;

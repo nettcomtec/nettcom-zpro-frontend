@@ -2,7 +2,7 @@
 
 import { formatDate as formatDateIntl, formatTime } from "@/lib/format";
 
-import React, { useState, useEffect, useCallback, useRef } from "react";
+import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useTranslations } from "next-intl";
 import { getGoogleCanonicalCallbackUrl } from "@/config/oauth-proxy";
@@ -121,6 +121,24 @@ export default function ConfigGoogleCalendarPage() {
   // --- Events state ---
   const [selectedConfigId, setSelectedConfigId] = useState<string>("");
   const [events, setEvents] = useState<GoogleCalendarEvent[]>([]);
+
+  // O Google devolve o MESMO `id` para instancias de um evento recorrente
+  // (ex.: 20260907_cg7v9nvg3hi4m4r2a32gmuojls) e, com googleCalendarId "all",
+  // o mesmo evento ainda pode voltar por mais de um calendario. As duas coisas
+  // produziam "Encountered two children with the same key" no events.map da
+  // tabela. A instancia e identificada pelo par calendario + inicio; o indice
+  // entra so se AINDA assim colidir, nunca sozinho — chave puramente
+  // posicional quebraria a reconciliacao ao reordenar.
+  // Mesmo tratamento que ja existe na tela irma, /google-calendar:171.
+  const eventRows = useMemo(() => {
+    const seen = new Set<string>();
+    return events.map((ev, idx) => {
+      const base = `${ev.calendarId ?? ""}|${ev.id}|${ev.start ?? ""}`;
+      const key = seen.has(base) ? `${base}#${idx}` : base;
+      seen.add(key);
+      return { ev, key };
+    });
+  }, [events]);
   const [loadingEvents, setLoadingEvents] = useState(false);
   const [filtros, setFiltros] = useState({
     // Phase 16 — range default 30d passado a 90d futuro (cobre reunioes recentes)
@@ -850,8 +868,8 @@ export default function ConfigGoogleCalendarPage() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {events.map(ev => (
-                  <TableRow key={ev.id}>
+                {eventRows.map(({ ev, key }) => (
+                  <TableRow key={key}>
                     <TableCell>
                       <div className="space-y-1 min-w-0">
                         <div className="flex items-center gap-1.5 flex-wrap">

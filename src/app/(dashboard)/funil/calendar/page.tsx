@@ -16,7 +16,7 @@ import {
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
 } from "@/components/ui/dialog";
-import { ChevronLeft, ChevronRight, Calendar, RefreshCw, X, Plus } from "lucide-react";
+import { ChevronLeft, ChevronRight, Calendar, RefreshCw, X, Plus, AlertTriangle } from "lucide-react";
 import { toast } from "sonner";
 import { useTranslations } from "next-intl";
 import { PageHeader } from "@/components/layout/page-header";
@@ -34,6 +34,9 @@ import { useRouter } from "next/navigation";
 import {
   civilDayFromLocal, civilDayFromUTC, closingForecastToDateInput, dateInputToClosingForecastISO,
 } from "@/lib/opportunity-date";
+
+// Teto de oportunidades carregadas por mês (o servidor recorta pela previsão de fechamento)
+const MONTH_OPPORTUNITIES_CAP = 5000;
 
 interface Opportunity {
   id: number;
@@ -524,14 +527,22 @@ function OpportunityCreateForm({ open, createDate, pipelines, stages, responsave
 // ─── Main Page ────────────────────────────────────────────────────────────────
 
 export default function FunilCalendarPage() {
+  // Gate isolado num wrapper: sair com `return` no meio dos hooks do conteúdo
+  // quebrava o React ("Rendered fewer hooks than expected") quando a permissão
+  // caía com a página montada — o teto do tenant chega após o 1º render.
+  const allowed = usePageAccess("funil", { alsoAccept: ["kanban"] });
+  if (!allowed) return <AccessDenied />;
+  return <FunilCalendarPageContent />;
+}
+
+function FunilCalendarPageContent() {
   const t = useTranslations("funilCalendarPage");
   const router = useRouter();
   const gcal = useOpportunityCalendarEvent();
-  const allowed = usePageAccess("funil", { alsoAccept: ["kanban"] });
-  if (!allowed) return <AccessDenied />;
   const [loading, setLoading] = useState(true);
   const [currentMonth, setCurrentMonth] = useState(new Date());
   const [opportunities, setOpportunities] = useState<Opportunity[]>([]);
+  const [monthTotal, setMonthTotal] = useState(0);
   const [pipelines, setPipelines] = useState<{ id: number; name: string }[]>([]);
   const [allStages, setAllStages] = useState<{ id: number; name: string; color?: string; pipelineId: number }[]>([]);
   const [responsaveis, setResponsaveis] = useState<{ label: string; value: number }[]>([]);
@@ -560,14 +571,24 @@ export default function FunilCalendarPage() {
       lastDay.setUTCHours(23, 59, 59, 999);
 
       const [oppRes, pipeRes, stageRes, usersRes] = await Promise.all([
-        fetchOpportunities({ page: 1, limit: 1000, dataInicio: firstDay.toISOString(), dataFim: lastDay.toISOString() }),
+        fetchOpportunities({
+          page: 1,
+          limit: MONTH_OPPORTUNITIES_CAP,
+          orderBy: "closingForecast",
+          orderDirection: "ASC",
+          dataInicio: firstDay.toISOString(),
+          dataFim: lastDay.toISOString(),
+        }),
         fetchPipelines(),
         fetchStages(),
         fetchAllUsers(),
       ]);
 
       const oppData = oppRes.data?.data ?? (Array.isArray(oppRes.data) ? oppRes.data : []);
-      setOpportunities(Array.isArray(oppData) ? oppData : []);
+      const oppList = Array.isArray(oppData) ? oppData : [];
+      setOpportunities(oppList);
+      const total = Number(oppRes.data?.pagination?.total);
+      setMonthTotal(Number.isFinite(total) ? total : oppList.length);
 
       const pRaw = pipeRes.data?.data ?? (Array.isArray(pipeRes.data) ? pipeRes.data : []);
       setPipelines(Array.isArray(pRaw) ? pRaw : []);
@@ -707,6 +728,13 @@ export default function FunilCalendarPage() {
           <Button variant="outline" size="icon" onClick={nextMonth}><ChevronRight className="h-4 w-4" /></Button>
         </div>
       </PageHeader>
+
+      {monthTotal > opportunities.length && (
+        <div className="flex items-start gap-2 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-900 dark:text-amber-200">
+          <AlertTriangle className="h-4 w-4 mt-0.5 shrink-0" />
+          <span>{t("capWarning", { total: monthTotal, shown: opportunities.length })}</span>
+        </div>
+      )}
 
       <Card>
         <CardContent className="p-4 sm:p-6">

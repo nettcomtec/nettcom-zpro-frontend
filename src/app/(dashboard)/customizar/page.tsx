@@ -20,7 +20,7 @@ import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter,
 } from "@/components/ui/dialog";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Palette, Image, LogOut, Key, Lock, BookOpen, Plus, Pencil, Trash2, Copy, CheckCircle, XCircle, Zap, Monitor, Eye, Smartphone, Moon, Sun, GripVertical, Volume2, Upload, AlertTriangle, Type, Square, Circle as CircleIcon, Code2, RotateCcw, UserPlus } from "lucide-react";
+import { Palette, Image, LogOut, Key, Lock, BookOpen, Plus, Pencil, Trash2, Copy, CheckCircle, XCircle, Zap, Monitor, Eye, Smartphone, Moon, Sun, GripVertical, Volume2, Upload, AlertTriangle, Type, Square, Circle as CircleIcon, Code2, RotateCcw, UserPlus, ScrollText } from "lucide-react";
 import { useTheme } from "next-themes";
 import { toast } from "sonner";
 import api from "@/lib/api";
@@ -44,7 +44,7 @@ import {
   deleteLogoDarkNovo,
   deleteFaviconNovo,
 } from "@/services/superadmin";
-import { fetchTenants, updateTenantPostmanLink } from "@/services/tenants";
+import { fetchTenants, updateTenantPostmanLink, fetchTenantLicensePolicy } from "@/services/tenants";
 import {
   fetchTutorials, createTutorial, updateTutorial, deleteTutorial, type Tutorial,
 } from "@/services/tutorials";
@@ -67,6 +67,7 @@ import { fetchSocketModelNovo, updateSocketModelNovo, fetchLoginVariantNovo, upd
 import { useBrandingStore } from "@/stores/branding-store";
 import { NotificationSoundPlayer } from "@/components/customizar/notification-sound-player";
 import { TypographyPanel } from "@/components/customizar/typography-panel";
+import { ResellerTermsPanel } from "@/components/customizar/reseller-terms-panel";
 import { AvatarShapePanel } from "@/components/customizar/avatar-shape-panel";
 import { getLogoUrl, getLogoDarkUrl, getFaviconUrl, getLoginSideBgUrl, getPwaIconUrl, getNotificationSoundUrl } from "@/lib/branding-urls";
 
@@ -626,6 +627,16 @@ export default function CustomizarPage() {
   // Socket Model Novo
   const [socketModelOptimized, setSocketModelOptimized] = useState(false);
   const [savingSocketModel, setSavingSocketModel] = useState(false);
+
+  // Termos para clientes (PLANO_ACEITE_TERMOS_REVENDA §5.6.3): a aba some na
+  // licença de empresa única. null = ainda consultando (a aba só aparece depois
+  // da resposta, sem piscar). Rota aditiva: backend antigo dá 404 → false.
+  const [singleTenantLicense, setSingleTenantLicense] = useState<boolean | null>(null);
+  useEffect(() => {
+    fetchTenantLicensePolicy()
+      .then((res) => setSingleTenantLicense(res.data?.singleTenant === true))
+      .catch(() => setSingleTenantLicense(false));
+  }, []);
 
   // Postman link (override do botao "Postman" em /api-service; salvo no banco — coluna Tenant.postmanLink)
   const POSTMAN_LINK_DEFAULT = "https://www.postman.com/comunidade-zdg/z-pro/collection/s16subg/postman-v3-x-x-x?action=share&creator=25151510";
@@ -1199,25 +1210,32 @@ export default function CustomizarPage() {
             { title: t("helpS0T"), items: [t("helpS0I0"), t("helpS0I1"), t("helpS0I2")] },
             { title: t("helpS1T"), items: [t("helpS1I0"), t("helpS1I1"), t("helpS1I2")] },
             { title: t("helpS2T"), items: [t("helpS2I0"), t("helpS2I1"), t("helpS2I2")] },
+            // Só onde a aba Termos existe (fora da licença de empresa única).
+            ...(singleTenantLicense === false
+              ? [{ title: t("helpS3T"), items: [t("helpS3I0"), t("helpS3I1"), t("helpS3I2")] }]
+              : []),
           ],
         }}
       />
 
       <Tabs defaultValue="cores">
-        <div className="-mx-3 md:mx-0 px-3 md:px-0 mb-4 overflow-x-auto">
-          <TabsList className="inline-flex md:flex md:flex-wrap h-auto gap-1 w-max md:w-full justify-start">
-            <TabsTrigger value="cores" className="shrink-0 text-xs md:text-sm"><Palette className="mr-1.5 h-3.5 w-3.5 md:mr-2 md:h-4 md:w-4" />{t("tabColors")}</TabsTrigger>
-            <TabsTrigger value="sons" className="shrink-0 text-xs md:text-sm"><Volume2 className="mr-1.5 h-3.5 w-3.5 md:mr-2 md:h-4 md:w-4" />{t("tabSounds")}</TabsTrigger>
-            <TabsTrigger value="branding" className="shrink-0 text-xs md:text-sm"><Image className="mr-1.5 h-3.5 w-3.5 md:mr-2 md:h-4 md:w-4" />{t("tabBranding")}</TabsTrigger>
-            <TabsTrigger value="tipografia" className="shrink-0 text-xs md:text-sm"><Type className="mr-1.5 h-3.5 w-3.5 md:mr-2 md:h-4 md:w-4" />{t("tabTypography")}</TabsTrigger>
-            <TabsTrigger value="login" className="shrink-0 text-xs md:text-sm"><Monitor className="mr-1.5 h-3.5 w-3.5 md:mr-2 md:h-4 md:w-4" />{t("tabLogin")}</TabsTrigger>
-            <TabsTrigger value="signup" className="shrink-0 text-xs md:text-sm"><UserPlus className="mr-1.5 h-3.5 w-3.5 md:mr-2 md:h-4 md:w-4" />{t("tabSignup")}</TabsTrigger>
-            <TabsTrigger value="api" className="shrink-0 text-xs md:text-sm"><Code2 className="mr-1.5 h-3.5 w-3.5 md:mr-2 md:h-4 md:w-4" />{t("tabApi")}</TabsTrigger>
-            <TabsTrigger value="tutoriais" onClick={() => loadTutorials(1)} className="shrink-0 text-xs md:text-sm"><BookOpen className="mr-1.5 h-3.5 w-3.5 md:mr-2 md:h-4 md:w-4" />{t("tabTutorials")}</TabsTrigger>
-            <TabsTrigger value="logout" className="shrink-0 text-xs md:text-sm"><LogOut className="mr-1.5 h-3.5 w-3.5 md:mr-2 md:h-4 md:w-4" />{t("tabForceLogout")}</TabsTrigger>
-            <TabsTrigger value="masterkey" className="shrink-0 text-xs md:text-sm"><Key className="mr-1.5 h-3.5 w-3.5 md:mr-2 md:h-4 md:w-4" />{t("tabMasterkey")}</TabsTrigger>
-            <TabsTrigger value="criptografia" className="shrink-0 text-xs md:text-sm"><Lock className="mr-1.5 h-3.5 w-3.5 md:mr-2 md:h-4 md:w-4" />{t("tabEncryption")}</TabsTrigger>
-            <TabsTrigger value="socket" className="shrink-0 text-xs md:text-sm"><Zap className="mr-1.5 h-3.5 w-3.5 md:mr-2 md:h-4 md:w-4" />{t("tabSocket")}</TabsTrigger>
+        <div className="mb-4">
+          <TabsList className="grid w-full grid-cols-3 md:grid-cols-5 xl:grid-cols-7 h-auto gap-1">
+            <TabsTrigger value="cores" className="min-w-0 h-full whitespace-normal text-center leading-tight px-2 md:px-3 text-xs md:text-sm"><Palette className="mr-1.5 h-3.5 w-3.5 shrink-0 md:mr-2 md:h-4 md:w-4" />{t("tabColors")}</TabsTrigger>
+            <TabsTrigger value="sons" className="min-w-0 h-full whitespace-normal text-center leading-tight px-2 md:px-3 text-xs md:text-sm"><Volume2 className="mr-1.5 h-3.5 w-3.5 shrink-0 md:mr-2 md:h-4 md:w-4" />{t("tabSounds")}</TabsTrigger>
+            <TabsTrigger value="branding" className="min-w-0 h-full whitespace-normal text-center leading-tight px-2 md:px-3 text-xs md:text-sm"><Image className="mr-1.5 h-3.5 w-3.5 shrink-0 md:mr-2 md:h-4 md:w-4" />{t("tabBranding")}</TabsTrigger>
+            <TabsTrigger value="tipografia" className="min-w-0 h-full whitespace-normal text-center leading-tight px-2 md:px-3 text-xs md:text-sm"><Type className="mr-1.5 h-3.5 w-3.5 shrink-0 md:mr-2 md:h-4 md:w-4" />{t("tabTypography")}</TabsTrigger>
+            <TabsTrigger value="login" className="min-w-0 h-full whitespace-normal text-center leading-tight px-2 md:px-3 text-xs md:text-sm"><Monitor className="mr-1.5 h-3.5 w-3.5 shrink-0 md:mr-2 md:h-4 md:w-4" />{t("tabLogin")}</TabsTrigger>
+            <TabsTrigger value="signup" className="min-w-0 h-full whitespace-normal text-center leading-tight px-2 md:px-3 text-xs md:text-sm"><UserPlus className="mr-1.5 h-3.5 w-3.5 shrink-0 md:mr-2 md:h-4 md:w-4" />{t("tabSignup")}</TabsTrigger>
+            <TabsTrigger value="api" className="min-w-0 h-full whitespace-normal text-center leading-tight px-2 md:px-3 text-xs md:text-sm"><Code2 className="mr-1.5 h-3.5 w-3.5 shrink-0 md:mr-2 md:h-4 md:w-4" />{t("tabApi")}</TabsTrigger>
+            <TabsTrigger value="tutoriais" onClick={() => loadTutorials(1)} className="min-w-0 h-full whitespace-normal text-center leading-tight px-2 md:px-3 text-xs md:text-sm"><BookOpen className="mr-1.5 h-3.5 w-3.5 shrink-0 md:mr-2 md:h-4 md:w-4" />{t("tabTutorials")}</TabsTrigger>
+            <TabsTrigger value="logout" className="min-w-0 h-full whitespace-normal text-center leading-tight px-2 md:px-3 text-xs md:text-sm"><LogOut className="mr-1.5 h-3.5 w-3.5 shrink-0 md:mr-2 md:h-4 md:w-4" />{t("tabForceLogout")}</TabsTrigger>
+            <TabsTrigger value="masterkey" className="min-w-0 h-full whitespace-normal text-center leading-tight px-2 md:px-3 text-xs md:text-sm"><Key className="mr-1.5 h-3.5 w-3.5 shrink-0 md:mr-2 md:h-4 md:w-4" />{t("tabMasterkey")}</TabsTrigger>
+            <TabsTrigger value="criptografia" className="min-w-0 h-full whitespace-normal text-center leading-tight px-2 md:px-3 text-xs md:text-sm"><Lock className="mr-1.5 h-3.5 w-3.5 shrink-0 md:mr-2 md:h-4 md:w-4" />{t("tabEncryption")}</TabsTrigger>
+            <TabsTrigger value="socket" className="min-w-0 h-full whitespace-normal text-center leading-tight px-2 md:px-3 text-xs md:text-sm"><Zap className="mr-1.5 h-3.5 w-3.5 shrink-0 md:mr-2 md:h-4 md:w-4" />{t("tabSocket")}</TabsTrigger>
+            {singleTenantLicense === false && (
+              <TabsTrigger value="termos" className="min-w-0 h-full whitespace-normal text-center leading-tight px-2 md:px-3 text-xs md:text-sm"><ScrollText className="mr-1.5 h-3.5 w-3.5 shrink-0 md:mr-2 md:h-4 md:w-4" />{t("tabTerms")}</TabsTrigger>
+            )}
           </TabsList>
         </div>
 
@@ -2650,6 +2668,13 @@ export default function CustomizarPage() {
         <TabsContent value="tipografia">
           <TypographyPanel />
         </TabsContent>
+
+        {/* Termos para clientes */}
+        {singleTenantLicense === false && (
+          <TabsContent value="termos">
+            <ResellerTermsPanel />
+          </TabsContent>
+        )}
       </Tabs>
 
       {/* Tutorial Form Dialog */}

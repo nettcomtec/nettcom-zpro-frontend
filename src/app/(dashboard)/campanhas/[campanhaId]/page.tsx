@@ -2,7 +2,7 @@
 
 import { formatDateTime } from "@/lib/format";
 
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useRef } from "react";
 import { useTranslations } from "next-intl";
 import { displayContactIdentity } from "@/lib/contact-identity";
 import { useParams, useRouter } from "next/navigation";
@@ -28,7 +28,7 @@ import {
   Table, TableHeader, TableBody, TableHead, TableRow, TableCell,
 } from "@/components/ui/table";
 import {
-  Users, ArrowLeft, Search, RefreshCw, Plus, Trash2, ChevronDown,
+  Users, ArrowLeft, Search, RefreshCw, Plus, Trash2, ChevronDown, Loader2,
 } from "lucide-react";
 import { toast } from "sonner";
 import {
@@ -38,6 +38,15 @@ import {
 import { fetchTags } from "@/services/tags";
 import { fetchAllUsers } from "@/services/users";
 import { estadosBR } from "@/lib/constants";
+import { AddressFilterFields } from "@/components/contatos/address-filter-fields";
+import {
+  type AddressFilter,
+  AddressFilterUnsupportedError,
+  EMPTY_ADDRESS_FILTER,
+  assertAddressFilterEcho,
+  sameAddressFilter,
+  toAddressQuery,
+} from "@/lib/address-filter";
 import { usePageAccess } from "@/hooks/use-page-access";
 import { AccessDenied } from "@/components/layout/access-denied";
 
@@ -130,6 +139,7 @@ interface AddContactsDialogProps {
 function AddContactsDialog({ open, campaignId, onClose, onAdded }: AddContactsDialogProps) {
   const t = useTranslations("campanhasDetailPage");
   const tErrors = useTranslations("errors");
+  const tAddr = useTranslations("addressFilter");
   const [tags, setTags] = useState<{ id: number; name: string; tag?: string }[]>([]);
   const [wallets, setWallets] = useState<{ id: number; name: string }[]>([]);
   const [filters, setFilters] = useState({
@@ -140,6 +150,15 @@ function AddContactsDialog({ open, campaignId, onClose, onAdded }: AddContactsDi
     wallets: [] as number[],
     searchParam: "",
   });
+  // Endereço do cadastro (bairro, cidade, UF do cadastro) APLICADO: só ele vai na busca.
+  const [addressFilter, setAddressFilter] = useState<AddressFilter>(EMPTY_ADDRESS_FILTER);
+  // Retrato do filtro com que a lista foi montada: "Adicionar" exige que seja o aplicado.
+  const [listAddressFilter, setListAddressFilter] = useState<AddressFilter | null>(null);
+  const [addressUnsupported, setAddressUnsupported] = useState(false);
+  // Filtro digitado e ainda não aplicado: "Adicionar" espera o "Aplicar".
+  const [addressDraftPending, setAddressDraftPending] = useState(false);
+  // Geração da busca: resposta de busca velha (ou de antes de reabrir o diálogo) é descartada.
+  const loadGenRef = useRef(0);
   const [contacts, setContacts] = useState<ContactForAdd[]>([]);
   const [selected, setSelected] = useState<ContactForAdd[]>([]);
   const [loadingContacts, setLoadingContacts] = useState(false);
@@ -147,8 +166,12 @@ function AddContactsDialog({ open, campaignId, onClose, onAdded }: AddContactsDi
 
   useEffect(() => {
     if (!open) return;
+    loadGenRef.current += 1;
+    setLoadingContacts(false);
     setSelected([]);
     setContacts([]);
+    setListAddressFilter(null);
+    setAddressUnsupported(false);
     Promise.all([fetchTags(), fetchAllUsers()]).then(([tagsRes, usersRes]) => {
       setTags((tagsRes?.data ?? []) as { id: number; name: string; tag?: string }[]);
       const usersArr = usersRes.data?.users ?? [];
@@ -156,24 +179,51 @@ function AddContactsDialog({ open, campaignId, onClose, onAdded }: AddContactsDi
     }).catch(() => { toast.error(tErrors("loadFailed")); });
   }, [open]);
 
-  const search = async () => {
+  // Toda busca zera a seleção e a lista: "Todos" marcado na lista anterior nunca vira público
+  // da lista nova. Sem o eco, com filtro de endereço ativo, a lista fica vazia (backend antigo
+  // ignora o filtro e devolveria o público sem ele).
+  const search = async (filter: AddressFilter = addressFilter) => {
+    const gen = ++loadGenRef.current;
     setLoadingContacts(true);
+    setSelected([]);
+    setContacts([]);
+    setListAddressFilter(null);
     try {
-      const res = await fetchContactsReportCampaign({
+      const res = await fetchContactsReportCampaign<ContactForAdd>({
         startDate: filters.startDate,
         endDate: filters.endDate,
         ddds: filters.ddds.length ? filters.ddds : undefined,
         tags: filters.tags.length ? filters.tags : undefined,
         wallets: filters.wallets.length ? filters.wallets : undefined,
         searchParam: filters.searchParam || undefined,
+        ...toAddressQuery(filter),
       });
+      if (gen !== loadGenRef.current) return;
+      assertAddressFilterEcho(filter, res?.data);
       const list = (res?.data?.contacts ?? res?.data ?? []) as ContactForAdd[];
+      setSelected([]);
       setContacts(Array.isArray(list) ? list : []);
-    } catch {
+      setListAddressFilter(filter);
+      setAddressUnsupported(false);
+    } catch (err) {
+      if (gen !== loadGenRef.current) return;
+      setSelected([]);
+      setContacts([]);
+      if (err instanceof AddressFilterUnsupportedError) {
+        setAddressUnsupported(true);
+        toast.error(tAddr("unsupported"));
+        return;
+      }
       toast.error(t("errorLoad"));
     } finally {
-      setLoadingContacts(false);
+      if (gen === loadGenRef.current) setLoadingContacts(false);
     }
+  };
+
+  // Aplicar (ou limpar) o filtro de endereço refaz a busca com os demais filtros da tela.
+  const handleAddressFilterChange = (next: AddressFilter) => {
+    setAddressFilter(next);
+    void search(next);
   };
 
   const toggle = (c: ContactForAdd) =>
@@ -184,6 +234,12 @@ function AddContactsDialog({ open, campaignId, onClose, onAdded }: AddContactsDi
 
   const handleAdd = async () => {
     if (selected.length === 0) { toast.error(t("selectAtLeastOne")); return; }
+    // Lista ainda carregando, montada com outro filtro de endereço ou filtro digitado sem
+    // "Aplicar": nada é gravado.
+    if (loadingContacts || addressDraftPending || !sameAddressFilter(listAddressFilter, addressFilter)) {
+      toast.warning(tAddr("staleList"));
+      return;
+    }
     setAdding(true);
     try {
       await addCampaignContacts(campaignId, selected.map((c) => ({ id: c.id, name: c.name || "" })));
@@ -199,7 +255,7 @@ function AddContactsDialog({ open, campaignId, onClose, onAdded }: AddContactsDi
 
   return (
     <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
-      <DialogContent className="max-w-4xl max-h-[92vh] overflow-hidden flex flex-col">
+      <DialogContent className="max-w-4xl max-h-[92vh] overflow-y-auto flex flex-col">
         <DialogHeader>
           <DialogTitle>{t("addContactsDialog")}</DialogTitle>
           <DialogDescription>{t("addContactsDialogDesc")}</DialogDescription>
@@ -273,38 +329,61 @@ function AddContactsDialog({ open, campaignId, onClose, onAdded }: AddContactsDi
               </Popover>
             </div>
           </div>
-          <div className="flex gap-2">
-            <Select
-              value={filters.ddds.join(",") || "__all__"}
-              onValueChange={(v) => setFilters((p) => ({ ...p, ddds: v === "__all__" ? [] : [v] }))}
-            >
-              <SelectTrigger className="w-[180px] h-8 text-sm">
-                <SelectValue placeholder={t("stateDdd")} />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="__all__">{t("allStates")}</SelectItem>
-                {estadosBR.map((e) => (
-                  <SelectItem key={e.sigla} value={e.sigla}>{e.nome}</SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            <Input
-              placeholder={t("searchNamePhone")}
-              value={filters.searchParam}
-              onChange={(e) => setFilters((p) => ({ ...p, searchParam: e.target.value }))}
-              onKeyDown={(e) => e.key === "Enter" && search()}
-              className="flex-1 h-8 text-sm"
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-end">
+            <div className="space-y-1.5 sm:w-[180px] sm:shrink-0">
+              <Label className="text-xs">{t("stateDdd")}</Label>
+              <Select
+                value={filters.ddds.join(",") || "__all__"}
+                onValueChange={(v) => setFilters((p) => ({ ...p, ddds: v === "__all__" ? [] : [v] }))}
+              >
+                <SelectTrigger className="w-full h-8 text-sm">
+                  <SelectValue placeholder={t("stateDdd")} />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="__all__">{t("allStates")}</SelectItem>
+                  {estadosBR.map((e) => (
+                    <SelectItem key={e.sigla} value={e.sigla}>{e.nome}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="flex flex-1 gap-2">
+              <Input
+                placeholder={t("searchNamePhone")}
+                value={filters.searchParam}
+                onChange={(e) => setFilters((p) => ({ ...p, searchParam: e.target.value }))}
+                onKeyDown={(e) => e.key === "Enter" && search()}
+                className="flex-1 h-8 text-sm"
+              />
+              <Button size="sm" onClick={() => void search()} disabled={loadingContacts} className="h-8">
+                {loadingContacts ? "..." : t("search")}
+              </Button>
+            </div>
+          </div>
+          <div className="space-y-2 border-t pt-3">
+            <AddressFilterFields
+              value={addressFilter}
+              onChange={handleAddressFilterChange}
+              mode="apply"
+              layout="row"
+              showTitle
+              disabled={adding}
+              onPendingChange={setAddressDraftPending}
             />
-            <Button size="sm" onClick={search} disabled={loadingContacts} className="h-8">
-              {loadingContacts ? "..." : t("search")}
-            </Button>
+            {addressUnsupported && (
+              <p role="alert" className="text-xs text-destructive">{tAddr("unsupported")}</p>
+            )}
           </div>
         </fieldset>
 
         <div className="flex-1 overflow-auto border rounded-lg min-h-[180px]">
           {contacts.length === 0 ? (
             <div className="flex items-center justify-center h-full min-h-[120px]">
-              <p className="text-sm text-muted-foreground">{t("noContacts")}</p>
+              {loadingContacts ? (
+                <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+              ) : (
+                <p className="text-sm text-muted-foreground">{t("noContacts")}</p>
+              )}
             </div>
           ) : (
             <Table>
@@ -345,7 +424,7 @@ function AddContactsDialog({ open, campaignId, onClose, onAdded }: AddContactsDi
 
         <DialogFooter className="shrink-0">
           <Button variant="outline" onClick={onClose}>{t("cancel")}</Button>
-          <Button onClick={handleAdd} disabled={adding || selected.length === 0}>
+          <Button onClick={handleAdd} disabled={adding || loadingContacts || selected.length === 0}>
             {adding ? t("adding") : t("addNContacts", { n: selected.length })}
           </Button>
         </DialogFooter>

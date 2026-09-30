@@ -6,6 +6,14 @@ import { getPublicVapidKey, saveUserSubscription } from "@/services/push-service
 import { logger } from "@/lib/logger";
 import { toast } from "sonner";
 import { useTranslations } from "next-intl";
+import {
+  applicationServerKeyToBase64Url,
+  isPushSupported,
+  normalizeVapidKey,
+  pushFlagKey,
+  readStoredPushEndpoint,
+  waitServiceWorkerReady,
+} from "@/lib/push-subscription";
 
 function urlBase64ToUint8Array(base64String: string): Uint8Array {
   const padding = "=".repeat((4 - (base64String.length % 4)) % 4);
@@ -46,6 +54,13 @@ function getDeviceInfo(): string {
 // concorrentes no mesmo pushManager.
 let subscribeInFlight = false;
 
+// Self-heal da assinatura: no máximo 1 verificação por minuto por processo. O
+// hook é montado em dois lugares (header e PushNotifications) e cada um
+// dispararia a sua no mesmo boot.
+let verifyInFlight = false;
+let lastVerifyAt = 0;
+const VERIFY_MIN_INTERVAL_MS = 60_000;
+
 export function usePushNotifications() {
   const t = useTranslations("usePushNotifications");
   const { user } = useAuthStore();
@@ -55,7 +70,7 @@ export function usePushNotifications() {
 
   useEffect(() => {
     if (!tenantId) return;
-    setSubscribed(!!localStorage.getItem(`subscriptionData_${tenantId}`));
+    setSubscribed(!!localStorage.getItem(pushFlagKey(tenantId)));
     setIsPWA(
       window.matchMedia("(display-mode: standalone)").matches ||
         !!(navigator as Navigator & { standalone?: boolean }).standalone
@@ -64,15 +79,15 @@ export function usePushNotifications() {
 
   // fromUserGesture: default true preserva o comportamento do clique em
   // PushNotifications.tsx (que passa o MouseEvent como 1º argumento — truthy);
-  // o auto-subscribe do useEffect passa `false` explicitamente. Tipado como
-  // unknown para continuar compatível com onClick={subscribeToPush}.
+  // o caminho automático (boot/self-heal do PWA) passa `false` explicitamente.
+  // Tipado como unknown para continuar compatível com onClick={subscribeToPush}.
   const subscribeToPush = useCallback(async (fromUserGesture: unknown = true) => {
     if (subscribeInFlight) return;
     subscribeInFlight = true;
     try {
       const isUserGesture = fromUserGesture !== false;
 
-      if (!("serviceWorker" in navigator) || !("PushManager" in window) || !window.isSecureContext) {
+      if (!isPushSupported()) {
         toast.error(t("unsupportedBrowser"));
         return;
       }
@@ -106,11 +121,11 @@ export function usePushNotifications() {
         return;
       }
 
-      let registration: ServiceWorkerRegistration;
-      try {
-        registration = await navigator.serviceWorker.ready;
-      } catch (error) {
-        logger.error("Web Push: serviceWorker.ready falhou", error);
+      // `serviceWorker.ready` nativo nunca resolve sem SW registrado — o clique
+      // ficava pendurado sem toast e o singleton acima nunca era liberado.
+      const registration = await waitServiceWorkerReady(15000);
+      if (!registration) {
+        logger.error("Web Push: serviceWorker.ready não resolveu (sem SW ativo?)");
         toast.error(t("serviceWorkerError"));
         return;
       }
@@ -135,9 +150,12 @@ export function usePushNotifications() {
         const deviceInfo = getDeviceInfo();
         await saveUserSubscription(subscription, deviceInfo);
 
-        localStorage.setItem(`subscriptionData_${tenantId}`, JSON.stringify(subscription));
+        localStorage.setItem(pushFlagKey(tenantId), JSON.stringify(subscription));
         setSubscribed(true);
-        toast.success(t("subscribeSuccess"));
+        // Toast de sucesso só no clique: a reinscrição automática do boot é
+        // rotina (depois de "Atualizar agora", troca de usuário, rotação de
+        // endpoint) e não pede atenção de ninguém.
+        if (isUserGesture) toast.success(t("subscribeSuccess"));
       } catch (error: unknown) {
         const e = error as { response?: { status?: number; data?: unknown }; message?: string };
         logger.error("Web Push: falha ao salvar subscription no servidor", { status: e?.response?.status, data: e?.response?.data, message: e?.message });
@@ -148,19 +166,93 @@ export function usePushNotifications() {
     }
   }, [tenantId, t]);
 
-  // Auto-subscribe em modo PWA se ainda não inscrito — apenas quando a permissão
-  // já foi concedida antes (nunca dispara o prompt nativo sem gesto do usuário).
-  useEffect(() => {
-    if (
-      isPWA &&
-      !subscribed &&
-      tenantId &&
-      typeof Notification !== "undefined" &&
-      Notification.permission === "granted"
-    ) {
-      subscribeToPush(false);
+  // Self-heal no PWA: a flag do localStorage NÃO prova que o navegador ainda
+  // tem assinatura. "Atualizar agora" desregistra o service worker (a assinatura
+  // morre junto), o navegador pode rotacionar o endpoint, a chave VAPID do
+  // tenant pode ter sido regenerada e outro usuário pode ter usado o aparelho.
+  // Em todos esses casos a flag continuava dizendo "inscrito" e ninguém refazia
+  // a assinatura — no iPhone, onde o PWA é o único lugar com push, o sintoma era
+  // "iOS não recebe". Só roda com permissão já concedida: nunca abre o prompt
+  // nativo sem gesto do usuário.
+  const verifySubscription = useCallback(async (force = false) => {
+    if (!isPWA || !tenantId || !isPushSupported()) return;
+    if (typeof Notification === "undefined" || Notification.permission !== "granted") return;
+    if (verifyInFlight) return;
+    const now = Date.now();
+    if (!force && now - lastVerifyAt < VERIFY_MIN_INTERVAL_MS) return;
+    verifyInFlight = true;
+    lastVerifyAt = now;
+    try {
+      const registration = await waitServiceWorkerReady(15000);
+      if (!registration) return;
+
+      const current = await registration.pushManager.getSubscription();
+      if (!current) {
+        localStorage.removeItem(pushFlagKey(tenantId));
+        setSubscribed(false);
+        await subscribeToPush(false);
+        return;
+      }
+
+      let serverKey: string | null = null;
+      try {
+        const { data } = await getPublicVapidKey(tenantId);
+        serverKey = data?.publicKeyVapid ? normalizeVapidKey(data.publicKeyVapid) : null;
+      } catch (error) {
+        logger.warn("Web Push: self-heal sem a chave do servidor, mantendo a assinatura atual", error);
+      }
+      const localKey = applicationServerKeyToBase64Url(current.options?.applicationServerKey);
+      if (serverKey && localKey && serverKey !== localKey) {
+        // Chave do tenant mudou: toda assinatura feita com a antiga responde 403
+        // para sempre. Refaz com a nova.
+        await subscribeToPush(false);
+        return;
+      }
+
+      const storedEndpoint = readStoredPushEndpoint(tenantId);
+      if (storedEndpoint === current.endpoint) {
+        setSubscribed(true);
+        return;
+      }
+
+      if (storedEndpoint === null) {
+        // Existe assinatura, mas nada prova que é deste usuário (flag limpa por
+        // logout forçado ou troca de usuário no mesmo aparelho): rotaciona. O
+        // endpoint antigo some do servidor com o 410 do próximo envio.
+        await subscribeToPush(false);
+        return;
+      }
+
+      // Endpoint rotacionado pelo navegador (pushsubscriptionchange): a chave e
+      // o usuário são os mesmos, basta re-salvar no servidor.
+      try {
+        await saveUserSubscription(current, getDeviceInfo());
+        localStorage.setItem(pushFlagKey(tenantId), JSON.stringify(current));
+        setSubscribed(true);
+      } catch (error) {
+        logger.error("Web Push: falha ao re-salvar assinatura rotacionada", error);
+      }
+    } catch (error) {
+      logger.error("Web Push: verificação da assinatura falhou", error);
+    } finally {
+      verifyInFlight = false;
     }
-  }, [isPWA, subscribed, tenantId, subscribeToPush]);
+  }, [isPWA, tenantId, subscribeToPush]);
+
+  useEffect(() => {
+    verifySubscription();
+  }, [verifySubscription]);
+
+  // O service worker avisa quando o navegador rotacionou a assinatura com o app
+  // aberto (handler `pushsubscriptionchange` em app/sw.ts).
+  useEffect(() => {
+    if (typeof navigator === "undefined" || !("serviceWorker" in navigator)) return;
+    const onMessage = (event: MessageEvent) => {
+      if (event.data?.type === "PUSH_SUBSCRIPTION_CHANGED") verifySubscription(true);
+    };
+    navigator.serviceWorker.addEventListener("message", onMessage);
+    return () => navigator.serviceWorker.removeEventListener("message", onMessage);
+  }, [verifySubscription]);
 
   return { subscribed, isPWA, subscribeToPush };
 }

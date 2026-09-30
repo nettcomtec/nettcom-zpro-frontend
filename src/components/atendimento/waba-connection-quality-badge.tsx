@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useTranslations } from "next-intl";
-import { Loader2, BadgeCheck, BadgeAlert, BadgeX, Badge as BadgeIcon, Smartphone, CloudCog, Ban, ShieldAlert } from "lucide-react";
+import { Loader2, BadgeCheck, BadgeAlert, BadgeX, Badge as BadgeIcon, Smartphone, CloudCog, Ban, ShieldAlert, CreditCard } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import {
   fetchWabaPhoneQualityRating,
@@ -13,6 +13,7 @@ import {
   wabaPhoneStatusBadgeClasses,
   wabaPhoneStatusI18nKey,
 } from "@/lib/waba-phone-quality";
+import { findSendHealthByPhoneNumberId, useMetaSendHealth } from "@/lib/meta-send-health";
 import { cn } from "@/lib/utils";
 import {
   Tooltip,
@@ -38,6 +39,8 @@ type Props = {
   platformCloudLabel?: string;
   platformCoexTooltip?: string;
   platformCloudTooltip?: string;
+  /** Não mostra o selo de pagamento/bloqueio de envio (quem já exibe o aviso do canal, como o card de /sessoes). */
+  hideSendHealth?: boolean;
 };
 
 export function WabaConnectionQualityBadge({
@@ -56,8 +59,13 @@ export function WabaConnectionQualityBadge({
   platformCloudLabel,
   platformCoexTooltip,
   platformCloudTooltip,
+  hideSendHealth = false,
 }: Props) {
   const tStatus = useTranslations("metaHealth");
+  const tSend = useTranslations("metaSendHealth");
+  // Alerta de envio (pagamento/bloqueio) vem do cache compartilhado, sem request
+  // próprio; casa só pelo phone_number_id do canal (tokenAPI), nunca pelo número exibido.
+  const sendHealthRows = useMetaSendHealth(!hideSendHealth);
   const [rating, setRating] = useState<string | null>(null);
   const [phoneStatus, setPhoneStatus] = useState<string | null>(null);
   const [platform, setPlatform] = useState<{ platformType?: string; isOnBizApp?: boolean } | null>(null);
@@ -104,17 +112,75 @@ export function WabaConnectionQualityBadge({
     };
   }, [bmToken, tokenAPI, wabaId, phoneHint, wabaVersion, hasToken, hasWaba]);
 
-  if (!hasToken || !hasWaba) return null;
+  // Selo de envio (docs/PLANO_ALERTA_PAGAMENTO_WABA.md, F5): pagamento recusado (131042)
+  // ou envio bloqueado pela Meta. Calculado antes dos retornos antecipados para aparecer
+  // também sem token/WABA, durante o carregamento e sem quality_rating. "limited" não entra.
+  const sendHealthNode = (() => {
+    if (hideSendHealth) return null;
+    const sendHealth = findSendHealthByPhoneNumberId(sendHealthRows, tokenAPI);
+    if (!sendHealth || (sendHealth.kind !== "payment" && sendHealth.kind !== "blocked")) return null;
+    const isPayment = sendHealth.kind === "payment";
+    const label = isPayment ? tSend("badgePayment") : tSend("badgeBlocked");
+    const tip = tSend("badgeTooltip");
+    const SendIcon = isPayment ? CreditCard : ShieldAlert;
+
+    if (asIcon) {
+      const iconCls = isPayment ? "text-red-500 dark:text-red-400" : "text-amber-500 dark:text-amber-400";
+      return (
+        <TooltipProvider delayDuration={200}>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <SendIcon role="status" aria-label={label} className={cn("w-4 h-4 flex-shrink-0", iconCls, className)} />
+            </TooltipTrigger>
+            <TooltipContent className="max-w-xs">
+              <p className="font-medium">{label}</p>
+              <p className="text-xs">{tip}</p>
+            </TooltipContent>
+          </Tooltip>
+        </TooltipProvider>
+      );
+    }
+
+    const badgeCls = isPayment
+      ? "bg-red-500 hover:bg-red-500/90 text-white border-transparent"
+      : "bg-amber-500 hover:bg-amber-500/90 text-white border-transparent";
+    const badge = (
+      <Badge role="status" className={cn(badgeCls, "gap-1 whitespace-nowrap", className)}>
+        <SendIcon className="w-3 h-3" />
+        {label}
+      </Badge>
+    );
+    return (
+      <TooltipProvider delayDuration={200}>
+        <Tooltip>
+          <TooltipTrigger asChild>{badge}</TooltipTrigger>
+          <TooltipContent className="max-w-xs">
+            <p className="text-xs">{tip}</p>
+          </TooltipContent>
+        </Tooltip>
+      </TooltipProvider>
+    );
+  })();
+
+  if (!hasToken || !hasWaba) return sendHealthNode;
 
   if (loading) {
     if (asIcon) {
-      return <Loader2 className={cn("w-3 h-3 animate-spin text-muted-foreground flex-shrink-0", className)} />;
+      return (
+        <>
+          {sendHealthNode}
+          <Loader2 className={cn("w-3 h-3 animate-spin text-muted-foreground flex-shrink-0", className)} />
+        </>
+      );
     }
     return (
-      <Badge variant="outline" className={className}>
-        <Loader2 className="w-3 h-3 mr-1 animate-spin" />
-        {loadingLabel}
-      </Badge>
+      <>
+        {sendHealthNode}
+        <Badge variant="outline" className={className}>
+          <Loader2 className="w-3 h-3 mr-1 animate-spin" />
+          {loadingLabel}
+        </Badge>
+      </>
     );
   }
 
@@ -224,8 +290,8 @@ export function WabaConnectionQualityBadge({
   })();
 
   if (errored || !rating) {
-    if (!statusNode && !platformNode) return null;
-    return <>{statusNode}{platformNode}</>;
+    if (!statusNode && !sendHealthNode && !platformNode) return null;
+    return <>{statusNode}{sendHealthNode}{platformNode}</>;
   }
 
   if (asIcon) {
@@ -240,6 +306,7 @@ export function WabaConnectionQualityBadge({
     return (
       <>
         {statusNode}
+        {sendHealthNode}
         <TooltipProvider delayDuration={200}>
           <Tooltip>
             <TooltipTrigger asChild>
@@ -265,6 +332,7 @@ export function WabaConnectionQualityBadge({
   return (
     <>
       {statusNode}
+      {sendHealthNode}
       <TooltipProvider delayDuration={200}>
         <Tooltip>
           <TooltipTrigger asChild>

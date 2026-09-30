@@ -15,6 +15,7 @@ import api from "@/lib/api";
 import { useAuthStore } from "@/stores/auth-store";
 import { classifyWabaPhoneStatus, isWabaPhoneStatusProblem } from "@/lib/waba-phone-quality";
 import { useMetaPhoneHealthSocket } from "@/hooks/use-meta-phone-health-socket";
+import { useMetaChannelsHref } from "@/lib/meta-send-health";
 
 interface PhoneHealthRow {
   phoneNumberId: string;
@@ -26,6 +27,9 @@ const DISMISS_KEY = "metaBannedBannerDismissedSig";
 
 export function MetaBannedBanner() {
   const t = useTranslations("metaHealth");
+  const t2 = useTranslations("metaSendHealth");
+  // Tela de canais que ESTE perfil abre (D8); null = nenhuma, e o link some.
+  const channelsHref = useMetaChannelsHref();
   const { isAuthenticated } = useAuthStore();
   const [affected, setAffected] = useState<PhoneHealthRow[]>([]);
   const [dismissedSig, setDismissedSig] = useState<string | null>(null);
@@ -105,16 +109,18 @@ export function MetaBannedBanner() {
       <div className="flex-1 min-w-0">
         <span className="text-red-900 dark:text-red-200 font-medium">{message}</span>
       </div>
-      <Link
-        href="/configuracoes/meta"
-        className="text-red-700 dark:text-red-300 underline hover:text-red-900 dark:hover:text-red-100 shrink-0"
-      >
-        {t("viewChannelCta")}
-      </Link>
+      {channelsHref && (
+        <Link
+          href={channelsHref}
+          className="text-red-700 dark:text-red-300 underline hover:text-red-900 dark:hover:text-red-100 shrink-0"
+        >
+          {t("viewChannelCta")}
+        </Link>
+      )}
       <button
         onClick={handleDismiss}
         className="text-red-600 dark:text-red-400 hover:text-red-800 dark:hover:text-red-200 shrink-0"
-        aria-label="Dismiss"
+        aria-label={t2("dismiss")}
       >
         <X className="h-4 w-4" />
       </button>

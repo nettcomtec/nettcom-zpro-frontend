@@ -15,6 +15,7 @@ import {
   LayoutGrid, FileDown, Shield, ShieldCheck, RefreshCw, Wallet,
   MailOpen, List, Send, ChevronDown, PhoneCall, PhoneOutgoing, Loader2,
   Pencil, Trash2, Sparkles, AlertTriangle, TrendingUp, TrendingDown, Meh,
+  AtSign, MapPin,
 } from "lucide-react";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Button, buttonVariants } from "@/components/ui/button";
@@ -51,8 +52,10 @@ import { useLiveMode } from "@/hooks/use-live-mode";
 import { useParentBridge } from "@/hooks/use-parent-bridge";
 import { getReadableTextColor } from "@/lib/color-contrast";
 import { ContactEditDialog } from "@/components/contatos/contact-edit-dialog";
+import { ContactCrmCard } from "@/components/contact-crm/contact-crm-card";
 import { ReopenConfirmDialog } from "@/components/atendimento/reopen-confirm-dialog";
-import { findCrossChannelSiblingForTicket, type ExistingOpenTicket } from "@/lib/check-existing-open-ticket";
+import { TransferChannelConfirmDialog } from "@/components/atendimento/transfer-channel-confirm-dialog";
+import { findCrossChannelSiblingForTicket, findOpenTicketOnTargetChannel, type ExistingOpenTicket } from "@/lib/check-existing-open-ticket";
 import { buildReopenNotices, type ReopenNotices } from "@/lib/reopen-notices";
 import { useTicketStore } from "@/stores/ticket-store";
 import type { Ticket } from "@/stores/ticket-store";
@@ -74,6 +77,7 @@ import { fetchWavoipCallsByTicket, createWavoipCall, updateWavoipCall, createCal
 import { initiateWabaCall, sendWabaCallPermissionRequest } from "@/services/waba-calls";
 import { getWabaRtc } from "@/components/waba-call/waba-call-provider";
 import { useWabaCallStore } from "@/stores/waba-call-store";
+import { getActiveWhatsappCall } from "@/lib/call-busy";
 import { createCallLog, fetchCallLogs, type CallLog as CallLogRecord } from "@/services/call-logs";
 import { fetchReasons, type Reason } from "@/services/reasons";
 import { fetchOpportunitiesByContact, fetchPipelines, fetchStages, createOpportunity, updateOpportunity, deleteOpportunity } from "@/services/funnel";
@@ -119,7 +123,7 @@ const INTEGRATION_CONFIG: { label: string; settingKey: string; ticketField: stri
   { label: "Deepseek", settingKey: "deepseek", ticketField: "deepseekStatus" },
 ];
 
-/** Abas no modelo Vue: Perfil, Atendimento, Gestão, Integrações, Utilitários */
+/** Abas no modelo front legado: Perfil, Atendimento, Gestão, Integrações, Utilitários */
 export type TicketDetailTab = "perfil" | "atendimento" | "gestao" | "integracoes" | "utilitarios";
 
 /** Aceita também os nomes antigos para compatibilidade com openTab do header */
@@ -150,6 +154,14 @@ function mapDefaultTab(tab: TicketDetailDefaultTab): TicketDetailTab {
 // Nota do log com URLs/e-mails clicaveis — mesmo tratamento da nota exibida no
 // chat. Sem markdown: notas costumam trazer PIX copia-e-cola e linha digitavel,
 // onde "*" e "_" fazem parte do codigo.
+/** Nota de avaliação vem como STRING do backend e pode ser texto (pesquisa pendente/external). */
+function evalScore(value: unknown): number | null {
+  const s = String(value ?? "").trim();
+  if (s === "") return null;
+  const n = Number(s);
+  return Number.isFinite(n) ? n : null;
+}
+
 function NoteLogText({ text }: { text: string }) {
   return (
     <p className="whitespace-pre-wrap [overflow-wrap:anywhere] text-xs">
@@ -196,12 +208,14 @@ export function TicketDetail({
   const t = useTranslations("ticketDetail");
   const tEx = useTranslations("atendimentoChatExtra");
   const tGcal = useTranslations("gcalOpportunity");
+  // Namespace dos toasts de chamada (o provider usa as mesmas chaves) — o `t`
+  // deste componente é de "ticketDetail" e não resolveria "wabaCallProvider.*".
+  const tWabaCallProvider = useTranslations("wabaCallProvider");
   const router = useRouter();
   const { settings } = useSettings(INTEGRATION_CONFIG.map((c) => c.settingKey));
   // Seletores escopados (referências estáveis) — evita re-render do TicketDetail a
   // cada mudança de status do SIP / tick de chamada vinda da store do webphone.
-  const toggleWebphone = useWebphoneStore((s) => s.toggleVisibility);
-  const startCall = useWebphoneStore((s) => s.startCall);
+  const requestSipCall = useWebphoneStore((s) => s.requestSipCall);
   const { user, isRestrictedUser, getConfigValue, syncUserFromLocalStorage, hasPermission } = useAuthStore();
   // Booleans derivados (não o objeto planFeatures) para servirem de dep de efeito:
   // funil e Google Agenda são capabilities de plano e este painel abre em toda tela
@@ -222,12 +236,12 @@ export function TicketDetail({
   const activeIntegrations = INTEGRATION_CONFIG.filter(
     (c) => (settings[c.settingKey] || "").toLowerCase() === "enabled"
   );
-  // Telephony conditions — mirrors Vue: !isGroup && channel !== 'webchat' && !restrictedUser && (wavoip || sip || sms || vapi)
+ // Telephony conditions — mirrors the legacy front: !isGroup && channel !== 'webchat' && !restrictedUser && (wavoip || sip || sms || vapi)
   const whatsappData = ticketData.whatsapp as Record<string, unknown> | undefined;
   const bloquearWavoip = !!user?.blockWavoip;
   const hasWavoip = wavoipEnabled && !!whatsappData?.wavoipToken && !bloquearWavoip;
-  // Vue updates sipEnabled in localStorage.usuario via atualizarUsuario() post-login.
-  // Read from localStorage as source of truth to stay in sync with Vue.
+ // Front legado updates sipEnabled in localStorage.usuario via atualizarUsuario() post-login.
+ // Read from localStorage as source of truth to stay in sync with the legacy front.
   const localUsuario = (() => {
     if (typeof window === "undefined") return {} as Record<string, unknown>;
     try { return JSON.parse(localStorage.getItem("usuario") || "{}") as Record<string, unknown>; }
@@ -267,6 +281,11 @@ export function TicketDetail({
   const [chatbotFlow, setChatbotFlow] = useState("");
   const [channelOpen, setChannelOpen] = useState(false);
   const [channelId, setChannelId] = useState("");
+  // Aviso consultivo da troca de canal: contato já tem atendimento no destino.
+  // mode distingue a origem (transferência simples × handoff híbrido) para o
+  // onConfirm retomar o fluxo certo.
+  const [channelConfirmSibling, setChannelConfirmSibling] = useState<ExistingOpenTicket | null>(null);
+  const [channelConfirmMode, setChannelConfirmMode] = useState<"transfer" | "handoff" | null>(null);
 
   // ── Retorno rápido / carência manual (botReopenOverride) ───────────────────
   // Habilita, só para ESTE atendimento, o retorno rápido do cliente para um
@@ -559,7 +578,7 @@ export function TicketDetail({
     }
   }, [open, defaultTab]);
 
-  // Load tenant settings (smsAtivo / vapi) — same logic as Vue's listTenantPorId
+ // Load tenant settings (smsAtivo / vapi) — same logic as the legacy front's listTenantPorId
   useEffect(() => {
     if (!open || !user?.tenantId) return;
     fetchTenantById(user.tenantId).then((res) => {
@@ -621,7 +640,7 @@ export function TicketDetail({
   useEffect(() => {
     if (open && ticket) {
       const t = ticket as unknown as Record<string, unknown>;
-      // Vue stores kanban on the contact; fallback to ticket-level fields
+ // The legacy front stores kanban on the contact; fallback to ticket-level fields
       const kanbanVal = ticket.contact?.kanban ?? t.kanban ?? t.kanbanId;
       setKanbanSelecionado(kanbanVal ? String(kanbanVal) : "");
       setMotivoSelecionado(t.reasons ? String(t.reasons) : (t.reasonId ? String(t.reasonId) : ""));
@@ -678,7 +697,7 @@ export function TicketDetail({
       if (behavior === "closeOnResolve" || behavior === "waitClientReply" || behavior === "timer") {
         setIsClosing(true);
         try {
-          await sendEvaluationForTicket(ticket, { config, questionLabel: "Avalie este atendimento:" });
+          await sendEvaluationForTicket(ticket, { config, questionLabel: tEx("evaluationLabel") });
           if (behavior === "closeOnResolve") {
             await updateTicket(ticket.id, { status: "closed" });
             toast.success(t("ticketClosed"));
@@ -797,7 +816,7 @@ export function TicketDetail({
     }
   };
 
-  const handleTransferChannel = async () => {
+  const doTransferChannel = async () => {
     if (!channelId) return;
     const selectedWa = whatsapps.find((w) => w.id === parseInt(channelId));
     const channel = selectedWa?.type ?? "baileys";
@@ -812,10 +831,45 @@ export function TicketDetail({
     }
   };
 
+  const handleTransferChannel = async () => {
+    if (!channelId) return;
+    // Aviso consultivo (paridade com a reabertura): sem ele a transferência criava
+    // a segunda conversa no canal de destino em silêncio. Nunca bloqueia — o
+    // pré-check é best-effort (erro → null → transfere direto).
+    const sibling = await findOpenTicketOnTargetChannel({
+      ticketId: ticket.id,
+      number: ticket.contact?.number,
+      targetWhatsappId: parseInt(channelId),
+    });
+    if (sibling) {
+      setChannelConfirmSibling(sibling);
+      setChannelConfirmMode("transfer");
+      return;
+    }
+    await doTransferChannel();
+  };
+
   // Handoff híbrido: 1) envia a mensagem-ponte pelo fluxo normal de envio do
   // ticket WABA (mesmo payload do doSendProtocol; idFront evita bubble duplicado),
   // 2) aguarda sucesso, 3) transfere o ticket para o canal vinculado.
   const handleHandoff = async () => {
+    if (!handoffTarget || !handoffTargetNumber) return;
+    // Mesmo aviso consultivo da transferência de canal: o destino do handoff pode
+    // já ter atendimento aberto deste contato. Checa ANTES da mensagem-ponte.
+    const sibling = await findOpenTicketOnTargetChannel({
+      ticketId: ticket.id,
+      number: ticket.contact?.number,
+      targetWhatsappId: handoffTarget.id,
+    });
+    if (sibling) {
+      setChannelConfirmSibling(sibling);
+      setChannelConfirmMode("handoff");
+      return;
+    }
+    await doHandoff();
+  };
+
+  const doHandoff = async () => {
     if (!handoffTarget || !handoffTargetNumber) return;
     setHandoffSending(true);
     try {
@@ -1243,7 +1297,7 @@ export function TicketDetail({
       } catch {
         config = null;
       }
-      await sendEvaluationForTicket(ticket, { config, questionLabel: "Avalie este atendimento:" });
+      await sendEvaluationForTicket(ticket, { config, questionLabel: tEx("evaluationLabel") });
       toast.success(t("evaluationSent"));
       onRefresh?.();
     } catch {
@@ -1396,7 +1450,7 @@ export function TicketDetail({
 
   const handleSaveMotivo = async () => {
     try {
-      // Vue: AtualizarTicket(id, { reasons: motivoSelecionado })
+ // Front legado: AtualizarTicket(id, { reasons: motivoSelecionado })
       await updateTicket(ticket.id, { reasons: motivoSelecionado ? Number(motivoSelecionado) : null });
       toast.success(motivoSelecionado ? t("motiveSaved") : t("motiveRemoved"));
       onRefresh?.();
@@ -1419,7 +1473,7 @@ export function TicketDetail({
   const handleSaveValor = async () => {
     const valor = valorNegociado ? parseFloat(valorNegociado) : null;
     try {
-      // Vue: AtualizarTicket(id, { value: valorNegociado })
+ // Front legado: AtualizarTicket(id, { value: valorNegociado })
       await updateTicket(ticket.id, { value: valor });
       toast.success(t("valueSaved"));
       onRefresh?.();
@@ -1708,7 +1762,7 @@ export function TicketDetail({
       ? channelToken.split(",").map((t) => t.trim())
       : [channelToken];
 
-    // Inicia chamada via SDK nativo — o widget nativo exibe a UI (igual ao Vue outcomingCall)
+ // Inicia chamada via SDK nativo — o widget nativo exibe a UI (igual ao front legado outcomingCall)
     const callResult = wavoip.call.startCall(contactNumber, tokenList) as {
       onPeerAccept?: (cb: (active?: unknown) => void) => void;
       onPeerReject?: (cb: () => void) => void;
@@ -1739,7 +1793,7 @@ export function TicketDetail({
       }
     }).catch(() => {});
 
-    // Nota de ligação no ticket (igual ao Vue CriarNota)
+ // Nota de ligação no ticket (igual ao front legado CriarNota)
     createCallNote({
       notes: JSON.stringify({ title: t("voiceCallTitle"), subtitle: t("voiceCallSubtitle") }),
       ticketId: ticket.id,
@@ -1818,11 +1872,21 @@ export function TicketDetail({
 
   const handleAsteriskCall = () => {
     if (!contactNumber) return;
-    toggleWebphone(true);
-    startCall({ phone: contactNumber, tag: contactName, direction: "outgoing" });
+    // Pedido de discagem consumido pelo AsteriskWebphone (Inviter + INVITE).
+    // Setar callStatus "calling" direto aqui deixava o modal em "Chamando..."
+    // cosmético sem nenhum INVITE no fio.
+    requestSipCall({ phone: contactNumber, tag: contactName });
   };
 
   const handleWabaCall = async () => {
+    // Chamada de WhatsApp em curso: sair ANTES de qualquer coisa que toque no
+    // RTC ou no store. O createOffer abaixo passa pelo freshPeerConnection, que
+    // fecha o PeerConnection anterior — clicar em Ligar durante um atendimento
+    // derrubava a chamada em andamento.
+    if (getActiveWhatsappCall()) {
+      try { toast.info(tWabaCallProvider("alreadyOnCall")); } catch {}
+      return;
+    }
     const whatsappId = ticket.whatsapp?.id
       ?? (ticket as any).whatsappId
       ?? (ticketData as any).whatsappId;
@@ -1844,14 +1908,19 @@ export function TicketDetail({
       let result: any;
       if (callChannel === "gupshup") {
         const { initiateGupshupCall } = await import("@/services/gupshup-calls");
-        result = await initiateGupshupCall({ whatsappId, to, sdpOffer });
+        // O backend do Gupshup resolve canal e destinatário pelo ticketId; sem
+        // ele o controller fazia Number(undefined) = NaN e toda ligação falhava.
+        result = await initiateGupshupCall({ whatsappId, to, sdpOffer, ticketId: ticket.id });
       } else if (callChannel === "dialog360") {
         const { initiateDialog360Call } = await import("@/services/dialog360-calls");
         result = await initiateDialog360Call({ whatsappId, to, sdpOffer });
       } else {
         result = await initiateWabaCall({ whatsappId, to, sdpOffer });
       }
-      const callId = result?.calls?.[0]?.id || '';
+      // Gupshup V3 devolve o id em messages[0].id (WABA/Dialog360 em calls[0].id):
+      // sem o fallback o store nascia com callId vazio e os filtros por chamada
+      // (e o guard de ocupado) nunca casavam.
+      const callId = result?.calls?.[0]?.id ?? result?.messages?.[0]?.id ?? '';
       const phoneNumberId = ticket.whatsapp?.tokenAPI ?? (ticketData as any).whatsapp?.tokenAPI ?? '';
 
       // Registra áudio remoto antes de o answer chegar
@@ -1902,7 +1971,7 @@ export function TicketDetail({
 
   const handleSms = () => {
     const num = contactNumber;
-    // Mirror Vue's getPhoneNumberSMS: Brazilian numbers with 8-digit suffix get a 9 inserted
+ // Mirror the legacy front's getPhoneNumberSMS: Brazilian numbers with 8-digit suffix get a 9 inserted
     let formatted = num;
     if (num.startsWith("55") && num.length >= 12 && num.charAt(4) > "5") {
       formatted = `${num.slice(0, 4)}9${num.slice(-8)}`;
@@ -1976,7 +2045,7 @@ export function TicketDetail({
     }
   };
 
-  // restrictedUser — espelho do Vue (InforCabecalhoChat, ItemTicket, Index)
+ // restrictedUser — espelho do front legado (InforCabecalhoChat, ItemTicket, Index)
   const isRestricted = isRestrictedUser();
   const { isLiveMode } = useLiveMode();
   const contactName = displayContactName(contact) || t("noName");
@@ -1988,10 +2057,11 @@ export function TicketDetail({
     window.addEventListener("resize", check);
     return () => window.removeEventListener("resize", check);
   }, []);
-  // Regra Vue: exibe apenas os 5 primeiros caracteres do nome para usuário restrito
+ // Regra do front legado: exibe apenas os 5 primeiros caracteres do nome para usuário restrito
   const displayName = isRestricted ? contactName.slice(0, 5) + (contactName.length > 5 ? "..." : "") : contactName;
   const contactNumber = contact?.number || "";
   const contactPic = contact?.profilePicUrl;
+  const contactAddress = formatContactAddress(contact);
 
   return (
     <>
@@ -2024,11 +2094,11 @@ export function TicketDetail({
 
             <div className="flex-1 min-h-0 overflow-y-auto">
               <div className="p-3 space-y-3">
-                {/* === PERFIL (como Vue: perfil) === */}
+ {/* === PERFIL (como front legado: perfil) === */}
                 <TabsContent value="perfil" className="mt-0 space-y-3">
                   <Card>
                     <CardContent className="pt-4 pb-4 text-center">
-                      {/* Regra Vue: blur na foto quando restrictedUser (InforCabecalhoChat.vue:27) ou live mode */}
+ {/* Regra do front legado: blur na foto quando restrictedUser ou live mode */}
                       <Avatar
                         className={cn("h-20 w-20 mx-auto mb-2", (isRestricted || isLiveMode) && "blur-sm select-none pointer-events-none", !isRestricted && contactPic && "cursor-zoom-in")}
                         onClick={() => { if (!isRestricted && contactPic) setProfilePicPreview({ url: contactPic, name: contactName }); }}
@@ -2060,15 +2130,29 @@ export function TicketDetail({
                         )}
                       </div>
                       <div className="text-left mt-2">
-                        {/* Regra Vue: exibe apenas 5 chars do nome; demais campos ocultos (restrictedUserRestriction4 e 5) */}
+ {/* Regra do front legado: exibe apenas 5 chars do nome; demais campos ocultos (restrictedUserRestriction4 e 5) */}
                         <InfoRow icon={User} label={t("labelName")} value={displayName} onCopy={isRestricted ? undefined : () => handleCopy(contactName)} />
                         {!isRestricted && contactNumber && <InfoRow icon={Phone} label={t("labelPhone")} value={contactNumber} onCopy={() => handleCopy(contactNumber)} />}
+                        {/* Contato sem telefone (cliente com nome de usuario do WhatsApp): sem esta
+                            linha o painel nao mostraria identidade nenhuma. Exibe o @usuario quando
+                            existe; o codigo interno do WhatsApp nunca aparece aqui. Sai so para
+                            contato identificado pelo WhatsApp — em Instagram/Messenger/webchat, que
+                            tambem nao tem telefone, o rotulo estaria errado e o painel fica como era. */}
+                        {!isRestricted && !contactNumber && !!(contact?.bsuid || contact?.username) && (
+                          <InfoRow
+                            icon={AtSign}
+                            label={t("labelWhatsappUser")}
+                            value={contact?.username ? `@${contact.username}` : t("noPhoneLabel")}
+                            onCopy={contact?.username ? () => handleCopy(`@${contact.username}`) : undefined}
+                          />
+                        )}
                         {!isRestricted && contact?.email && <InfoRow icon={Mail} label={t("labelEmail")} value={contact.email} />}
                         {!isRestricted && contact?.cpf && <InfoRow icon={User} label={t("labelCpf")} value={contact.cpf} />}
                         {!isRestricted && (contact?.birthdayDate || contact?.birthday) && <InfoRow icon={Calendar} label={t("labelBirthday")} value={formatBirthdayDisplay(contact.birthdayDate || contact.birthday)} />}
                         {!isRestricted && contact?.firstName && <InfoRow icon={User} label={t("labelFirstName")} value={contact.firstName} />}
                         {!isRestricted && contact?.lastName && <InfoRow icon={User} label={t("labelLastName")} value={contact.lastName} />}
                         {!isRestricted && contact?.businessName && <InfoRow icon={Briefcase} label={t("labelCompany")} value={contact.businessName} />}
+                        {!isRestricted && contactAddress && <InfoRow icon={MapPin} label={t("labelAddress")} value={contactAddress} />}
                       </div>
                       {!isRestricted && Array.isArray(contact?.extraInfo) && contact.extraInfo.length > 0 && (
                         <>
@@ -2081,7 +2165,7 @@ export function TicketDetail({
                       )}
                       {/* Editar contato: disponível também para grupos (edita o contato do grupo). Telefonia segue oculta via hasTelephony (false em grupo). */}
                       <div className="flex gap-2 mt-2">
-                          {/* Regra Vue: botão editar oculto para restrictedUser (restrictedUserRestriction6) */}
+ {/* Regra do front legado: botão editar oculto para restrictedUser (restrictedUserRestriction6) */}
                           {!isRestricted && (
                           <Button variant="outline" size="sm" className="flex-1" onClick={handleEditContact}>
                             {t("editContact")}
@@ -2147,6 +2231,11 @@ export function TicketDetail({
                       </div>
                     </CardContent>
                   </Card>
+
+                  {/* PLANO_CRM_CONTATO F1 (D15): resumo do cliente — so ids primitivos (o objeto contact muda a cada contact:update) */}
+                  {!isRestricted && contact?.id && (
+                    <ContactCrmCard contactId={contact.id} ticketId={ticket.id} />
+                  )}
 
                   <Card>
                     <CardHeader className="py-2">
@@ -2373,7 +2462,7 @@ export function TicketDetail({
                   )}
                 </TabsContent>
 
-                {/* === ATENDIMENTO (como Vue: atendimento) === */}
+ {/* === ATENDIMENTO (como front legado: atendimento) === */}
                 <TabsContent value="atendimento" className="mt-0 space-y-3">
                   {ticket.channel !== "telegram" && (
                     <Card>
@@ -2393,7 +2482,10 @@ export function TicketDetail({
                         <CardTitle className="text-sm">{t("evaluationLabel")}</CardTitle>
                       </CardHeader>
                       <CardContent className="py-2 pt-0 flex gap-2">
-                        <Button variant="outline" size="sm" onClick={handleSendEvaluation}><Send className="h-3 w-3 mr-1" /> {t("send")}</Button>
+                        {/* Grupo não recebe pesquisa (o backend recusa): fica só o log das antigas */}
+                        {!ticket.isGroup && (
+                          <Button variant="outline" size="sm" onClick={handleSendEvaluation}><Send className="h-3 w-3 mr-1" /> {t("send")}</Button>
+                        )}
                         <Button variant="outline" size="sm" onClick={handleOpenEvalLogs}><List className="h-3 w-3 mr-1" /> {t("log")}</Button>
                       </CardContent>
                     </Card>
@@ -2555,7 +2647,7 @@ export function TicketDetail({
                   </Card>
                 </TabsContent>
 
-                {/* === GESTÃO (como Vue: gestao) === */}
+ {/* === GESTÃO (como front legado: gestao) === */}
                 <TabsContent value="gestao" className="mt-0 space-y-3">
                   <Card>
                     <CardHeader className="py-2">
@@ -2854,7 +2946,7 @@ export function TicketDetail({
 
                 </TabsContent>
 
-                {/* === INTEGRAÇÕES (como Vue: integracoes) — só listadas se ativas nas configurações === */}
+ {/* === INTEGRAÇÕES (como front legado: integracoes) — só listadas se ativas nas configurações === */}
                 <TabsContent value="integracoes" className="mt-0 space-y-3">
                   <p className="text-xs text-muted-foreground">{t("integrationsDesc")}</p>
                   {activeIntegrations.length === 0 ? (
@@ -2874,7 +2966,7 @@ export function TicketDetail({
                   )}
                 </TabsContent>
 
-                {/* === UTILITÁRIOS (como Vue: utilitarios) === */}
+ {/* === UTILITÁRIOS (como front legado: utilitarios) === */}
                 <TabsContent value="utilitarios" className="mt-0 space-y-3">
                   <Card>
                     <CardHeader className="py-2">
@@ -3399,9 +3491,10 @@ export function TicketDetail({
         <DialogHeader>
           <DialogTitle>{t("evalLogsTitle")} — #{ticket.id}</DialogTitle>
           {evalLogs.length > 0 && (() => {
-            const valid = evalLogs.filter(l => l.evaluation != null && l.evaluation >= 0);
-            const avg = valid.length ? (valid.reduce((s, l) => s + (l.evaluation ?? 0), 0) / valid.length).toFixed(1) : null;
-            return avg ? <p className="text-xs text-muted-foreground">{t("average", { avg })}</p> : null;
+            // Sem Number() o reduce concatenava strings ("0"+"4"+"5" = "045" → média absurda)
+            const nums = evalLogs.map((l) => evalScore(l.evaluation)).filter((n): n is number => n !== null && n >= 0);
+            const avg = nums.length ? (nums.reduce((s, n) => s + n, 0) / nums.length).toFixed(1) : null;
+            return avg ? <p className="text-xs text-muted-foreground">{t("average", { avg, max: Math.max(ratingMaxScore, ...nums) })}</p> : null;
           })()}
         </DialogHeader>
         <div className="flex-1 min-h-0 overflow-y-auto pr-1">
@@ -3412,7 +3505,10 @@ export function TicketDetail({
               {evalLogs.map((log, i) => (
                 <div key={log.id ?? i} className="border rounded p-2 text-xs space-y-0.5">
                   <p className="font-medium">{log.user?.name ?? "Bot"}</p>
-                  <p>{log.evaluation != null ? `${log.evaluation}/5` : t("inconclusive")}</p>
+                  <p>{(() => {
+                    const n = evalScore(log.evaluation);
+                    return n !== null ? `${n}/${Math.max(ratingMaxScore, n)}` : t("inconclusive");
+                  })()}</p>
                   {log.createdAt && <p className="text-muted-foreground">{new Date(log.createdAt).toLocaleString("pt-BR")}</p>}
                 </div>
               ))}
@@ -4034,6 +4130,29 @@ export function TicketDetail({
         targetWhatsappId={Number((ticket as unknown as { whatsappId?: number }).whatsappId ?? ticket.whatsapp?.id ?? 0) || null}
         onConfirm={() => { setReopenPrompt(null); void reopenTicketNow(); }}
       />
+
+      {/* Confirmação de troca de canal/handoff: contato já tem atendimento aberto
+          no canal de destino — aviso consultivo, nunca bloqueia. */}
+      <TransferChannelConfirmDialog
+        open={!!channelConfirmMode}
+        onOpenChange={(o) => { if (!o) { setChannelConfirmMode(null); setChannelConfirmSibling(null); } }}
+        sibling={channelConfirmSibling}
+        targetChannelName={
+          channelConfirmMode === "handoff"
+            ? (handoffTarget?.name || "")
+            : (whatsapps.find((w) => w.id === parseInt(channelId))?.name || "")
+        }
+        isRestrictedUser={isRestrictedUser()}
+        notViewAssignedTickets={getConfigValue("NotViewAssignedTickets") === "enabled"}
+        busy={handoffSending}
+        onConfirm={() => {
+          const mode = channelConfirmMode;
+          setChannelConfirmMode(null);
+          setChannelConfirmSibling(null);
+          if (mode === "handoff") void doHandoff();
+          else void doTransferChannel();
+        }}
+      />
     </>
   );
 }
@@ -4306,6 +4425,15 @@ function ActionBtn({
       </Tooltip>
     </TooltipProvider>
   );
+}
+
+// Endereço do painel: "Rua, Nº - Complemento - Bairro - Cidade/UF - CEP", só com as partes preenchidas.
+function formatContactAddress(contact?: Ticket["contact"] | null): string {
+  if (!contact) return "";
+  const part = (value?: string | null) => (value ?? "").trim();
+  const street = [part(contact.logradouro), part(contact.numeroEndereco)].filter(Boolean).join(", ");
+  const cityUf = [part(contact.cidade), part(contact.estado)].filter(Boolean).join("/");
+  return [street, part(contact.complemento), part(contact.bairro), cityUf, part(contact.cep)].filter(Boolean).join(" - ");
 }
 
 function InfoRow({ icon: Icon, label, value, onCopy, sensitive = true }: { icon: React.ElementType; label: string; value: string; onCopy?: () => void; sensitive?: boolean }) {

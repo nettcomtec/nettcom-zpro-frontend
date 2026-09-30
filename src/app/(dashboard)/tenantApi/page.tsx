@@ -102,6 +102,7 @@ const TENANT_API_ROUTE_BODIES: Record<string, string | undefined> = {
   "userName": "Pedro Bastos",
   "identity": "07122255533",
   "profile": "admin",
+  "planId": 1,
   "trial": "enabled",
   "trialPeriod": 3,
   "paymentGateway": "stripe",

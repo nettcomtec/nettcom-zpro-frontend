@@ -189,7 +189,7 @@ export async function updateUserStatus(userId: number, isOnline: boolean) {
   return api.put(`/users/${userId}`, { isOnline });
 }
 
-/** Marca todas as mensagens de tickets como lidas (Vue: AtualizarTodasMensagensNaoLidas) */
+/** Marca todas as mensagens de tickets como lidas (front legado: AtualizarTodasMensagensNaoLidas) */
 export async function updateAllUnreadMessages() {
   return api.put("/ticketsUpdateAllUnreadMessages");
 }

@@ -31,6 +31,7 @@ import { usePageAccess } from "@/hooks/use-page-access";
 import { AccessDenied } from "@/components/layout/access-denied";
 import { PageHelp } from "@/components/layout/page-help";
 import { BulkCsvImportDialog } from "@/components/massa/bulk-csv-import-dialog";
+import { summarizeGroupActionResults } from "@/lib/group-participant-results";
 
 const GROUP_CHANNEL_TYPES = ["whatsapp", "baileys", "zapo", "evo", "evogo", "zapi", "uazapi", "meow"];
 
@@ -208,21 +209,49 @@ export default function GrupoMassaUsuariosPage() {
     const participants = numberInput.split(",").map((n) => n.trim()).filter(Boolean);
 
     try {
+      let response: { data?: unknown } | undefined;
       if (promover) {
-        await promoteParticipantsInGroups({ whatsappId, groupIds, participants });
+        response = await promoteParticipantsInGroups({ whatsappId, groupIds, participants });
       }
       if (demover) {
-        await demoteParticipantsInGroups({ whatsappId, groupIds, participants });
+        response = await demoteParticipantsInGroups({ whatsappId, groupIds, participants });
       }
       if (adicionar) {
-        await addParticipantsToGroups({ whatsappId, groupIds, participants });
+        response = await addParticipantsToGroups({ whatsappId, groupIds, participants });
       }
       if (remover) {
-        await removeParticipantsFromGroups({ whatsappId, groupIds, participants });
+        response = await removeParticipantsFromGroups({ whatsappId, groupIds, participants });
       }
-      toast.success(t("actionExecuted"));
       setLoading2(false);
-      limparCampos();
+      const summary = summarizeGroupActionResults(response?.data);
+      if (!summary.hasFailures) {
+        toast.success(t("actionExecuted"));
+        limparCampos();
+        return;
+      }
+      // Com recusa, os campos ficam preenchidos para o usuário corrigir e tentar de novo.
+      const lines = [t("resultSummary", { ok: summary.groupsOk, total: summary.groupsTotal })];
+      if (summary.participantsRejected > 0) {
+        lines.push(t("resultRejected", { count: summary.participantsRejected }));
+      }
+      if (summary.reasons.length > 0) {
+        lines.push(
+          t("resultReasons", {
+            list: summary.reasons.map((r) => `${t(`reason_${r.reason}`)} (${r.count})`).join(", "),
+          })
+        );
+      }
+      const notify = summary.nothingApplied ? toast.error : toast.warning;
+      notify(t(summary.nothingApplied ? "resultFailedTitle" : "resultPartialTitle"), {
+        description: (
+          <div className="space-y-0.5">
+            {lines.map((line) => (
+              <div key={line}>{line}</div>
+            ))}
+          </div>
+        ),
+        duration: 12000,
+      });
     } catch {
       toast.error(t("errorExecuteAction"));
       setLoading2(false);

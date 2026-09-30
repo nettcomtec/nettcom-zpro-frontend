@@ -120,6 +120,46 @@ export default function ChatFlowPage() {
       .catch(() => {});
   }, []);
 
+  // Rótulos do tooltip de integridade: switch com default devolvendo o valor
+  // cru — um where/kind futuro vindo do backend nunca é rotulado errado.
+  const integrityWhereLabel = (
+    where: string,
+    nodeName: string | null,
+    nodeId: string | null
+  ): string => {
+    switch (where) {
+      case "condition":
+        return t("integrityWhereNode", { node: nodeName || nodeId || "?" });
+      case "chatgptNode":
+        return t("integrityWhereChatgptNode", { node: nodeName || nodeId || "?" });
+      case "maxRetryBotMessage":
+        return t("integrityWhereMaxRetry");
+      case "firstInteraction":
+        return t("integrityWhereFirstInteraction");
+      case "notResponseMessage":
+        return t("integrityWhereNotResponse");
+      case "outOpenHours":
+        return t("integrityWhereOutOpenHours");
+      default:
+        return where;
+    }
+  };
+
+  const integrityKindLabel = (kind: string, refId: number): string => {
+    switch (kind) {
+      case "user":
+        return t("integrityKindUser", { id: refId });
+      case "queue":
+        return t("integrityKindQueue", { id: refId });
+      case "channel":
+        return t("integrityKindChannel", { id: refId });
+      case "kanban":
+        return t("integrityKindKanban", { id: refId });
+      default:
+        return kind;
+    }
+  };
+
   const loadFlows = useCallback(async () => {
     try {
       setLoading(true);
@@ -152,7 +192,7 @@ export default function ChatFlowPage() {
     try {
       const trimmedName = newFlowName.trim();
       const defaultFlow = createDefaultFlow(trimmedName);
-      // Send the full flow structure at the top level matching Vue's CriarChatFlow format:
+ // Send the full flow structure at the top level matching the legacy front's CriarChatFlow format:
       // { name, nodeList, lineList, isActive, action, celularTeste, id }
       const { data } = await createChatFlow({
         name: trimmedName,
@@ -282,7 +322,7 @@ export default function ChatFlowPage() {
     if (!editingFlow) return;
     // The backend expects the full flow record with a nested `flow` property
     // that contains the actual flow structure (name, nodeList, lineList).
-    // This mirrors what the Vue panel does: { ...cDataFlow.flow, flow: this.data }
+ // This mirrors what the legacy front does: {...cDataFlow.flow, flow: this.data }
     const { data } = await updateChatFlow(editingFlow.id, {
       ...editingFlow,
       flow: {
@@ -372,7 +412,7 @@ export default function ChatFlowPage() {
           sections: [
             {
               title: t("helpS0T"),
-              items: [t("helpS0I0"), t("helpS0I1"), t("helpS0I2"), t("helpS0I3")],
+              items: [t("helpS0I0"), t("helpS0I1"), t("helpS0I2"), t("helpS0I3"), t("helpS0I4")],
             },
             {
               title: t("helpS1T"),
@@ -477,21 +517,9 @@ export default function ChatFlowPage() {
                               <ul className="mt-1 list-disc pl-4 space-y-0.5">
                                 {integrity[flow.id].issues.slice(0, 6).map((iss, idx) => (
                                   <li key={idx}>
-                                    {iss.where === "condition"
-                                      ? t("integrityWhereNode", { node: iss.nodeName || iss.nodeId || "?" })
-                                      : iss.where === "maxRetryBotMessage"
-                                        ? t("integrityWhereMaxRetry")
-                                        : iss.where === "firstInteraction"
-                                          ? t("integrityWhereFirstInteraction")
-                                          : iss.where === "notResponseMessage"
-                                            ? t("integrityWhereNotResponse")
-                                            : t("integrityWhereOutOpenHours")}
+                                    {integrityWhereLabel(iss.where, iss.nodeName, iss.nodeId)}
                                     {" → "}
-                                    {iss.kind === "user"
-                                      ? t("integrityKindUser", { id: iss.refId })
-                                      : iss.kind === "queue"
-                                        ? t("integrityKindQueue", { id: iss.refId })
-                                        : t("integrityKindChannel", { id: iss.refId })}
+                                    {integrityKindLabel(iss.kind, iss.refId)}
                                   </li>
                                 ))}
                               </ul>

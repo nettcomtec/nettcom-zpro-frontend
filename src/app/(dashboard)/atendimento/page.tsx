@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useState, useEffect, useLayoutEffect, useCallback, useRef } from "react";
+import { createPortal } from "react-dom";
 import { displayContactIdentity, displayContactName } from "@/lib/contact-identity";
 import { handleTicketAccessDenied } from "@/lib/ticket-access-denied";
 import { motion, AnimatePresence } from "framer-motion";
@@ -18,11 +19,11 @@ import {
   DollarSign, LayoutGrid, LayoutList, FileDown, Shield, Tag, Flag,
   Image as ImageIcon,
   Images,
-  LogIn, Smartphone, MessageCircle, Cpu,
+  LogIn, Smartphone, MessageCircle, Cpu, Sparkles,
   ChevronsDown, ChevronsUp, ChevronLeft, ChevronRight, ChevronUp, ChevronDown,
   Pause, Play, Pin, Check, ChevronsUpDown, HelpCircle, Radio, ShoppingBag, Linkedin,
   Youtube, Music2, WifiOff, Wifi, Hourglass,
-  Plus, Trash2, Route,
+  Plus, Trash2, Route, PhoneIncoming, AlertTriangle,
   type LucideIcon,
 } from "lucide-react";
 import { useAuthStore } from "@/stores/auth-store";
@@ -38,6 +39,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Progress } from "@/components/ui/progress";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem,
@@ -86,7 +88,7 @@ import {
   editMessage, editMessageMeow, editMessageEvo, editMessageEvoGo, editMessageZapi, editMessageUazapi, updateScheduledMessageBody,
   toggleStarMessage,
   pinMessage, unpinMessage, fetchPinnedMessages,
-  sendTextWaba, sendMediaWaba, sendStickerWaba, sendEmailWebmail,
+  sendTextWaba, sendMediaWaba, sendStickerWaba, sendEmailWebmail, sendWabaRequestContactInfo,
   sendTextInstagramMeta, sendTextMessengerMeta,
   getWabaTemplates, type WabaTemplate,
   sendIndividualMessage,
@@ -140,10 +142,17 @@ import { normalizeTicket } from "@/lib/normalize-ticket";
 // precisam usar a MESMA definição de "ticket ainda no fluxo do bot".
 import { isTicketInBotFlow } from "@/lib/can-user-see-ticket";
 import { dedupeActiveTicketsByContactChannel } from "@/lib/dedupe-active-tickets";
-import { findExistingOpenTicket, findCrossChannelSiblingForTicket, type ExistingOpenTicket } from "@/lib/check-existing-open-ticket";
+import {
+  getTicketAutomations,
+  matchesTicketAutomationFilter,
+  TICKET_AUTOMATION_FILTERS,
+  type TicketAutomationFilter,
+} from "@/lib/ticket-automations";
+import { findExistingOpenTicket, findCrossChannelSiblingForTicket, findOpenTicketOnTargetChannel, findOpenTicketsOnTargetChannelBulk, type ExistingOpenTicket } from "@/lib/check-existing-open-ticket";
+import { TransferChannelConfirmDialog } from "@/components/atendimento/transfer-channel-confirm-dialog";
 import { ExistingTicketDialog } from "@/components/atendimento/existing-ticket-dialog";
 import { ReopenConfirmDialog } from "@/components/atendimento/reopen-confirm-dialog";
-import { buildReopenNotices, type ReopenNotices } from "@/lib/reopen-notices";
+import { buildReopenNotices, isWindowClosedForTicket, type ReopenNotices } from "@/lib/reopen-notices";
 import { buildEmailReplyInfo } from "@/lib/email-reply";
 import { buildSignedBody, isWhatsappChannel } from "@/lib/signature";
 import { getTicketLastMessagePreview, getTicketListPreview, getSyntheticBodyLabel } from "@/lib/template-preview";
@@ -172,6 +181,16 @@ function useStatusTabs() {
     { value: "pending", label: t("tabPending"), icon: Clock, color: "text-warning" },
     { value: "closed", label: t("tabClosed"), icon: CheckCircle2, color: "text-muted-foreground" },
   ];
+}
+
+// Disparo da API externa: o backend marca sendType 'API' (WABA/BSP/Meta/Telegram/e-mail,
+// que ainda gravam o dono da configuracao da API como userId) ou 'externalApi' (canais de
+// sessao, aniversario, posicao na fila). O autor exibido e "Sistema" — nunca o dono da
+// API nem o dono do atendimento. Midia/template pela API nos canais oficiais saem com o
+// sendType do tipo de midia e seguem sem essa marca.
+const API_SEND_TYPES = new Set(["API", "externalApi"]);
+function isApiSentMessage(m: { fromMe?: boolean; sendType?: string | null }): boolean {
+  return !!m.fromMe && API_SEND_TYPES.has(String(m.sendType ?? ""));
 }
 
 // Normaliza a fonte do "tempo aproximado" para epoch-ms.
@@ -416,7 +435,7 @@ const TicketListItem = React.memo(function TicketListItem({
   // When active, bg-accent (derived from primary) may have low contrast with muted-foreground in dark mode
   const mutedText = active ? "text-accent-foreground/60" : "text-muted-foreground";
 
-  // Mesma lógica do Vue (ItemTicket.vue):
+ // Mesma lógica do front legado (ItemTicket):
   // open + não respondido + não é grupo → amarelo (ticketNotAnswered)
   // open + respondido → azul (primary)
   // pending → vermelho
@@ -907,19 +926,11 @@ const TicketListItem = React.memo(function TicketListItem({
             </Tooltip>
           )}
           {(() => {
-            const integrations: string[] = [];
-            if (ticket.typebotStatus === "enabled") integrations.push("Typebot");
-            if (ticket.dialogflowStatus === "enabled") integrations.push("DialogFlow");
-            if (ticket.chatgptStatus === "enabled") integrations.push("ChatGPT");
-            if (ticket.n8nStatus === "enabled") integrations.push("N8N");
-            if (ticket.difyStatus === "enabled") integrations.push("Dify");
-            if (ticket.lmStatus === "enabled") integrations.push("LM Studio");
-            if (ticket.grokStatus === "enabled") integrations.push("Grok");
-            if (ticket.geminiStatus === "enabled") integrations.push("Gemini");
-            if (ticket.deepseekStatus === "enabled") integrations.push("DeepSeek");
-            if (ticket.qwenStatus === "enabled") integrations.push("Qwen");
-            if (ticket.claudeStatus === "enabled") integrations.push("Claude");
-            if (ticket.ollamaStatus === "enabled") integrations.push("Ollama");
+            // Mesmo critério da guia Automações (lib/ticket-automations).
+            const automations = getTicketAutomations(ticket);
+            const integrations = automations.aiAgent
+              ? [tE("aiAgentLabel"), ...automations.integrations]
+              : automations.integrations;
             if (!integrations.length) return null;
             return (
               <Tooltip>
@@ -993,6 +1004,16 @@ type DetailTab = "info" | "ticket" | "actions" | "tags" | "notes" | "media";
 // current: 1 = ocorrência mais recente; hasMoreOlder: ainda há histórico não carregado.
 type SearchNavState = { term: string; current: number; total: number; hasMoreOlder: boolean };
 
+// Anti-spam do pedido de telefone: tickets que ja receberam o pedido nesta sessao.
+// Fica no modulo, e nao em estado do cabecalho, porque o ChatHeader remonta a cada
+// troca de ticket (key={ticket.id}) — em estado do componente a acao voltaria ao menu
+// e o cliente levaria um pedido a cada ida e volta do atendente.
+const requestContactInfoSentTickets = new Set<number>();
+// Servidor sem a rota nova responde 404: a acao some do menu ate recarregar a pagina
+// (o item e gateado so por dado do front, entao sem isto o operador continuaria vendo
+// uma acao que aquele servidor nao tem).
+let requestContactInfoUnsupported = false;
+
 function ChatHeader({
   ticket,
   onToggleDetail,
@@ -1056,7 +1077,7 @@ function ChatHeader({
   // de status do SIP (registering/error) ou tick de chamada.
   const toggleWebphone = useWebphoneStore((s) => s.toggleVisibility);
   const { updateTicket: updateTicketInStore } = useTicketStore();
-  // Regra Vue: blur foto e truncar nome no cabeçalho do chat (InforCabecalhoChat.vue)
+ // Regra do front legado: blur foto e truncar nome no cabeçalho do chat (InforCabecalhoChat)
   const { isRestrictedUser: checkRestricted } = useAuthStore();
   const isRestricted = checkRestricted();
   const headerUserId = useAuthStore((s) => s.user?.userId ?? 0);
@@ -1079,6 +1100,9 @@ function ChatHeader({
   const [chatbotOpen, setChatbotOpen] = useState(false);
   const [channelTransferOpen, setChannelTransferOpen] = useState(false);
   const [channelTransferId, setChannelTransferId] = useState("");
+  // Aviso consultivo da troca de canal: contato já tem atendimento no destino.
+  const [channelConfirmSibling, setChannelConfirmSibling] = useState<ExistingOpenTicket | null>(null);
+  const [channelConfirmOpen, setChannelConfirmOpen] = useState(false);
   const [chatFlows, setChatFlows] = useState<{ id: number; name: string }[]>([]);
   const [selectedChatFlow, setSelectedChatFlow] = useState("");
   type ScheduleItem = { id: string; date: string; text: string; files: File[]; signature: boolean };
@@ -1199,6 +1223,85 @@ function ChatHeader({
   };
   const linkTypeItems = extractLinks(mediaMessages);
 
+  // ── Pedir telefone ao cliente ──────────────────────────────────────────
+  // Contato que chegou sem telefone (cliente com nome de usuário do WhatsApp):
+  // manda o pedido oficial, que o cliente aceita com um toque. Só faz sentido
+  // com a conversa aberta — fora da janela de 24h o WhatsApp recusa a mensagem.
+  const [requestInfoOpen, setRequestInfoOpen] = useState(false);
+  const [requestInfoText, setRequestInfoText] = useState("");
+  const [requestInfoSending, setRequestInfoSending] = useState(false);
+  // Espelhos do estado de sessão (módulo) — Set e flag não disparam render sozinhos.
+  const [requestInfoDone, setRequestInfoDone] = useState(() => requestContactInfoSentTickets.has(ticket.id));
+  const [requestInfoUnsupported, setRequestInfoUnsupported] = useState(() => requestContactInfoUnsupported);
+
+  const canRequestContactInfo =
+    (ticket.channel || "").toLowerCase() === "waba"
+    && !ticket.contact?.number
+    && !!ticket.contact?.bsuid
+    // Mesma função do aviso de reabertura (lib/reopen-notices) — as duas contas
+    // de janela de 24h da tela têm de concordar.
+    && !isWindowClosedForTicket(ticket)
+    && !isRestricted
+    && !requestInfoDone
+    && !requestInfoUnsupported;
+
+  const openRequestInfoDialog = () => {
+    setRequestInfoText(tE("requestContactInfoDefaultText"));
+    setRequestInfoOpen(true);
+  };
+
+  const handleRequestContactInfo = async () => {
+    const from = ticket.contact?.bsuid;
+    if (!from) return;
+    setRequestInfoSending(true);
+    try {
+      // Ticket parcial (vindo do card da lista) não traz whatsapp.tokenAPI —
+      // rebusca o detalhe antes de desistir, mesmo heal dos envios WABA.
+      let tokenApi = ticket.whatsapp?.tokenAPI;
+      if (!tokenApi) {
+        try {
+          const { data } = await fetchTicket(ticket.id);
+          tokenApi = (data as { whatsapp?: { tokenAPI?: string } } | undefined)?.whatsapp?.tokenAPI;
+        } catch { /* sem token o envio falha no toast abaixo */ }
+      }
+      if (!tokenApi) {
+        toast.error(tE("requestContactInfoError"));
+        return;
+      }
+      const { data } = await sendWabaRequestContactInfo({
+        tokenApi,
+        from,
+        ticketId: ticket.id,
+        bodyText: requestInfoText.trim(),
+      });
+      // Cliente que já compartilhou o telefone: o pedido é recusado, mas isso é
+      // resultado bom — não vira erro na tela.
+      if ((data as { alreadyShared?: boolean } | undefined)?.alreadyShared) {
+        toast.info(tE("requestContactInfoAlreadyShared"));
+      } else {
+        toast.success(tE("requestContactInfoSent"));
+      }
+      requestContactInfoSentTickets.add(ticket.id);
+      setRequestInfoDone(true);
+      setRequestInfoOpen(false);
+    } catch (err: unknown) {
+      const status = (err as { status?: number; response?: { status?: number } })?.status
+        ?? (err as { response?: { status?: number } })?.response?.status;
+      if (status === 404) {
+        // Servidor ainda sem o recurso: some do menu até recarregar a página, em vez
+        // de deixar o atendente clicando numa ação que aquele servidor não tem.
+        requestContactInfoUnsupported = true;
+        setRequestInfoUnsupported(true);
+        setRequestInfoOpen(false);
+        toast.error(tE("requestContactInfoUnavailable"));
+        return;
+      }
+      toast.error(tE("requestContactInfoError"));
+    } finally {
+      setRequestInfoSending(false);
+    }
+  };
+
   // ── Share ticket modal ─────────────────────────────────────────────────
   const [shareOpen, setShareOpen] = useState(false);
   const [shareUsers, setShareUsers] = useState<{ id: number; name: string }[]>([]);
@@ -1309,13 +1412,13 @@ function ChatHeader({
     const ch = (ticket.channel || "").toLowerCase();
     const wa = ticket.whatsapp;
     const idFront = `farewell-${ticket.id}-${Date.now()}`;
-    // Meta payload (WABA / instagram / messenger) — sem sendType, igual ao Vue
+ // Meta payload (WABA / instagram / messenger) — sem sendType, igual ao front legado
     const metaPayload = {
       read: 1, fromMe: true, mediaUrl: "", body: farewell.message,
       scheduleDate: null, quotedMsg: null,
       from: ticket.contact.number, tokenApi: wa?.tokenAPI, ticketId: ticket.id, idFront,
     };
-    // Standard payload (demais canais) — com sendType, igual ao Vue
+ // Standard payload (demais canais) — com sendType, igual ao front legado
     const message = { read: 1, fromMe: true, mediaUrl: "", body: farewell.message,
       scheduleDate: null, quotedMsg: null, sendType: "farewell", idFront };
     try {
@@ -1591,7 +1694,7 @@ function ChatHeader({
     } catch { toast.error(tE("errorTransferChatbot")); }
   };
 
-  const handleTransferChannel = async () => {
+  const doTransferChannel = async () => {
     if (!channelTransferId || !ticket) return;
     const selectedWa = availableWhatsapps?.find((w) => w.id === parseInt(channelTransferId));
     if (!selectedWa) return;
@@ -1602,6 +1705,23 @@ function ChatHeader({
       setChannelTransferId("");
       onRefresh();
     } catch { toast.error(tE("errorTransferChannel")); }
+  };
+
+  const handleTransferChannel = async () => {
+    if (!channelTransferId || !ticket) return;
+    // Aviso consultivo (paridade com a reabertura): sem ele a transferência criava
+    // a segunda conversa no canal de destino em silêncio. Best-effort: erro → null.
+    const sibling = await findOpenTicketOnTargetChannel({
+      ticketId: ticket.id,
+      number: ticket.contact?.number,
+      targetWhatsappId: parseInt(channelTransferId),
+    });
+    if (sibling) {
+      setChannelConfirmSibling(sibling);
+      setChannelConfirmOpen(true);
+      return;
+    }
+    await doTransferChannel();
   };
 
   const chSched = (ticket.channel || "").toLowerCase();
@@ -2021,6 +2141,20 @@ function ChatHeader({
                 <DropdownMenuItem onClick={onToggleDetail}>
                   <Info className="mr-2 h-4 w-4" /> {tE("viewContactDetails")}
                 </DropdownMenuItem>
+                {/* Pedir telefone ao cliente — só aparece no contato que chegou sem
+                    telefone, com a conversa dentro da janela de 24h e uma vez por sessão. */}
+                {canRequestContactInfo && (
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <DropdownMenuItem onClick={openRequestInfoDialog}>
+                        <PhoneIncoming className="mr-2 h-4 w-4" /> {tE("requestContactInfo")}
+                      </DropdownMenuItem>
+                    </TooltipTrigger>
+                    <TooltipContent side="left" className="max-w-[220px] text-xs leading-snug">
+                      {tE("requestContactInfoTooltip")}
+                    </TooltipContent>
+                  </Tooltip>
+                )}
                 {/* Buscar mensagens — só visível no mobile (botão oculto no toolbar) */}
                 <DropdownMenuItem onClick={() => setSearchOpen(!searchOpen)} className="sm:hidden">
                   <Search className="mr-2 h-4 w-4" /> {tE("searchMessages")}
@@ -2198,6 +2332,36 @@ function ChatHeader({
             <Button variant="outline" onClick={() => setPauseDialogOpen(false)} disabled={pauseSending}>{tE("cancel")}</Button>
             <Button onClick={handleConfirmPause} disabled={pauseSending}>
               <Pause className="mr-2 h-4 w-4" /> {tE("pauseConfirm")}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Pedir telefone ao cliente */}
+      <Dialog open={requestInfoOpen} onOpenChange={(v) => { if (!requestInfoSending) setRequestInfoOpen(v); }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2"><PhoneIncoming className="h-5 w-5" /> {tE("requestContactInfoDialogTitle")}</DialogTitle>
+            <DialogDescription>{tE("requestContactInfoDialogDesc")}</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 py-4">
+            <div className="space-y-2">
+              <Label htmlFor="request-contact-info-text">{tE("requestContactInfo")}</Label>
+              <Textarea
+                id="request-contact-info-text"
+                value={requestInfoText}
+                onChange={(e) => setRequestInfoText(e.target.value)}
+                rows={3}
+                className="resize-none"
+                disabled={requestInfoSending}
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setRequestInfoOpen(false)} disabled={requestInfoSending}>{tE("cancel")}</Button>
+            <Button onClick={handleRequestContactInfo} disabled={requestInfoSending || !requestInfoText.trim()}>
+              {requestInfoSending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <PhoneIncoming className="mr-2 h-4 w-4" />}
+              {tE("confirm")}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -2614,6 +2778,9 @@ function ChatHeader({
                 <p className="text-[11px] text-amber-600 dark:text-amber-500">{tE("schedRoutingHintRecurrence")}</p>
               )}
             </div>
+
+            {/* Aviso: divisória inserida na conversa no momento do disparo */}
+            <p className="text-[11px] text-muted-foreground">{tE("scheduleNoticeHint")}</p>
           </div>
 
           <DialogFooter>
@@ -2858,6 +3025,22 @@ function ChatHeader({
         notViewAssignedTickets={headerNotViewAssigned}
         targetWhatsappId={Number((ticket as unknown as { whatsappId?: number }).whatsappId ?? ticket.whatsapp?.id ?? 0) || null}
         onConfirm={() => { setReopenPrompt(null); void reopenTicketNow(); }}
+      />
+
+      {/* Confirmação de troca de canal: contato já tem atendimento aberto no
+          canal de destino — aviso consultivo, nunca bloqueia. */}
+      <TransferChannelConfirmDialog
+        open={channelConfirmOpen}
+        onOpenChange={(o) => { setChannelConfirmOpen(o); if (!o) setChannelConfirmSibling(null); }}
+        sibling={channelConfirmSibling}
+        targetChannelName={availableWhatsapps?.find((w) => w.id === parseInt(channelTransferId))?.name || ""}
+        isRestrictedUser={isRestricted}
+        notViewAssignedTickets={headerNotViewAssigned}
+        onConfirm={() => {
+          setChannelConfirmOpen(false);
+          setChannelConfirmSibling(null);
+          void doTransferChannel();
+        }}
       />
 
       {/* Usuários do Grupo Dialog */}
@@ -3360,6 +3543,11 @@ function ChatArea({
   const dateSepYesterdayBase = new Date();
   dateSepYesterdayBase.setDate(dateSepYesterdayBase.getDate() - 1);
   const dateSepYesterday = dateSepYesterdayBase.toLocaleDateString(locale);
+  // Autor exibido nas bolhas enviadas: "Sistema" quando é disparo da API ou quando não há
+  // usuário na mensagem nem dono no atendimento. A mesma chave agrupa as bolhas, para que
+  // envio da API e envio manual do mesmo usuário não se fundam sob um avatar só.
+  const isSystemAuthor = (m: Message) => !!m.fromMe && (isApiSentMessage(m) || (!m.user && !ticket?.user));
+  const outgoingAuthorKey = (m: Message) => (isSystemAuthor(m) ? "__system__" : (m.user?.id ?? m.user?.name));
   const router = useRouter();
   const scrollEnabled = autoScrollEnabled !== false;
   const channel = (ticket?.channel || "").toLowerCase();
@@ -3567,7 +3755,7 @@ function ChatArea({
     );
   }
 
-  // For pending/closed tickets show header + messages read-only (no input) — like Vue behavior
+ // For pending/closed tickets show header + messages read-only (no input) — like legacy behavior
   const isReadOnly = ticket.status !== "open";
 
   return (
@@ -3703,12 +3891,13 @@ function ChatArea({
               !nextMsg ||
               !nextMsg.fromMe ||
               ["notes", "transfer", "callNotes", "transcription"].includes(nextMsg.mediaType || "") ||
-              (nextMsg.user?.id ?? nextMsg.user?.name) !== (msg.user?.id ?? msg.user?.name)
+              outgoingAuthorKey(nextMsg) !== outgoingAuthorKey(msg)
             );
             const contactName = msg.contact?.name || ticket?.contact?.name || "?";
             const contactPic = msg.contact?.profilePicUrl || ticket?.contact?.profilePicUrl;
             const avatarCol = getAvatarColor(contactName);
-            const isSystemAgent = msg.fromMe && !msg.user && !ticket?.user;
+            const isSystemAgent = isSystemAuthor(msg);
+            const isApiAgent = isSystemAgent && isApiSentMessage(msg);
             const userName = isSystemAgent ? t("systemAgent") : (msg.user?.name || ticket?.user?.name || "?");
             const userAvatarCol = getAvatarColor(userName);
             const prevMsg = idx > 0 ? messages[idx - 1] : null;
@@ -3730,8 +3919,8 @@ function ChatArea({
             const sameRunAsPrev = !!prevMsg && !isNewDate && !isNewTicket && !isSystemMsg && !prevIsSystem &&
               prevMsg.fromMe === msg.fromMe &&
               (msg.fromMe
-                ? (prevMsg.user?.id ?? prevMsg.user?.name) === (msg.user?.id ?? msg.user?.name)
-                : (!ticket?.isGroup || (prevMsg.contact?.id ?? prevMsg.contact?.name) === (msg.contact?.id ?? msg.contact?.name)));
+                ? outgoingAuthorKey(prevMsg) === outgoingAuthorKey(msg)
+                :(!ticket?.isGroup || (prevMsg.contact?.id ?? prevMsg.contact?.name) === (msg.contact?.id ?? msg.contact?.name)));
             const bubbleIsGroupEnd = isSystemMsg ? true : (msg.fromMe ? isLastInOutgoingGroup : isLastInIncomingGroup);
             return (
               <React.Fragment key={`frag-${msg.stableKey ?? msg.id}`}>
@@ -3805,7 +3994,7 @@ function ChatArea({
                 {!isSystemMsg && msg.fromMe && (
                   isLastInOutgoingGroup ? (
                     <div className="flex flex-col items-center gap-0.5 shrink-0 mt-1">
-                      <Avatar className="h-7 w-7" title={isSystemAgent ? t("systemAgentHint") : undefined}>
+                      <Avatar className="h-7 w-7" title={isApiAgent ? t("systemAgentApiHint") : isSystemAgent ? t("systemAgentHint") : undefined}>
                         {!isSystemAgent && isValidAvatarUrl(msg.user?.profilePicture) && <AvatarImage src={msg.user!.profilePicture!} />}
                         {isSystemAgent ? (
                           <AvatarFallback className="bg-slate-600 text-white">
@@ -4108,6 +4297,24 @@ function getDefaultSavedFilters(): SavedFilters {
   };
 }
 
+// Quantos atendimentos da ação em massa vão ao servidor ao mesmo tempo. 5 de
+// propósito: o axios tem timeout global de 30 s por request e cada PUT faz bastante
+// coisa no servidor — 5 já derruba um lote de 43 de 43 rodadas para 9 sem empilhar
+// requests a ponto de estourar esse tempo.
+const BULK_ACTION_CONCURRENCY = 5;
+// Ações em massa que MANDAM MENSAGEM ao contato dentro do próprio request — encerrar
+// com despedida e transferir para chatbot (o servidor envia o 1º passo do fluxo) —
+// seguem uma por vez, no ritmo que sempre tiveram: em paralelo seriam 5 mensagens
+// simultâneas pelo mesmo número a cada rodada, o tipo de rajada que leva a bloqueio
+// em conexão não oficial.
+const BULK_ACTION_SENDING_CONCURRENCY = 1;
+
+// Busca dos selos de atendimento duplicado: espera a lista sossegar antes de
+// consultar (em Pendentes/Fechados a chave muda a cada ticket:update). O teto existe
+// porque, com a lista mudando sem parar, o debounce puro nunca chegaria a disparar.
+const CROSS_SIBLINGS_DEBOUNCE_MS = 1000;
+const CROSS_SIBLINGS_MAX_WAIT_MS = 5000;
+
 export default function AtendimentoPage() {
   const t = useTranslations("atendimentoChat");
   const tMixin = useTranslations("atendimentoMixinAtualizar");
@@ -4117,6 +4324,9 @@ export default function AtendimentoPage() {
   const tE = useTranslations("atendimentoChatExtra");
   const tBubble = useTranslations("messageBubble");
   const tOrder = useTranslations("orderDetails");
+  // Só para a caixa "não enviar despedida" do encerrar em massa: reusa as chaves que
+  // o painel de atendimentos já tem nos 13 idiomas, em vez de duplicá-las aqui.
+  const tPainel = useTranslations("painelAtendimentosPage");
   const searchParams = useSearchParams();
   const router = useRouter();
   const statusTabs = useStatusTabs();
@@ -4224,6 +4434,11 @@ export default function AtendimentoPage() {
   const [search, setSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("open");
+  // Espelho do statusFilter para callbacks que decidem DEPOIS de um await (refresh do
+  // ticket atual): a closure carregaria a aba antiga se o operador trocou de aba durante
+  // o fetch, e ler o ref evita recriar os callbacks a cada troca de aba.
+  const statusFilterRef = useRef(statusFilter);
+  statusFilterRef.current = statusFilter;
   const [detailOpen, setDetailOpen] = useState(false);
   const [detailTab, setDetailTab] = useState<DetailTab>("info");
   const [pageNumber, setPageNumber] = useState(1);
@@ -4231,7 +4446,9 @@ export default function AtendimentoPage() {
   // da store, que reflete a LISTA de tickets. Cobre a abertura de tickets com
   // histórico grande (ex.: grupos), mostrando um indicador no container do chat.
   const [messagesLoading, setMessagesLoading] = useState(false);
-  const [tabType, setTabType] = useState<"private" | "groups" | "chatbot">("private");
+  const [tabType, setTabType] = useState<"private" | "groups" | "automation">("private");
+  // Seletor interno da guia Automações (chatbot, agente de IA, integrações de IA).
+  const [automationFilter, setAutomationFilter] = useState<TicketAutomationFilter>("all");
   const [queues, setQueues] = useState<{ id: number; name: string; color: string; isActive?: boolean; autoDistributeEnabled?: boolean }[]>([]);
   const [allQueues, setAllQueues] = useState<{ id: number; name: string; color: string }[]>([]);
   const [usersList, setUsersList] = useState<{ id: number; name: string; queues?: { id: number }[] }[]>([]);
@@ -4251,7 +4468,7 @@ export default function AtendimentoPage() {
   const [avulsaEmail, setAvulsaEmail] = useState("");
   const [avulsaEmailSubject, setAvulsaEmailSubject] = useState("");
   const [avulsaSending, setAvulsaSending] = useState(false);
-  // Aviso "ticket aberto em outro operador" antes do envio avulso (espelho do Vue)
+ // Aviso "ticket aberto em outro operador" antes do envio avulso (espelho do front legado)
   const [avulsaExistingTicket, setAvulsaExistingTicket] = useState<ExistingOpenTicket | null>(null);
   // WABA template state for avulsa
   const [avulsaWabaTemplates, setAvulsaWabaTemplates] = useState<WabaTemplate[]>([]);
@@ -4309,11 +4526,33 @@ export default function AtendimentoPage() {
   const [bulkTransferUserId, setBulkTransferUserId] = useState("");
   const [bulkTransferChannelOpen, setBulkTransferChannelOpen] = useState(false);
   const [bulkTransferChannelId, setBulkTransferChannelId] = useState("");
+  // Aviso consultivo da transferência de canal em massa: contatos que já têm
+  // conversa aberta no canal de destino (Map ticketId -> atendimento existente).
+  const [bulkChannelConflicts, setBulkChannelConflicts] = useState<Map<number, ExistingOpenTicket> | null>(null);
+  const [bulkChannelChecking, setBulkChannelChecking] = useState(false);
   const [bulkTransferChatbotOpen, setBulkTransferChatbotOpen] = useState(false);
   const [bulkTransferChatbotId, setBulkTransferChatbotId] = useState("");
   const [bulkTransferQueueOpen, setBulkTransferQueueOpen] = useState(false);
   const [bulkTransferQueueId, setBulkTransferQueueId] = useState("");
   const [bulkChatFlows, setBulkChatFlows] = useState<{ id: number; name: string }[]>([]);
+  // Confirmação do encerrar em massa. "Resolver" e "Encerrar" do menu fazem a mesma
+  // coisa e abrem o MESMO diálogo — o kind só escolhe o título. Fica em state à parte
+  // do open para o título não trocar durante a animação de saída do diálogo.
+  const [bulkCloseConfirmOpen, setBulkCloseConfirmOpen] = useState(false);
+  const [bulkCloseConfirmKind, setBulkCloseConfirmKind] = useState<"resolve" | "close">("resolve");
+  // Ligado = NÃO enviar despedida (padrão, igual ao painel de atendimentos): o PUT de
+  // fechamento sem skipFarewell manda a mensagem de despedida a cada contato, e um
+  // lote vira dezenas de envios pela mesma conexão de uma vez. Volta a ligado toda
+  // vez que o diálogo abre.
+  const [bulkSkipFarewell, setBulkSkipFarewell] = useState(true);
+  // Trava contra duplo clique no Confirmar: o diálogo fecha antes de o lote começar,
+  // mas o botão segue clicável durante a animação de saída — um segundo clique
+  // dispararia outro lote (e outra despedida) para os mesmos atendimentos.
+  const bulkCloseFiredRef = useRef(false);
+  // Progresso da ação em massa: é um request por atendimento (em fatias paralelas),
+  // então enquanto o lote roda a tela mostra um overlay bloqueante com a contagem
+  // (evita clique duplo e o "travou?" de lote grande). null = nenhum lote rodando.
+  const [bulkProgress, setBulkProgress] = useState<{ done: number; total: number; failed: number } | null>(null);
   const [density, setDensity] = useState<"compact" | "comfortable">(() => getSavedFilters().density);
   const lastBulkSelectedIdRef = useRef<number | null>(null);
   const filteredTicketsRef = useRef<Ticket[]>([]);
@@ -4772,12 +5011,14 @@ export default function AtendimentoPage() {
     return list;
   }, [tickets, notViewTicketsChatBot, notViewAssignedTickets, isAdminLike, showAll, user?.userId, user?.profile, user?.queues, user?.whatsappAllowed, supervisorAdmin, configuracoes, getConfigValue, supervisorViewDept, supervisorQueueIds, statusFilters, selectedQueueIds, selectedWhatsappIds, selectedUserIds, selectedTagIds, selectedKanbanIds, withUnreadMessages, dateFrom, dateTo]);
 
-  // Aplica o filtro por tipo de aba (privado/grupos/chatbot) sobre a base já filtrada.
+  // Aplica o filtro por tipo de aba (privado/grupos/automações) sobre a base já filtrada.
   const visibleTicketsAllStatuses = React.useMemo(() => {
     if (tabType === "groups") return baseFilteredTickets.filter((t) => t.isGroup);
-    if (tabType === "chatbot") return baseFilteredTickets.filter((t) => !t.isGroup && t.chatbot);
+    if (tabType === "automation") {
+      return baseFilteredTickets.filter((t) => !t.isGroup && matchesTicketAutomationFilter(t, automationFilter));
+    }
     return baseFilteredTickets.filter((t) => !t.isGroup);
-  }, [baseFilteredTickets, tabType]);
+  }, [baseFilteredTickets, tabType, automationFilter]);
 
   const ticketCounts = React.useMemo(() => {
     const counts: Record<string, number> = { open: 0, pending: 0, closed: 0 };
@@ -4802,11 +5043,43 @@ export default function AtendimentoPage() {
   const tabUnreadCounts = React.useMemo(() => {
     const privateUnread = baseFilteredTickets.filter((t) => !t.isGroup && (t.unreadMessages ?? 0) > 0).length;
     const groupsUnread = baseFilteredTickets.filter((t) => t.isGroup && (t.unreadMessages ?? 0) > 0).length;
-    const chatbotUnread = baseFilteredTickets.filter((t) => !t.isGroup && t.chatbot && (t.unreadMessages ?? 0) > 0).length;
-    return { private: privateUnread, groups: groupsUnread, chatbot: chatbotUnread };
-  }, [baseFilteredTickets]);
+    // Segue o seletor da guia: o contador bate com o que a guia lista ao ser aberta.
+    const automationUnread = baseFilteredTickets.filter(
+      (t) => !t.isGroup && (t.unreadMessages ?? 0) > 0 && matchesTicketAutomationFilter(t, automationFilter),
+    ).length;
+    return { private: privateUnread, groups: groupsUnread, automation: automationUnread };
+  }, [baseFilteredTickets, automationFilter]);
 
-  // Equivalente ao cSessionsOptions do Vue — filtra sessões por whatsappAllowed para não-admins
+  const renderAutomationFilterSelect = (triggerClassName: string) => {
+    const options: Record<TicketAutomationFilter, { label: string; icon: LucideIcon | null }> = {
+      all: { label: t("automationFilterAll"), icon: null },
+      chatbot: { label: t("automationFilterChatbot"), icon: Bot },
+      aiAgent: { label: t("automationFilterAiAgent"), icon: Sparkles },
+      integration: { label: t("automationFilterIntegration"), icon: Cpu },
+    };
+    return (
+      <Select value={automationFilter} onValueChange={(v) => setAutomationFilter(v as TicketAutomationFilter)}>
+        <SelectTrigger className={triggerClassName} aria-label={t("automationFilterLabel")}>
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          {TICKET_AUTOMATION_FILTERS.map((f) => {
+            const Icon = options[f].icon;
+            return (
+              <SelectItem key={f} value={f} className="text-xs">
+                <span className="flex items-center gap-1.5">
+                  {Icon && <Icon className="h-3 w-3 shrink-0" />}
+                  {options[f].label}
+                </span>
+              </SelectItem>
+            );
+          })}
+        </SelectContent>
+      </Select>
+    );
+  };
+
+ // Equivalente ao cSessionsOptions do front legado — filtra sessões por whatsappAllowed para não-admins
   // supervisorAdmin === 'enabled' → super é limitado, vê apenas suas sessões permitidas
   const availableWhatsapps = React.useMemo(() => {
     const isAdminOrSuperAdmin = user?.profile === "admin" ||
@@ -5001,6 +5274,14 @@ export default function AtendimentoPage() {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Escape" && currentTicket) {
         if (bulkMode) return;
+        // O Esc que fechou uma camada aberta não fecha também a conversa.
+        // As camadas do Radix (Popover do emoji, DropdownMenu, Dialog, Select,
+        // Tooltip) escutam o keydown no document em CAPTURA e chamam
+        // preventDefault antes de fechar; este listener é de bolha no mesmo
+        // document, então roda depois e enxerga a marca. Sem isso, Esc com o
+        // seletor de emoji aberto fechava o emoji e desselecionava o ticket.
+        // Esc com nada aberto continua desselecionando.
+        if (e.defaultPrevented) return;
         selectionRef.current = null;
         setCurrentTicket(null);
       }
@@ -5322,7 +5603,12 @@ export default function AtendimentoPage() {
       // Lista lida do store NO MOMENTO da escrita (nao da closure): um loadTickets
       // concluido durante o await nao pode ser atropelado por um snapshot antigo.
       const listNow = useTicketStore.getState().tickets;
-      if (updated.status === "closed") {
+      // Ticket fechado só sai da lista (e da conversa) quando a aba ativa NÃO é a de
+      // Fechados — é o caso "acabou de ser encerrado" em Abertos/Pendentes. Na aba
+      // Fechados o ticket continua pertencendo à lista visível: qualquer ação do painel
+      // (nota, kanban, motivo, lido/não lido...) fazia o card sumir e a conversa fechar
+      // até o F5, embora o backend tivesse gravado tudo. Ali só o card é atualizado.
+      if (updated.status === "closed" && statusFilterRef.current !== "closed") {
         setCurrentTicket(null);
         setTickets(listNow.filter((t) => t.id !== ticketId));
         return;
@@ -5585,7 +5871,15 @@ export default function AtendimentoPage() {
             setTickets([normalized, ...tickets.filter((t) => t.id !== normalized.id)]);
             handleSelectTicket(normalized);
           }
-        }).catch(() => {})
+        }).catch((err) => {
+          // Link direto (sino, protocolo, nota) para atendimento que o backend nega: avisa, tira
+          // a entrada do sino e marca o id como tratado — sem a marca este efeito refazia o GET
+          // a cada mudança da lista (todo evento de socket) enquanto a URL tivesse o ticketId.
+          // Os demais erros seguem silenciosos, como antes.
+          if (handleTicketAccessDenied(err, id, t("noTicketAccess"))) {
+            lastDeepLinkRef.current = id;
+          }
+        })
       );
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -6068,8 +6362,10 @@ export default function AtendimentoPage() {
    * aplica via updateTicket — que ja tem as defensivas de merge do store e SO
    * toca o currentTicket se o id ainda for o ativo (stale-safe por construcao).
    * Retorna tokenApi/number frescos pro envio prosseguir; null se nao curou.
+   * Devolve tambem o identificador do WhatsApp (contato que chegou sem telefone,
+   * cliente com nome de usuario) — o backend enderessa por ele quando nao ha numero.
    */
-  const hydrateWabaSendData = async (ticketId: number): Promise<{ tokenApi?: string; contactNumber?: string } | null> => {
+  const hydrateWabaSendData = async (ticketId: number): Promise<{ tokenApi?: string; contactNumber?: string; contactBsuid?: string } | null> => {
     try {
       const { data } = await fetchTicket(ticketId);
       if (!data) return null;
@@ -6091,6 +6387,7 @@ export default function AtendimentoPage() {
       return {
         tokenApi: whatsapp?.tokenAPI ?? whatsapp?.token_api,
         contactNumber: fresh.contact?.number || undefined,
+        contactBsuid: fresh.contact?.bsuid || undefined,
       };
     } catch {
       return null;
@@ -6133,7 +6430,8 @@ export default function AtendimentoPage() {
       if (ch === "waba") {
         const whatsapp = (ticket as { whatsapp?: { tokenAPI?: string; token_api?: string } }).whatsapp;
         let tokenApi = whatsapp?.tokenAPI ?? (whatsapp as { token_api?: string })?.token_api;
-        let contactNumber: string | undefined = ticket.contact?.number;
+        let contactNumber: string | undefined = ticket.contact?.number || undefined;
+        let contactBsuid: string | undefined = ticket.contact?.bsuid || undefined;
         if (!tokenApi || !contactNumber) {
           // Ticket parcial (item da lista sem whatsapp.tokenAPI; a hidratacao do
           // handleSelectTicket falhou) — heal on-demand em vez de abortar pedindo
@@ -6141,8 +6439,13 @@ export default function AtendimentoPage() {
           const freshData = await hydrateWabaSendData(ticket.id);
           tokenApi = tokenApi || freshData?.tokenApi;
           contactNumber = contactNumber || freshData?.contactNumber;
+          contactBsuid = contactBsuid || freshData?.contactBsuid;
         }
-        if (!tokenApi || !contactNumber) {
+        // Contato que chegou sem telefone (cliente com nome de usuario): o backend
+        // enderessa pelo identificador do WhatsApp. O bloqueio abaixo continua
+        // valendo quando nao ha nem telefone nem identificador.
+        const contactIdentifier = contactNumber || contactBsuid;
+        if (!tokenApi || !contactIdentifier) {
           // Remove a bolha otimista (addMessage acima) — sem isto ela fica orfa na
           // tela sem marcar falha, fazendo o atendente achar que enviou.
           setMessages(useTicketStore.getState().messages.filter((m: Message) => m.id !== idFront));
@@ -6151,7 +6454,7 @@ export default function AtendimentoPage() {
         }
         const payload: Record<string, unknown> = {
           read: 1, fromMe: true, mediaUrl: "", body: text,
-          from: contactNumber, tokenApi, ticketId: ticket.id, idFront,
+          from: contactIdentifier, tokenApi, ticketId: ticket.id, idFront,
         };
         if (quotedMsg) payload.quotedMsg = quotedMsg;
         // Janela 24h fechada + modo híbrido: força o envio pela conexão vinculada.
@@ -6337,14 +6640,18 @@ export default function AtendimentoPage() {
       if (ch === "waba") {
         const whatsapp = (ticket as { whatsapp?: { tokenAPI?: string; token_api?: string } }).whatsapp;
         let tokenApi = whatsapp?.tokenAPI ?? (whatsapp as { token_api?: string })?.token_api;
-        let contactNumber: string | undefined = ticket.contact?.number;
+        let contactNumber: string | undefined = ticket.contact?.number || undefined;
+        let contactBsuid: string | undefined = ticket.contact?.bsuid || undefined;
         if (!tokenApi || !contactNumber) {
           // Ticket parcial — mesmo heal on-demand do handleSendText.
           const freshData = await hydrateWabaSendData(ticket.id);
           tokenApi = tokenApi || freshData?.tokenApi;
           contactNumber = contactNumber || freshData?.contactNumber;
+          contactBsuid = contactBsuid || freshData?.contactBsuid;
         }
-        if (!tokenApi || !contactNumber) {
+        // Contato sem telefone: envia pelo identificador do WhatsApp (vide handleSendText).
+        const contactIdentifier = contactNumber || contactBsuid;
+        if (!tokenApi || !contactIdentifier) {
           // Remove a bolha otimista e libera o blob — sem isto a previa fica orfa
           // na tela sem marcar falha (vide handleSendText).
           URL.revokeObjectURL(blobUrl);
@@ -6358,7 +6665,7 @@ export default function AtendimentoPage() {
         fd.append("fromMe", "true");
         fd.append("idFront", idFront);
         fd.append("tokenApi", tokenApi);
-        fd.append("from", contactNumber);
+        fd.append("from", contactIdentifier);
         fd.append("ticketId", String(ticket.id));
         if (caption) fd.append("caption", caption);
         if (quotedMsg) fd.append("quotedMsg", JSON.stringify(quotedMsg));
@@ -6480,6 +6787,8 @@ export default function AtendimentoPage() {
         toast.error(tErrors("numberResolvedMismatch"), copyAction);
       } else if (errCode === "ERR_ML_MEDIA_ON_QUESTION") {
         toast.error(t("errMlMediaOnQuestion"), copyAction);
+      } else if (errCode === "ERR_ML_MEDIA_ON_CLAIM") {
+        toast.error(t("errMlMediaOnClaim"), copyAction);
       } else if (errCode === "ERR_ML_NO_REPLY_CONTEXT") {
         toast.error(t("errMlNoReplyContext"), copyAction);
       } else if (errCode === "ERR_ML_SEND_FAILED") {
@@ -7115,7 +7424,10 @@ export default function AtendimentoPage() {
         setMessages(msgs);
         setHasMore(data?.hasMore ?? msgs.length >= 20);
       } catch { /* ignore message load error */ }
-    } catch {
+    } catch (err) {
+      // Corrida: um colega aceitou primeiro e o backend passou a negar o acesso — avisa com a
+      // mensagem certa, tira o card e a entrada do sino (em vez do erro genérico de aceite).
+      if (handleTicketAccessDenied(err, ticket.id, t("noTicketAccess"))) return;
       toast.error(t("errorAcceptingTicket"));
     }
   };
@@ -7223,12 +7535,13 @@ export default function AtendimentoPage() {
     setSelectedTicketIds(new Set());
   }, []);
 
-  // ESC cancela seleção múltipla
+  // ESC cancela seleção múltipla — exceto com lote em execução (o ESC limparia a
+  // seleção enquanto as chamadas ainda estão saindo, e o overlay ficaria órfão).
   useEffect(() => {
-    const handler = (e: KeyboardEvent) => { if (e.key === "Escape" && bulkMode) cancelBulkMode(); };
+    const handler = (e: KeyboardEvent) => { if (e.key === "Escape" && bulkMode && !bulkProgress) cancelBulkMode(); };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [bulkMode, cancelBulkMode]);
+  }, [bulkMode, bulkProgress, cancelBulkMode]);
 
   const handleIniciarConversaAvulsa = useCallback(() => {
     setAvulsaWhatsappId("");
@@ -7362,7 +7675,7 @@ export default function AtendimentoPage() {
 
     // Pre-check: ticket aberto/pending no MESMO canal com OUTRO operador.
     // Se houver, abre dialog (Cancelar/Abrir/Assumir) e aborta o envio. Espelha
-    // `abrirAtendimentoExistente` do Vue (MainLayout.vue:2076-2129).
+ // `abrirAtendimentoExistente` do front legado.
     // Pula o pre-check quando o operador escolheu "Enviar mesmo assim" no dialog.
     const preTicket = skipPrecheck
       ? null
@@ -7527,7 +7840,20 @@ export default function AtendimentoPage() {
       setAvulsaDesiredStatus("open");
       setAvulsaQueue("none");
     } catch (e: unknown) {
-      const errCode = String((e as { response?: { data?: { error?: string } } })?.response?.data?.error || "");
+      // O interceptor de api.ts rejeita com a RESPOSTA (nao com o AxiosError), entao o
+      // codigo vem em `data.error` — ler so `response.data.error` fazia TODO erro do
+      // avulso (fila/canal sem permissao, numero invalido) cair no toast generico.
+      // `message` so entra quando parece codigo: no 409 ele carrega o ticket em JSON.
+      const errMsg = String(
+        (e as { data?: { message?: string } })?.data?.message ||
+        (e as { response?: { data?: { message?: string } } })?.response?.data?.message ||
+        ""
+      );
+      const errCode = String(
+        (e as { data?: { error?: string } })?.data?.error ||
+        (e as { response?: { data?: { error?: string } } })?.response?.data?.error ||
+        (errMsg.startsWith("ERR_") ? errMsg : "")
+      );
       // Cobranca: o interceptor de api.ts rejeita com a RESPOSTA (nao com o
       // AxiosError), entao o codigo pode chegar em `data.error`. Le as duas
       // formas — sem isso o motivo da recusa some no toast generico.
@@ -7542,6 +7868,10 @@ export default function AtendimentoPage() {
         toast.error(tNC("queueNotAllowed"));
       } else if (errCode === "ERR_SESSION_NOT_ALLOWED") {
         toast.error(tNC("sessionNotAllowed"));
+      } else if (errCode.startsWith("ERR_WAPP_INVALID_CONTACT")) {
+        toast.error(tNC("numberNotOnWhatsapp"));
+      } else if (errCode.startsWith("ERR_WAPP_CHECK_CONTACT")) {
+        toast.error(tNC("numberCheckFailed"));
       } else if (chargeErrCode === "ERR_ORDER_DETAILS_NOT_SUPPORTED") {
         toast.error(tOrder("errorNotSupportedHere"));
       } else if (isAvulsaOrderDetails && chargeErrCode === "ERR_NO_PERMISSION") {
@@ -7553,7 +7883,7 @@ export default function AtendimentoPage() {
       } else if (isAvulsaOrderDetails && chargeErrCode === "ERR_FEATURE_NOT_IN_PLAN") {
         // O interceptor global ja avisa "recurso fora do plano" — nao duplicar.
       } else {
-        const msg = errCode || (e as { message?: string })?.message || "Erro desconhecido";
+        const msg = errCode || (errMsg && !errMsg.startsWith("{") ? errMsg : "") || (e as { message?: string })?.message || tNC("unknownError");
         toast.error(t("errorSendingAvulsa", { msg }));
       }
     } finally {
@@ -7566,67 +7896,185 @@ export default function AtendimentoPage() {
     setAvulsaTplGalleryOpen(false);
   };
 
+  // Roda a ação em cada atendimento selecionado alimentando o overlay de progresso.
+  // NÃO aborta no primeiro erro: quem falha é contado e reportado no fim, senão o
+  // operador ficava sem saber quais tickets do lote ficaram para trás.
+  // Vai em fatias paralelas (BULK_ACTION_CONCURRENCY): a fatia seguinte só sai quando
+  // a anterior terminou inteira, então nunca há mais requests em voo do que isso.
+  // Nenhuma ação depende da ordem entre os atendimentos do lote.
+  // Um lote por vez: o overlay bloqueia o ponteiro, mas não o teclado — o foco volta
+  // ao menu de ações e um Enter dispararia OUTRO lote nos mesmos atendimentos, correndo
+  // contra este. A chamada recusada devolve "nada rodou" (ok 0 / failed 0), que o
+  // reportBulkResult ignora e que nenhum chamador trata como sucesso.
+  const bulkRunningRef = useRef(false);
+  const runBulkWithProgress = useCallback(async (
+    ids: number[],
+    apply: (id: number) => Promise<unknown>,
+    concurrency: number = BULK_ACTION_CONCURRENCY
+  ): Promise<{ ok: number; failed: number; firstError: unknown }> => {
+    if (bulkRunningRef.current) return { ok: 0, failed: 0, firstError: null };
+    bulkRunningRef.current = true;
+    const sliceSize = Math.max(1, Math.floor(concurrency));
+    let ok = 0;
+    let failed = 0;
+    let firstError: unknown = null;
+    // Em paralelo a ordem de CHEGADA dos erros varia; guardar o do atendimento que
+    // vem primeiro na seleção mantém o firstError igual ao do laço sequencial.
+    let firstErrorIndex = -1;
+    setBulkProgress({ done: 0, total: ids.length, failed: 0 });
+    try {
+      for (let start = 0; start < ids.length; start += sliceSize) {
+        const slice = ids.slice(start, start + sliceSize);
+        await Promise.all(
+          slice.map((id, offset) =>
+            // Promise.resolve().then(...) também captura um apply que lance de forma
+            // síncrona — sem isso a exceção escaparia do map e abortaria o lote.
+            Promise.resolve()
+              .then(() => apply(id))
+              .then(() => { ok += 1; })
+              .catch((err: unknown) => {
+                failed += 1;
+                const index = start + offset;
+                if (firstErrorIndex === -1 || index < firstErrorIndex) {
+                  firstErrorIndex = index;
+                  firstError = err;
+                }
+              })
+              .finally(() => setBulkProgress({ done: ok + failed, total: ids.length, failed }))
+          )
+        );
+      }
+    } finally {
+      setBulkProgress(null);
+      bulkRunningRef.current = false;
+    }
+    return { ok, failed, firstError };
+  }, []);
+
+  const reportBulkResult = useCallback((res: { ok: number; failed: number; firstError: unknown }) => {
+    // Nada rodou (lote recusado por já haver outro em andamento): sem toast.
+    if (res.ok === 0 && res.failed === 0) return;
+    if (res.failed === 0) {
+      toast.success(t("bulkUpdated", { count: res.ok }));
+      return;
+    }
+    const errorCode =
+      (res.firstError as { response?: { data?: { error?: string } } })?.response?.data?.error ??
+      (res.firstError as { data?: { error?: string } })?.data?.error;
+    const detail = errorCode === "ERR_TRANSFER_NO_WHATSAPP_ACCESS"
+      ? t("errorTransferNoWhatsappAccess")
+      : null;
+    if (res.ok === 0) {
+      toast.error(detail || t("errorBulkUpdate"));
+      // Lote 100% "falho" também recarrega a lista: um PUT que estourou o tempo do
+      // navegador pode ter sido aplicado no servidor, e a tela tem de mostrar o estado
+      // REAL de cada atendimento. A seleção fica como está (quem limpa é o chamador, só
+      // quando algo deu certo — e nesse caso ele mesmo já recarrega).
+      loadTickets({ upToPage: ticketsPageNumberRef.current });
+    } else {
+      toast.warning(t("bulkPartialResult", { ok: res.ok, failed: res.failed }));
+    }
+  }, [t, loadTickets]);
+
   const handleBulkAction = useCallback(async (
     action: "open" | "pending" | "closed",
-    extra?: { userId?: number }
+    // skipFarewell só vem do encerrar em massa (diálogo de confirmação); "open" e
+    // "pending" nunca mandam o campo.
+    extra?: { userId?: number; skipFarewell?: boolean }
   ) => {
     const ids = Array.from(selectedTicketIds);
     if (!ids.length) return;
-    try {
-      for (const id of ids) {
-        await updateTicket(id, { status: action, ...extra });
-      }
-      toast.success(t("bulkUpdated", { count: ids.length }));
+    // Fechar SEM "não enviar despedida" manda mensagem a cada contato: um por vez.
+    const sendsFarewell = action === "closed" && extra?.skipFarewell !== true;
+    const res = await runBulkWithProgress(
+      ids,
+      (id) => updateTicket(id, { status: action, ...extra }),
+      sendsFarewell ? BULK_ACTION_SENDING_CONCURRENCY : BULK_ACTION_CONCURRENCY
+    );
+    reportBulkResult(res);
+    // Lote 100% falho não mexe em nada: mantém a seleção para o operador tentar de novo.
+    if (res.ok > 0) {
       cancelBulkMode();
       loadTickets({ upToPage: ticketsPageNumberRef.current });
-    } catch {
-      toast.error(t("errorBulkUpdate"));
     }
-  }, [selectedTicketIds, cancelBulkMode, loadTickets]);
+  }, [selectedTicketIds, runBulkWithProgress, reportBulkResult, cancelBulkMode, loadTickets]);
+
+  // "Resolver" e "Encerrar" do menu de massa caem aqui: nenhum dos dois fecha nada
+  // sem passar pela confirmação, que é onde o operador decide sobre a despedida.
+  const openBulkCloseConfirm = useCallback((kind: "resolve" | "close") => {
+    bulkCloseFiredRef.current = false;
+    setBulkCloseConfirmKind(kind);
+    setBulkSkipFarewell(true);
+    setBulkCloseConfirmOpen(true);
+  }, []);
+
+  const confirmBulkClose = useCallback(() => {
+    if (bulkCloseFiredRef.current) return;
+    bulkCloseFiredRef.current = true;
+    // Fecha ANTES de disparar: daqui em diante quem ocupa a tela é o overlay de progresso.
+    setBulkCloseConfirmOpen(false);
+    void handleBulkAction("closed", { skipFarewell: bulkSkipFarewell });
+  }, [handleBulkAction, bulkSkipFarewell]);
 
   const handleBulkTransferUser = useCallback(async () => {
     const ids = Array.from(selectedTicketIds);
     if (!ids.length || !bulkTransferUserId) return;
-    try {
-      for (const id of ids) {
-        // isTransference: 1 — alem de gerar o log/divisoria de transferencia, faz o
-        // backend validar acesso ao numero (senao a transferencia em massa p/ atendente
-        // escaparia do guard e poderia atribuir a quem nao ve o ticket).
-        await updateTicket(id, { userId: parseInt(bulkTransferUserId), status: "open", isTransference: 1 });
-      }
-      toast.success(t("bulkUpdated", { count: ids.length }));
+    // isTransference: 1 — alem de gerar o log/divisoria de transferencia, faz o
+    // backend validar acesso ao numero (senao a transferencia em massa p/ atendente
+    // escaparia do guard e poderia atribuir a quem nao ve o ticket).
+    const res = await runBulkWithProgress(ids, (id) =>
+      updateTicket(id, { userId: parseInt(bulkTransferUserId), status: "open", isTransference: 1 })
+    );
+    reportBulkResult(res);
+    if (res.ok > 0) {
       setBulkTransferUserOpen(false);
       setBulkTransferUserId("");
       cancelBulkMode();
       loadTickets({ upToPage: ticketsPageNumberRef.current });
-    } catch (err) {
-      const errorCode =
-        (err as { response?: { data?: { error?: string } } })?.response?.data?.error ??
-        (err as { data?: { error?: string } })?.data?.error;
-      if (errorCode === "ERR_TRANSFER_NO_WHATSAPP_ACCESS") {
-        toast.error(t("errorTransferNoWhatsappAccess"));
-      } else {
-        toast.error(t("errorBulkUpdate"));
-      }
     }
-  }, [selectedTicketIds, bulkTransferUserId, cancelBulkMode, loadTickets]);
+  }, [selectedTicketIds, bulkTransferUserId, runBulkWithProgress, reportBulkResult, cancelBulkMode, loadTickets]);
+
+  const doBulkTransferChannel = useCallback(async (ids: number[]) => {
+    if (!ids.length || !bulkTransferChannelId) return;
+    const selectedWa = whatsappsList.find((w) => w.id === parseInt(bulkTransferChannelId));
+    if (!selectedWa) return;
+    const res = await runBulkWithProgress(ids, (id) =>
+      transferTicketChannel(id, { channel: selectedWa.type || "baileys", whatsappId: parseInt(bulkTransferChannelId) })
+    );
+    reportBulkResult(res);
+    if (res.ok > 0) {
+      setBulkTransferChannelOpen(false);
+      setBulkTransferChannelId("");
+      setBulkChannelConflicts(null);
+      cancelBulkMode();
+      loadTickets({ upToPage: ticketsPageNumberRef.current });
+    }
+  }, [bulkTransferChannelId, whatsappsList, runBulkWithProgress, reportBulkResult, cancelBulkMode, loadTickets]);
 
   const handleBulkTransferChannel = useCallback(async () => {
     const ids = Array.from(selectedTicketIds);
     if (!ids.length || !bulkTransferChannelId) return;
-    const selectedWa = whatsappsList.find((w) => w.id === parseInt(bulkTransferChannelId));
-    if (!selectedWa) return;
+    // Aviso consultivo: contatos que já têm conversa aberta no canal de destino.
+    // Best-effort (erro → Map vazio → transfere direto, como antes).
+    const items = ids.map((id) => {
+      const tk = tickets.find((x) => x.id === id);
+      return { ticketId: id, number: tk?.contact?.number };
+    });
+    // A checagem vai em blocos de 50 e pode demorar em seleção grande: o botão
+    // entra em loading para o operador não clicar de novo achando que não pegou.
+    setBulkChannelChecking(true);
+    let conflicts: Map<number, ExistingOpenTicket>;
     try {
-      for (const id of ids) {
-        await transferTicketChannel(id, { channel: selectedWa.type || "baileys", whatsappId: parseInt(bulkTransferChannelId) });
-      }
-      toast.success(t("bulkUpdated", { count: ids.length }));
-      setBulkTransferChannelOpen(false);
-      setBulkTransferChannelId("");
-      cancelBulkMode();
-      loadTickets({ upToPage: ticketsPageNumberRef.current });
-    } catch { toast.error(t("errorBulkUpdate")); }
-  }, [selectedTicketIds, bulkTransferChannelId, whatsappsList, cancelBulkMode, loadTickets]);
+      conflicts = await findOpenTicketsOnTargetChannelBulk(items, parseInt(bulkTransferChannelId));
+    } finally {
+      setBulkChannelChecking(false);
+    }
+    if (conflicts.size > 0) {
+      setBulkChannelConflicts(conflicts);
+      return;
+    }
+    await doBulkTransferChannel(ids);
+  }, [selectedTicketIds, bulkTransferChannelId, tickets, doBulkTransferChannel]);
 
   const handleOpenBulkChatbot = useCallback(async () => {
     try {
@@ -7640,46 +8088,40 @@ export default function AtendimentoPage() {
   const handleBulkTransferChatbot = useCallback(async () => {
     const ids = Array.from(selectedTicketIds);
     if (!ids.length || !bulkTransferChatbotId) return;
-    try {
-      for (const id of ids) {
-        await transferToChatbot(id, parseInt(bulkTransferChatbotId));
-      }
-      toast.success(t("bulkUpdated", { count: ids.length }));
+    // O servidor envia o 1º passo do fluxo ao contato dentro deste request: um por vez.
+    const res = await runBulkWithProgress(
+      ids,
+      (id) => transferToChatbot(id, parseInt(bulkTransferChatbotId)),
+      BULK_ACTION_SENDING_CONCURRENCY
+    );
+    reportBulkResult(res);
+    if (res.ok > 0) {
       setBulkTransferChatbotOpen(false);
       setBulkTransferChatbotId("");
       cancelBulkMode();
       loadTickets({ upToPage: ticketsPageNumberRef.current });
-    } catch { toast.error(t("errorBulkUpdate")); }
-  }, [selectedTicketIds, bulkTransferChatbotId, cancelBulkMode, loadTickets]);
+    }
+  }, [selectedTicketIds, bulkTransferChatbotId, runBulkWithProgress, reportBulkResult, cancelBulkMode, loadTickets]);
 
   const handleBulkTransferQueue = useCallback(async () => {
     const ids = Array.from(selectedTicketIds);
     if (!ids.length || !bulkTransferQueueId) return;
-    try {
-      for (const id of ids) {
-        await updateTicket(id, {
-          queueId: parseInt(bulkTransferQueueId),
-          userId: null,
-          status: "pending",
-          isTransference: 1,
-        });
-      }
-      toast.success(t("bulkUpdated", { count: ids.length }));
+    const res = await runBulkWithProgress(ids, (id) =>
+      updateTicket(id, {
+        queueId: parseInt(bulkTransferQueueId),
+        userId: null,
+        status: "pending",
+        isTransference: 1,
+      })
+    );
+    reportBulkResult(res);
+    if (res.ok > 0) {
       setBulkTransferQueueOpen(false);
       setBulkTransferQueueId("");
       cancelBulkMode();
       loadTickets({ upToPage: ticketsPageNumberRef.current });
-    } catch (err) {
-      const errorCode =
-        (err as { response?: { data?: { error?: string } } })?.response?.data?.error ??
-        (err as { data?: { error?: string } })?.data?.error;
-      if (errorCode === "ERR_TRANSFER_NO_WHATSAPP_ACCESS") {
-        toast.error(t("errorTransferNoWhatsappAccess"));
-      } else {
-        toast.error(t("errorBulkUpdate"));
-      }
     }
-  }, [selectedTicketIds, bulkTransferQueueId, cancelBulkMode, loadTickets]);
+  }, [selectedTicketIds, bulkTransferQueueId, runBulkWithProgress, reportBulkResult, cancelBulkMode, loadTickets]);
 
   const toggleQueueId = (id: number) => {
     setSelectedQueueIds((prev) =>
@@ -7830,9 +8272,29 @@ export default function AtendimentoPage() {
       .join(",");
   }, [crossSiblingsTabStatus, filteredTickets]);
 
+  // A ação em massa muda o updatedAt de cada atendimento do lote (um ticket:update por
+  // PUT) e, com ele, a chave acima: sem suspender, era uma busca de até 50 itens por
+  // atendimento alterado. Booleano derivado porque entra nas dependências do efeito —
+  // é ele que faz a busca rodar de novo quando o lote termina.
+  const bulkRunning = bulkProgress !== null;
+  // Última aba que de fato buscou: trocar de aba busca na hora (os selos não podem
+  // demorar a aparecer); só a mudança de chave DENTRO da mesma aba espera o debounce.
+  const crossSiblingsFetchedTabRef = useRef("");
+  // Início da espera em curso, para o teto CROSS_SIBLINGS_MAX_WAIT_MS. null = nada esperando.
+  const crossSiblingsWaitSinceRef = useRef<number | null>(null);
+
   useEffect(() => {
     if (!crossSiblingsTabStatus) {
+      crossSiblingsFetchedTabRef.current = "";
+      crossSiblingsWaitSinceRef.current = null;
       setCrossSiblingsByTicketId((prev) => (Object.keys(prev).length ? {} : prev));
+      return;
+    }
+    // Suspenso enquanto a ação em massa roda. Sai ANTES de montar/limpar os itens de
+    // propósito: passar pelos setCrossSiblingsByTicketId({}) abaixo apagaria os selos
+    // durante o lote. A busca volta sozinha quando bulkRunning muda.
+    if (bulkRunning) {
+      crossSiblingsWaitSinceRef.current = null;
       return;
     }
     const buildItems = () => filteredTicketsRef.current
@@ -7846,31 +8308,51 @@ export default function AtendimentoPage() {
       .slice(0, 50); // cap alinhado ao MAX_ITEMS do backend
     const items = crossSiblingsQueryKey ? buildItems() : [];
     if (!items.length) {
+      crossSiblingsWaitSinceRef.current = null;
+      // Os selos são apagados aqui; zerar a última aba buscada faz a próxima busca sair
+      // na hora (sem isso, passar por uma aba vazia e voltar deixava a aba 1 s sem selos).
+      crossSiblingsFetchedTabRef.current = "";
       // Idempotente: preserva a referência quando já está vazio (não realimenta render)
       setCrossSiblingsByTicketId((prev) => (Object.keys(prev).length ? {} : prev));
       return;
     }
     let cancelled = false;
-    fetchCrossChannelSiblings(items, { includeSameChannel: crossSiblingsTabStatus !== "pending" })
-      .then(({ data }) => {
-        if (cancelled) return;
-        const siblings = data?.siblings || {};
-        if (!crossSiblingsSameChannelOnly) {
-          setCrossSiblingsByTicketId(siblings);
-          return;
-        }
-        // Aba Abertos: descarta os irmãos cross-canal do payload (o backend não tem
-        // um "somente mesmo canal"; pedir includeSameChannel traz os dois escopos).
-        const sameChannelOnly: Record<number, CrossChannelSibling[]> = {};
-        for (const [ticketId, list] of Object.entries(siblings)) {
-          const filtered = (list || []).filter((s) => s.sameChannel === true);
-          if (filtered.length) sameChannelOnly[Number(ticketId)] = filtered;
-        }
-        setCrossSiblingsByTicketId(sameChannelOnly);
-      })
-      .catch(() => { /* best-effort: sem badge nesta carga */ });
-    return () => { cancelled = true; };
-  }, [crossSiblingsQueryKey, crossSiblingsTabStatus, crossSiblingsSameChannelOnly]);
+    // Aba nova (ou primeira carga) busca na hora. Na mesma aba, cada mudança de chave
+    // reinicia a espera — uma rajada de ticket:update vira UMA busca —, até o teto.
+    let delay = 0;
+    if (crossSiblingsFetchedTabRef.current === crossSiblingsTabStatus) {
+      const now = Date.now();
+      if (crossSiblingsWaitSinceRef.current === null) crossSiblingsWaitSinceRef.current = now;
+      const waited = now - crossSiblingsWaitSinceRef.current;
+      delay = Math.max(0, Math.min(CROSS_SIBLINGS_DEBOUNCE_MS, CROSS_SIBLINGS_MAX_WAIT_MS - waited));
+    }
+    const timer = setTimeout(() => {
+      crossSiblingsFetchedTabRef.current = crossSiblingsTabStatus;
+      crossSiblingsWaitSinceRef.current = null;
+      fetchCrossChannelSiblings(items, { includeSameChannel: crossSiblingsTabStatus !== "pending" })
+        .then(({ data }) => {
+          if (cancelled) return;
+          const siblings = data?.siblings || {};
+          if (!crossSiblingsSameChannelOnly) {
+            setCrossSiblingsByTicketId(siblings);
+            return;
+          }
+          // Aba Abertos: descarta os irmãos cross-canal do payload (o backend não tem
+          // um "somente mesmo canal"; pedir includeSameChannel traz os dois escopos).
+          const sameChannelOnly: Record<number, CrossChannelSibling[]> = {};
+          for (const [ticketId, list] of Object.entries(siblings)) {
+            const filtered = (list || []).filter((s) => s.sameChannel === true);
+            if (filtered.length) sameChannelOnly[Number(ticketId)] = filtered;
+          }
+          setCrossSiblingsByTicketId(sameChannelOnly);
+        })
+        .catch(() => { /* best-effort: sem badge nesta carga */ });
+    }, delay);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [crossSiblingsQueryKey, crossSiblingsTabStatus, crossSiblingsSameChannelOnly, bulkRunning]);
 
   const groupedByChannel = React.useMemo(() => {
     if (viewMode !== "monitor") return {} as Record<string, { name: string; type?: string; tickets: Ticket[] }>;
@@ -7912,6 +8394,38 @@ export default function AtendimentoPage() {
     <TooltipProvider>
       {/* absolute inset-0 fills the main's relative container — no overflow, no margin tricks */}
       <div className="absolute inset-0 flex bg-background">
+        {/* Overlay de progresso da ação em massa. Vai por portal no body porque
+            precisa cobrir também os diálogos de transferência (que são portais).
+            pointer-events-auto: com um diálogo aberto o body fica em pointer-events
+            none e o overlay herdava isso — o clique atravessava e o botão "Transferir"
+            do diálogo por baixo disparava um SEGUNDO lote para os mesmos atendimentos. */}
+        {bulkProgress && typeof document !== "undefined" && createPortal(
+          <div
+            className="pointer-events-auto fixed inset-0 z-[120] flex items-center justify-center bg-black/50 backdrop-blur-sm"
+            role="status"
+            aria-live="polite"
+            aria-busy="true"
+          >
+            <div className="w-[min(320px,90vw)] rounded-xl border bg-card p-6 shadow-lg flex flex-col items-center gap-3">
+              <Loader2 className="h-8 w-8 animate-spin text-primary" />
+              <p className="text-sm font-medium text-center">{t("bulkProgressTitle")}</p>
+              <Progress
+                className="w-full"
+                value={bulkProgress.total ? Math.round((bulkProgress.done / bulkProgress.total) * 100) : 0}
+              />
+              <p className="text-xs text-muted-foreground tabular-nums">
+                {t("bulkProgressCount", { done: bulkProgress.done, total: bulkProgress.total })}
+              </p>
+              {bulkProgress.failed > 0 && (
+                <p className="text-xs text-destructive">
+                  {t("bulkProgressFailed", { count: bulkProgress.failed })}
+                </p>
+              )}
+              <p className="text-[11px] text-muted-foreground text-center">{t("bulkProgressHint")}</p>
+            </div>
+          </div>,
+          document.body
+        )}
         {/* Collapsed toggle — visible only on md when panel is collapsed and a ticket is open */}
         {panelCollapsed && currentTicket && viewMode !== "monitor" && (
           <button
@@ -7966,10 +8480,35 @@ export default function AtendimentoPage() {
               />
               <DialogFooter>
                 <Button variant="outline" onClick={() => setBulkTransferChannelOpen(false)}>{t("cancel")}</Button>
-                <Button onClick={handleBulkTransferChannel} disabled={!bulkTransferChannelId}>{t("bulkTransfer")}</Button>
+                <Button onClick={handleBulkTransferChannel} disabled={!bulkTransferChannelId || bulkChannelChecking}>
+                  {bulkChannelChecking && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                  {t("bulkTransfer")}
+                </Button>
               </DialogFooter>
             </DialogContent>
           </Dialog>
+
+          {/* Aviso consultivo da transferência em massa: parte dos selecionados já
+              tem conversa aberta no canal de destino — nunca bloqueia. */}
+          <TransferChannelConfirmDialog
+            open={!!bulkChannelConflicts}
+            onOpenChange={(o) => { if (!o) setBulkChannelConflicts(null); }}
+            sibling={null}
+            bulk={bulkChannelConflicts ? { conflictCount: bulkChannelConflicts.size, total: selectedTicketIds.size } : null}
+            targetChannelName={whatsappsList.find((w) => w.id === parseInt(bulkTransferChannelId))?.name || ""}
+            isRestrictedUser={false}
+            notViewAssignedTickets={false}
+            onConfirm={() => {
+              setBulkChannelConflicts(null);
+              void doBulkTransferChannel(Array.from(selectedTicketIds));
+            }}
+            onTransferClean={() => {
+              const conflictIds = new Set(bulkChannelConflicts ? Array.from(bulkChannelConflicts.keys()) : []);
+              const clean = Array.from(selectedTicketIds).filter((id) => !conflictIds.has(id));
+              setBulkChannelConflicts(null);
+              void doBulkTransferChannel(clean);
+            }}
+          />
 
           <Dialog open={bulkTransferChatbotOpen} onOpenChange={setBulkTransferChatbotOpen}>
             <DialogContent className="max-w-sm">
@@ -8005,6 +8544,45 @@ export default function AtendimentoPage() {
               <DialogFooter>
                 <Button variant="outline" onClick={() => setBulkTransferQueueOpen(false)}>{t("cancel")}</Button>
                 <Button onClick={handleBulkTransferQueue} disabled={!bulkTransferQueueId}>{t("bulkTransfer")}</Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
+
+          {/* Confirmação do encerrar em massa — "Resolver" e "Encerrar" abrem este mesmo
+              diálogo. Existe por causa da despedida: fechar dispara uma mensagem por
+              atendimento, então o lote só sai depois de o operador ver essa escolha. */}
+          <Dialog open={bulkCloseConfirmOpen} onOpenChange={setBulkCloseConfirmOpen}>
+            <DialogContent className="max-w-sm">
+              <DialogHeader>
+                <DialogTitle>{bulkCloseConfirmKind === "close" ? t("bulkClose") : t("bulkResolve")}</DialogTitle>
+                <DialogDescription>{t("bulkTicketsSelected", { count: selectedTicketIds.size })}</DialogDescription>
+              </DialogHeader>
+              <div className="space-y-2 rounded-md border bg-muted/30 px-3 py-2">
+                <div className="flex items-center gap-2">
+                  <Switch
+                    id="atendimento-bulk-skip-farewell"
+                    checked={bulkSkipFarewell}
+                    onCheckedChange={setBulkSkipFarewell}
+                  />
+                  <Label htmlFor="atendimento-bulk-skip-farewell" className="text-sm cursor-pointer">
+                    {tPainel("bulkSkipFarewellLabel")}
+                  </Label>
+                </div>
+                <p className="text-[11px] text-muted-foreground">
+                  {bulkSkipFarewell ? tPainel("bulkSkipFarewellOnNote") : tPainel("bulkSkipFarewellOffNote")}
+                </p>
+                {!bulkSkipFarewell && (
+                  <div className="flex items-start gap-1.5 rounded-md border border-amber-500/40 bg-amber-500/10 px-2 py-1.5">
+                    <AlertTriangle className="h-3.5 w-3.5 text-amber-500 shrink-0 mt-0.5" />
+                    <p className="text-[11px] text-amber-600 dark:text-amber-400">
+                      {tPainel("bulkFarewellWarning", { count: selectedTicketIds.size })}
+                    </p>
+                  </div>
+                )}
+              </div>
+              <DialogFooter className="gap-2 sm:gap-0">
+                <Button variant="outline" onClick={() => setBulkCloseConfirmOpen(false)}>{t("cancel")}</Button>
+                <Button onClick={confirmBulkClose}>{t("confirm")}</Button>
               </DialogFooter>
             </DialogContent>
           </Dialog>
@@ -8317,7 +8895,8 @@ export default function AtendimentoPage() {
                 <Button
                   variant={tabType === "private" ? "default" : "ghost"}
                   size="sm"
-                  className="h-7 text-xs flex-1 relative"
+                  // Com a guia Automações a largura segue o texto (o rótulo não cabe em 1/3); sem ela, como sempre.
+                  className={cn("h-7 text-xs relative", showChatBotLane ? "flex-auto" : "flex-1")}
                   onClick={() => setTabType("private")}
                 >
                   {t("private")}
@@ -8331,7 +8910,7 @@ export default function AtendimentoPage() {
                   <Button
                     variant={tabType === "groups" ? "default" : "ghost"}
                     size="sm"
-                    className="h-7 text-xs flex-1 relative"
+                    className={cn("h-7 text-xs relative", showChatBotLane ? "flex-auto" : "flex-1")}
                     onClick={() => setTabType("groups")}
                   >
                     <Users className="mr-1 h-3 w-3" /> {t("groups")}
@@ -8343,22 +8922,29 @@ export default function AtendimentoPage() {
                   </Button>
                 )}
                 {showChatBotLane && (
-                  <Button
-                    variant={tabType === "chatbot" ? "default" : "ghost"}
-                    size="sm"
-                    className="h-7 text-xs flex-1 relative"
-                    onClick={() => setTabType("chatbot")}
-                  >
-                    <Bot className="mr-1 h-3 w-3" /> {t("chatbot")}
-                    {universalCounter && tabUnreadCounts.chatbot > 0 && (
-                      <span className="absolute -top-1 -right-1 h-4 min-w-[16px] rounded-full bg-destructive text-[9px] text-destructive-foreground flex items-center justify-center px-1 pointer-events-none">
-                        {tabUnreadCounts.chatbot}
-                      </span>
-                    )}
-                  </Button>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <Button
+                        variant={tabType === "automation" ? "default" : "ghost"}
+                        size="sm"
+                        className="h-7 text-xs flex-auto min-w-0 relative"
+                        onClick={() => setTabType("automation")}
+                      >
+                        <Bot className="mr-1 h-3 w-3 shrink-0" /><span className="truncate">{t("automations")}</span>
+                        {universalCounter && tabUnreadCounts.automation > 0 && (
+                          <span className="absolute -top-1 -right-1 h-4 min-w-[16px] rounded-full bg-destructive text-[9px] text-destructive-foreground flex items-center justify-center px-1 pointer-events-none">
+                            {tabUnreadCounts.automation}
+                          </span>
+                        )}
+                      </Button>
+                    </TooltipTrigger>
+                    <TooltipContent>{t("automationsTabHint")}</TooltipContent>
+                  </Tooltip>
                 )}
               </div>
             ))}
+            {viewMode !== "monitor" && tenantConfigsLoaded && !settingsLoading && showChatBotLane && tabType === "automation" &&
+              renderAutomationFilterSelect("h-7 text-xs")}
 
             {/* Barra de ações em massa */}
             {bulkMode && selectedTicketIds.size > 0 && (
@@ -8394,10 +8980,10 @@ export default function AtendimentoPage() {
                         {t("bulkTransferToChatbot")}
                       </DropdownMenuItem>
                       <DropdownMenuSeparator />
-                      <DropdownMenuItem onClick={() => handleBulkAction("closed")}>
+                      <DropdownMenuItem onClick={() => openBulkCloseConfirm("resolve")}>
                         {t("bulkResolve")}
                       </DropdownMenuItem>
-                      <DropdownMenuItem className="text-destructive" onClick={() => handleBulkAction("closed")}>
+                      <DropdownMenuItem className="text-destructive" onClick={() => openBulkCloseConfirm("close")}>
                         {t("bulkClose")}
                       </DropdownMenuItem>
                     </DropdownMenuContent>
@@ -8729,7 +9315,7 @@ export default function AtendimentoPage() {
                 <div className="flex items-center gap-2 shrink-0">
                   {/* Group 1: Privados / Grupos / Chatbot */}
                   {tenantConfigsLoaded && !settingsLoading && (() => {
-                    const lastType = showChatBotLane ? "chatbot" : !ignoreGroupMsg ? "groups" : "private";
+                    const lastType = showChatBotLane ? "automation" : !ignoreGroupMsg ? "groups" : "private";
                     return (
                       <div className="flex items-center border rounded-md overflow-visible">
                         <button type="button" onClick={() => setTabType("private")} className={cn("relative h-8 px-2.5 text-xs flex items-center gap-1 transition-colors border-r rounded-l-md", lastType === "private" && "rounded-r-md last:border-r-0", tabType === "private" ? "bg-primary text-primary-foreground" : "bg-background text-muted-foreground hover:bg-accent hover:text-foreground")}>
@@ -8747,16 +9333,23 @@ export default function AtendimentoPage() {
                           </button>
                         )}
                         {showChatBotLane && (
-                          <button type="button" onClick={() => setTabType("chatbot")} className={cn("relative h-8 px-2.5 text-xs flex items-center gap-1 transition-colors rounded-r-md", tabType === "chatbot" ? "bg-primary text-primary-foreground" : "bg-background text-muted-foreground hover:bg-accent hover:text-foreground")}>
-                            <Bot className="h-3 w-3" />{t("chatbot")}
-                            {universalCounter && tabUnreadCounts.chatbot > 0 && (
-                              <span className="absolute -top-2 -right-2 h-4 min-w-[16px] rounded-full bg-destructive text-[9px] text-destructive-foreground flex items-center justify-center px-1 pointer-events-none z-10">{tabUnreadCounts.chatbot}</span>
-                            )}
-                          </button>
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <button type="button" onClick={() => setTabType("automation")} className={cn("relative h-8 px-2.5 text-xs flex items-center gap-1 transition-colors rounded-r-md", tabType === "automation" ? "bg-primary text-primary-foreground" : "bg-background text-muted-foreground hover:bg-accent hover:text-foreground")}>
+                                <Bot className="h-3 w-3" />{t("automations")}
+                                {universalCounter && tabUnreadCounts.automation > 0 && (
+                                  <span className="absolute -top-2 -right-2 h-4 min-w-[16px] rounded-full bg-destructive text-[9px] text-destructive-foreground flex items-center justify-center px-1 pointer-events-none z-10">{tabUnreadCounts.automation}</span>
+                                )}
+                              </button>
+                            </TooltipTrigger>
+                            <TooltipContent>{t("automationsTabHint")}</TooltipContent>
+                          </Tooltip>
                         )}
                       </div>
                     );
                   })()}
+                  {tenantConfigsLoaded && !settingsLoading && showChatBotLane && tabType === "automation" &&
+                    renderAutomationFilterSelect("h-8 w-auto min-w-[9rem] text-xs")}
                   {/* Group 2: Abertos / Pendentes / Fechados */}
                   <div className="flex items-center border rounded-md overflow-visible">
                     {statusTabs.map((tab, idx) => (
@@ -9008,7 +9601,7 @@ export default function AtendimentoPage() {
                                       {ticket.user?.name || "—"}
                                     </p>
                                     {/* Fila e Canal sempre visíveis no card — mantém paridade com painel-atendimentos
-                                        e com o painel Vue legado, onde clientes usam essas infos pra distribuir pendentes. */}
+                                        e com o painel legado, onde clientes usam essas infos pra distribuir pendentes. */}
                                     <div className="flex gap-1 mt-1 flex-wrap">
                                       {ticket.queue?.name ? (() => {
                                         const queueColor = ticket.queue.color || "#64748b";
@@ -9260,8 +9853,18 @@ export default function AtendimentoPage() {
               if (selectionRef.current !== null && selectionRef.current !== ticketId) return;
               const updated = normalizeTicket(tData as Record<string, unknown>);
               if (updated.status === "closed") {
-                setCurrentTicket(null);
-                setTickets(tickets.filter((t) => t.id !== ticketId));
+                // Mesma regra do refreshCurrentTicket: fora da aba Fechados o ticket
+                // encerrado sai da lista e da conversa; na aba Fechados ele segue visível
+                // e só o card é atualizado. Lista lida do store no momento da escrita —
+                // o snapshot `tickets` da closure atropelava um loadTickets concluído
+                // durante o await.
+                if (statusFilterRef.current !== "closed") {
+                  setCurrentTicket(null);
+                  setTickets(useTicketStore.getState().tickets.filter((t) => t.id !== ticketId));
+                  return;
+                }
+                setCurrentTicket(updated);
+                updateTicketInStore(updated);
                 return;
               }
               setCurrentTicket(updated);
@@ -10272,12 +10875,17 @@ export default function AtendimentoPage() {
           onAtender={async (ticket) => {
             const found = tickets.find((x) => x.id === ticket.id);
             if (found) {
+              // Como no link direto (?ticketId=): a aba acompanha o status do ticket —
+              // sem isso um ticket fechado escolhido na busca ficava selecionado com a aba
+              // Abertos ativa, e o primeiro refresh (nota, kanban...) o tirava da tela.
+              setStatusFilter(found.status || "open");
               await handleSelectTicket(found);
             } else {
               try {
                 const { data } = await fetchTicket(ticket.id);
                 if (data) {
                   const normalized = normalizeTicket(data as Record<string, unknown>);
+                  setStatusFilter(normalized.status || "open");
                   await handleSelectTicket(normalized);
                 }
               } catch {

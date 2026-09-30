@@ -18,8 +18,19 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Send, RefreshCw, X, Search, Loader2, Pause, PlayCircle, Upload, Info, AlertCircle } from "lucide-react";
+import { Send, RefreshCw, X, Search, Loader2, Pause, PlayCircle, Upload, Info, AlertCircle, ChevronDown, MapPin } from "lucide-react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Collapsible, CollapsibleTrigger } from "@/components/ui/collapsible";
+import { AddressFilterFields } from "@/components/contatos/address-filter-fields";
+import {
+  type AddressFilter,
+  AddressFilterUnsupportedError,
+  EMPTY_ADDRESS_FILTER,
+  addressFilterActiveCount,
+  assertAddressFilterEcho,
+  sameAddressFilter,
+  toAddressQuery,
+} from "@/lib/address-filter";
 import { toast } from "sonner";
 import { fetchWhatsapps, type Whatsapp } from "@/services/whatsapp";
 import { filterWhatsappsForCurrentUser } from "@/lib/whatsapp-user-access";
@@ -85,6 +96,7 @@ export default function MassaTextoPage() {
   // Título do preview WhatsApp (chave existente ×13 locales)
   const tPreview = useTranslations("massaRelatorioPage");
   const tCsv = useTranslations("bulkCsvImport");
+  const tAddr = useTranslations("addressFilter");
   const allowed = usePageAccess("massa");
   if (!allowed) return <AccessDenied />;
   const { isLiveMode } = useLiveMode();
@@ -177,6 +189,19 @@ export default function MassaTextoPage() {
   const [wallets, setWallets] = useState<{ id: number; name: string }[]>([]);
   const [selectedWallet, setSelectedWallet] = useState<string>("");
   const [loadingWallet, setLoadingWallet] = useState(false);
+
+  // Endereço (bairro, cidade, UF do cadastro): estreita etiqueta, kanban, carteira e todos.
+  // Só o filtro APLICADO entra nas cargas; digitar não recarrega nada.
+  const [addressFilter, setAddressFilter] = useState<AddressFilter>(EMPTY_ADDRESS_FILTER);
+  const [addressOpen, setAddressOpen] = useState(false);
+  const [addressUnsupported, setAddressUnsupported] = useState(false);
+  // Filtro digitado e ainda não aplicado: o envio espera o "Aplicar".
+  const [addressDraftPending, setAddressDraftPending] = useState(false);
+  // Retrato do filtro com que a lista foi montada: o envio exige que seja o aplicado.
+  const [listAddressFilter, setListAddressFilter] = useState<AddressFilter | null>(null);
+  // Geração da carga de contatos: carga nova ou troca de modo invalida a anterior, e o
+  // resultado de carga velha é descartado.
+  const loadGenRef = useRef(0);
 
   // Pós-envio: fechar / atribuir fila / atribuir usuário
   const [fecharTicket, setFecharTicket] = useState(true);
@@ -316,41 +341,89 @@ export default function MassaTextoPage() {
     }
   }, []);
 
+  // Invalida a carga de contatos em andamento (a que terminar depois é descartada) e zera os
+  // indicadores de carga de todos os modos.
+  const invalidateContactsLoad = () => {
+    loadGenRef.current += 1;
+    setLoadingTag(false);
+    setLoadingKanban(false);
+    setLoadingWallet(false);
+    setLoadingAllContacts(false);
+    return loadGenRef.current;
+  };
+
+  // Início de carga: geração nova, lista vazia e sem retrato até a carga terminar.
+  const beginContactsLoad = (setLoadingFlag: (value: boolean) => void) => {
+    const gen = invalidateContactsLoad();
+    setLoadingFlag(true);
+    setSelectedContacts([]);
+    setListAddressFilter(null);
+    return gen;
+  };
+
+  const isCurrentLoad = (gen: number) => gen === loadGenRef.current;
+
+  const finishContactsLoad = (list: ContactOption[], filter: AddressFilter) => {
+    setSelectedContacts(list);
+    setListAddressFilter(filter);
+    setAddressUnsupported(false);
+  };
+
+  // Resposta sem o eco com filtro ativo: backend antigo ignoraria o filtro e devolveria o
+  // público inteiro. A carga para, a lista fica vazia e o aviso aparece.
+  const failAddressUnsupported = () => {
+    setSelectedContacts([]);
+    setListAddressFilter(null);
+    setAddressUnsupported(true);
+    setAddressOpen(true);
+    toast.error(tAddr("unsupported"));
+  };
+
   const filterContactsByTag = useCallback(async () => {
     if (!selectedTag) return;
-    setLoadingTag(true);
-    setSelectedContacts([]);
+    const gen = beginContactsLoad(setLoadingTag);
+    const filter = addressFilter;
     const allContacts: ContactOption[] = [];
     let page = 1;
     const pageSize = 500;
     try {
       while (true) {
-        const res = await fetchContacts({ pageNumber: page, tagId: Number(selectedTag), pageSize });
+        const res = await fetchContacts({ pageNumber: page, tagId: Number(selectedTag), pageSize, ...toAddressQuery(filter) });
+        if (!isCurrentLoad(gen)) return;
+        assertAddressFilterEcho(filter, res.data);
         const data = res.data as { contacts: { name: string; number: string }[] };
         const list = data.contacts || [];
         allContacts.push(...list.map((c) => ({ label: c.name, value: c.number })));
         if (list.length < pageSize) break;
         page++;
         await new Promise((r) => setTimeout(r, 200));
+        if (!isCurrentLoad(gen)) return;
       }
-      setSelectedContacts(allContacts);
-    } catch {
+      finishContactsLoad(allContacts, filter);
+    } catch (err) {
+      if (!isCurrentLoad(gen)) return;
+      if (err instanceof AddressFilterUnsupportedError) {
+        failAddressUnsupported();
+        return;
+      }
       toast.error(t("errorFilterByTag"));
     } finally {
-      setLoadingTag(false);
+      if (isCurrentLoad(gen)) setLoadingTag(false);
     }
-  }, [selectedTag]);
+  }, [selectedTag, addressFilter]);
 
   const filterContactsByKanban = useCallback(async () => {
     if (!selectedKanban) return;
-    setLoadingKanban(true);
-    setSelectedContacts([]);
+    const gen = beginContactsLoad(setLoadingKanban);
+    const filter = addressFilter;
     const allContacts: ContactOption[] = [];
     let page = 1;
     const pageSize = 500;
     try {
       while (true) {
-        const res = await fetchContacts({ pageNumber: page, pageSize });
+        const res = await fetchContacts({ pageNumber: page, pageSize, ...toAddressQuery(filter) });
+        if (!isCurrentLoad(gen)) return;
+        assertAddressFilterEcho(filter, res.data);
         const data = res.data as { contacts: { name: string; number: string; kanban?: number }[] };
         const list = data.contacts || [];
         const filtered = list.filter((c) => String(c.kanban) === selectedKanban);
@@ -358,14 +431,20 @@ export default function MassaTextoPage() {
         if (list.length < pageSize) break;
         page++;
         await new Promise((r) => setTimeout(r, 200));
+        if (!isCurrentLoad(gen)) return;
       }
-      setSelectedContacts(allContacts);
-    } catch {
+      finishContactsLoad(allContacts, filter);
+    } catch (err) {
+      if (!isCurrentLoad(gen)) return;
+      if (err instanceof AddressFilterUnsupportedError) {
+        failAddressUnsupported();
+        return;
+      }
       toast.error(t("errorFilterByKanban"));
     } finally {
-      setLoadingKanban(false);
+      if (isCurrentLoad(gen)) setLoadingKanban(false);
     }
-  }, [selectedKanban]);
+  }, [selectedKanban, addressFilter]);
 
   const loadWallets = useCallback(async () => {
     try {
@@ -380,29 +459,37 @@ export default function MassaTextoPage() {
 
   const filterContactsByWallet = useCallback(async () => {
     if (!selectedWallet) return;
-    setLoadingWallet(true);
-    setSelectedContacts([]);
+    const gen = beginContactsLoad(setLoadingWallet);
+    const filter = addressFilter;
     try {
-      const list = await fetchAllContactsForWallet(selectedWallet);
-      setSelectedContacts(list.map((c) => ({ label: c.name ?? c.number, value: c.number })));
-    } catch {
+      const list = await fetchAllContactsForWallet(selectedWallet, filter, () => isCurrentLoad(gen));
+      if (!isCurrentLoad(gen)) return;
+      finishContactsLoad(list.map((c) => ({ label: c.name ?? c.number, value: c.number })), filter);
+    } catch (err) {
+      if (!isCurrentLoad(gen)) return;
+      if (err instanceof AddressFilterUnsupportedError) {
+        failAddressUnsupported();
+        return;
+      }
       toast.error(t("errorFilterByWallet"));
     } finally {
-      setLoadingWallet(false);
+      if (isCurrentLoad(gen)) setLoadingWallet(false);
     }
-  }, [selectedWallet]);
+  }, [selectedWallet, addressFilter]);
 
   const filterAllContacts = useCallback(async () => {
-    setLoadingAllContacts(true);
+    const gen = beginContactsLoad(setLoadingAllContacts);
+    const filter = addressFilter;
     setAllContactsLoadedCount(0);
-    setSelectedContacts([]);
     const all: ContactOption[] = [];
     let page = 1;
     const pageSize = 500;
     const maxPages = 200;
     try {
       while (page <= maxPages) {
-        const { data } = await fetchContacts({ pageNumber: page, pageSize });
+        const { data } = await fetchContacts({ pageNumber: page, pageSize, ...toAddressQuery(filter) });
+        if (!isCurrentLoad(gen)) return;
+        assertAddressFilterEcho(filter, data);
         const list = (data as { contacts?: { name: string; number: string }[] })?.contacts ?? [];
         if (list.length === 0) break;
         const opts = list.map((c) => ({ label: c.name, value: c.number }));
@@ -411,14 +498,32 @@ export default function MassaTextoPage() {
         if (list.length < pageSize) break;
         page += 1;
         await new Promise((r) => setTimeout(r, 200));
+        if (!isCurrentLoad(gen)) return;
       }
-      setSelectedContacts(all);
-    } catch {
+      finishContactsLoad(all, filter);
+    } catch (err) {
+      if (!isCurrentLoad(gen)) return;
+      if (err instanceof AddressFilterUnsupportedError) {
+        failAddressUnsupported();
+        return;
+      }
       toast.error(t("errorLoadContacts"));
     } finally {
-      setLoadingAllContacts(false);
+      if (isCurrentLoad(gen)) setLoadingAllContacts(false);
     }
-  }, []);
+  }, [addressFilter]);
+
+  // Filtro aplicado mudou: a lista atual deixa de valer e é esvaziada. Como as cargas dependem
+  // do filtro aplicado, o efeito do modo ativo roda de novo e recarrega uma vez.
+  const handleAddressFilterChange = (next: AddressFilter) => {
+    if (sameAddressFilter(next, addressFilter)) return;
+    invalidateContactsLoad();
+    setSelectedContacts([]);
+    setListAddressFilter(null);
+    setAllContactsLoadedCount(0);
+    setAddressUnsupported(false);
+    setAddressFilter(next);
+  };
 
   const handleContactSearchChange = (value: string) => {
     setContactSearch(value);
@@ -521,6 +626,17 @@ export default function MassaTextoPage() {
       return;
     }
 
+    // Lista montada com outro filtro de endereço (ou filtro digitado sem "Aplicar"): nunca envia.
+    if (
+      (useTags || useKanban || useWallet || useAllContacts) &&
+      selectedContacts.length > 0 &&
+      (addressDraftPending || !sameAddressFilter(listAddressFilter, addressFilter))
+    ) {
+      if (addressDraftPending) setAddressOpen(true);
+      toast.warning(tAddr("staleList"));
+      return;
+    }
+
     let numbers: string[] = [];
     if (useTags || useKanban || useWallet || useAllContacts) {
       numbers = selectedContacts.map((c) => c.value);
@@ -581,7 +697,7 @@ export default function MassaTextoPage() {
     setProgressModalOpen(true);
     let skippedTotal = 0;
 
-    // Criar registro de tracking no bulk-dispatch (igual ao Vue antigo)
+ // Criar registro de tracking no bulk-dispatch (igual ao front legado antigo)
     let bulkDispatchId: number | null = null;
     try {
       const dispatch = await createDispatch({
@@ -748,7 +864,9 @@ export default function MassaTextoPage() {
     setMediaDescription("");
     setVoiceUrl("");
     setSelectedConnections([]);
+    invalidateContactsLoad();
     setSelectedContacts([]);
+    setListAddressFilter(null);
     setUseAllContacts(false);
     setAllContactsLoadedCount(0);
     setContactSearch("");
@@ -964,6 +1082,7 @@ export default function MassaTextoPage() {
               id="contatosImportar"
               checked={contatosImportar}
               onCheckedChange={(v) => {
+                invalidateContactsLoad();
                 setContatosImportar(v);
                 if (v) { setUseTags(false); setUseKanban(false); setUseWallet(false); setUseAllContacts(false); }
               }}
@@ -983,6 +1102,7 @@ export default function MassaTextoPage() {
               id="useTags"
               checked={useTags}
               onCheckedChange={(v) => {
+                invalidateContactsLoad();
                 setUseTags(v);
                 if (v) { setUseKanban(false); setUseWallet(false); setContatosImportar(false); setUseAllContacts(false); }
               }}
@@ -994,6 +1114,7 @@ export default function MassaTextoPage() {
               id="useKanban"
               checked={useKanban}
               onCheckedChange={(v) => {
+                invalidateContactsLoad();
                 setUseKanban(v);
                 if (v) { setUseTags(false); setUseWallet(false); setContatosImportar(false); setUseAllContacts(false); }
               }}
@@ -1005,6 +1126,7 @@ export default function MassaTextoPage() {
               id="useWallet"
               checked={useWallet}
               onCheckedChange={(v) => {
+                invalidateContactsLoad();
                 setUseWallet(v);
                 if (v) { setUseTags(false); setUseKanban(false); setContatosImportar(false); setUseAllContacts(false); }
               }}
@@ -1016,6 +1138,7 @@ export default function MassaTextoPage() {
               id="useAllContacts"
               checked={useAllContacts}
               onCheckedChange={(v) => {
+                invalidateContactsLoad();
                 setUseAllContacts(v);
                 if (v) { setUseTags(false); setUseKanban(false); setUseWallet(false); setContatosImportar(false); }
               }}
@@ -1023,6 +1146,50 @@ export default function MassaTextoPage() {
             <Label htmlFor="useAllContacts">{t("allContacts")}</Label>
           </div>
         </div>
+
+        {/* Endereço: estreita etiqueta, kanban, carteira e todos (fora de importar e da lista manual) */}
+        {(useTags || useKanban || useWallet || useAllContacts) && (
+          <Collapsible open={addressOpen} onOpenChange={setAddressOpen} className="rounded-md border">
+            <CollapsibleTrigger asChild>
+              <button
+                type="button"
+                className="flex w-full items-center justify-between gap-2 px-3 py-2 text-sm font-medium"
+              >
+                <span className="flex min-w-0 items-center gap-2">
+                  <MapPin className="h-4 w-4 shrink-0 text-muted-foreground" />
+                  <span className="truncate">{tAddr("title")}</span>
+                </span>
+                <span className="flex shrink-0 items-center gap-2">
+                  {!addressOpen && addressFilterActiveCount(addressFilter) > 0 && (
+                    <Badge variant="secondary" className="text-xs">
+                      {tAddr("activeCount", { count: addressFilterActiveCount(addressFilter) })}
+                    </Badge>
+                  )}
+                  <ChevronDown className={cn("h-4 w-4 transition-transform", addressOpen && "rotate-180")} />
+                </span>
+              </button>
+            </CollapsibleTrigger>
+            {/* Montado mesmo com o bloco fechado (só escondido): o Radix desmontaria os campos e o
+                filtro digitado sem "Aplicar" sumiria sem aviso. */}
+            <div className={cn("space-y-3 border-t px-3 py-3", !addressOpen && "hidden")}>
+              {addressUnsupported && (
+                <Alert variant="destructive">
+                  <AlertCircle className="h-4 w-4" />
+                  <AlertDescription>{tAddr("unsupported")}</AlertDescription>
+                </Alert>
+              )}
+              <AddressFilterFields
+                value={addressFilter}
+                onChange={handleAddressFilterChange}
+                mode="apply"
+                layout="row"
+                showHint
+                disabled={sending}
+                onPendingChange={setAddressDraftPending}
+              />
+            </div>
+          </Collapsible>
+        )}
 
         {/* Wallet selector */}
         {useWallet && (

@@ -1,7 +1,7 @@
 "use client";
 
 /**
- * MassaTextoVariavel — matches Vue's MassaTextoVariavel.vue
+ * MassaTextoVariavel — matches the legacy front's MassaTextoVariavel
  *
  * Data format for each line (textarea or CSV):
  *   number,var1,var2,...
@@ -345,7 +345,7 @@ export default function MassaTextoVariavelPage() {
     setProgresso(0);
     let skippedTotal = 0;
 
-    // Criar registro de tracking no bulk-dispatch (igual ao Vue antigo)
+ // Criar registro de tracking no bulk-dispatch (igual ao front legado antigo)
     let bulkDispatchId: number | null = null;
     try {
       const dispatch = await createDispatch({

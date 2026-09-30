@@ -116,7 +116,7 @@ import {
   type TemplateCategoryFilter,
   matchTemplateCategory,
 } from "@/components/atendimento/template-category-filter";
-import { suggestReply } from "@/services/copilot";
+import { copilotUiLangPayload, suggestReply } from "@/services/copilot";
 import api, { BACKGROUND_REQUEST } from "@/lib/api";
 import { checkFileForChannel, checkGalleryItemForChannel } from "@/lib/channel-file-limits";
 import { buildSignedBody } from "@/lib/signature";
@@ -323,6 +323,7 @@ export function MessageInput({
   const isEvoGo = ch === "evogo";
   const isZapi = ch.includes("zapi") && !ch.includes("uazapi");
   const isUazapi = ch.includes("uazapi");
+  const isMeow = ch === "meow";
   const isZapo = ch === "zapo";
   const isDefaultWpp = ch === "whatsapp";
   const isNonWabaWpp = isBaileys || isEvo || isEvoGo || isZapi || isUazapi || isZapo || isDefaultWpp;
@@ -335,9 +336,14 @@ export function MessageInput({
 
   const isGroup = !!ticketData?.isGroup;
   const supportsGhostMention = isNonWabaWpp && isGroup;
-  // Autocomplete @menção inline (estilo WhatsApp). Por ora só canais que enviam
-  // sem wabaId: Baileys, Zapo e whatsapp-web.js. Evolution precisa de wabaId (TODO).
-  const supportsInlineMention = isGroup && (isBaileys || isZapo || isDefaultWpp);
+  // Menção de participante existe em todo canal com grupo não-WABA (o meow fica
+  // fora do isNonWabaWpp, que gateia também recursos que ele não tem).
+  const supportsMention = (isNonWabaWpp || isMeow) && isGroup;
+  // Autocomplete @menção inline (estilo WhatsApp). Canais cujo envio de menção
+  // resolve a conexão pelo whatsappId: Baileys, Zapo, whatsapp-web.js, uazapi,
+  // meow e Z-API. Evolution precisa de wabaId (TODO).
+  const supportsInlineMention =
+    isGroup && (isBaileys || isZapo || isDefaultWpp || isUazapi || isMeow || isZapi);
   // .includes (e não ===): a imagem Docker Hub é buildada com o placeholder
   // __ZPRO_INTERACTIVE_BAILEYS__ nesta env, substituído por true/false pelo
   // docker-entrypoint.sh no startup. Comparação === com o literal inlined seria
@@ -355,10 +361,14 @@ export function MessageInput({
   // Instagram contacts store IGSID in instagramPK (number is null for Instagram)
   // Messenger contacts store PSID in messengerId
   const _contact = ticketData?.contact as any;
+  // WABA: contato que conversa por nome de usuario nao tem telefone — o identificador
+  // proprio e o unico endereco possivel, e o backend sabe usa-lo. Sem ele os envios
+  // interativos (botoes, lista, CTA, flow) sairiam com `from` vazio.
   const contactFrom = (
     (_contact?.instagramPK ? String(_contact.instagramPK) : null) ||
     (_contact?.messengerId ? String(_contact.messengerId) : null) ||
     _contact?.number ||
+    _contact?.bsuid ||
     ""
   );
   const whatsappId = ticketData?.whatsapp?.id ?? ticketData?.whatsappId ?? 0;
@@ -405,7 +415,7 @@ export function MessageInput({
   }, [tokenApi, whatsappId, isWabaLike, isInstagram, isMessenger, ensureWabaToken]);
 
   // ── Janela de 24 horas (WABA / Hub / Instagram / Messenger) ──────────────
-  // Vue: desabilitarInput — canal waba/hub: desabilita se última mensagem > 24h
+ // Front legado: desabilitarInput — canal waba/hub: desabilita se última mensagem > 24h
   const windowChannels = isWabaLike || isHub || isInstagram || ch === "messenger";
   const [windowClosed, setWindowClosed] = React.useState(false);
   const [windowRemainingMs, setWindowRemainingMs] = React.useState<number | null>(null);
@@ -454,6 +464,17 @@ export function MessageInput({
   // desvia pela conexão vinculada (os handlers de mídia/interativo do backend não
   // aceitam forceLinked — iriam pro caminho oficial e a Meta rejeitaria).
   const hybridTextOnly = windowClosed && hybridLinkedReady;
+
+  // Coexistência sem "Botões e listas pela API oficial" (hybridNativeInteractive):
+  // botão/lista de sessão viram menu numerado em texto e saem pela conexão vinculada.
+  // Avisa o atendente ANTES de enviar — a bolha e o celular mostram o menu numerado.
+  const hybridInteractiveDegraded = useWhatsappStore((s) => {
+    if (!isWaba) return false;
+    const w = s.whatsapps.find((x) => x.id === whatsappId);
+    if (!w || w.hybridMode !== "coexistence" || !w.linkedChannelId || w.hybridNativeInteractive) return false;
+    const linked = s.whatsapps.find((x) => x.id === w.linkedChannelId);
+    return !!linked && linked.status === "CONNECTED";
+  });
 
   // Botão "Enviar template" do banner de janela fechada: `text-warning` cru fica
   // ilegível no tema claro (âmbar sobre âmbar, ~2:1). O controle de luminância
@@ -1417,8 +1438,11 @@ export function MessageInput({
     if (e.key === "Enter" && !e.shiftKey && !isTouchDevice) { e.preventDefault(); handleSend(); }
     if (e.key === "Escape") {
       if (mentionPickerOpen) { setMentionPickerOpen(false); setMentionAtIndex(null); return; }
-      if (showQuickReplies) { setShowQuickReplies(false); return; }
-      if (replyTo) onClearReply();
+      // O Esc que fecha as respostas rápidas ou limpa a citação é consumido
+      // aqui (preventDefault), e o handler global do atendimento não desseleciona
+      // o ticket junto. Mesmo contrato das camadas do Radix.
+      if (showQuickReplies) { e.preventDefault(); setShowQuickReplies(false); return; }
+      if (replyTo) { e.preventDefault(); onClearReply(); }
     }
   };
 
@@ -1639,7 +1663,7 @@ export function MessageInput({
     }
     // Troca de intenção: se havia uma estruturada preparada, descarta.
     setPendingStructured(null);
-    // Same as Vue: if message is literally "null", don't put in input.
+ // Same as the legacy front: if message is literally "null", don't put in input.
     // Mesmo sem texto precisa limpar a caixa: o que está lá é o token "/atalho"
     // da própria busca — sem isso ele seguiria junto como mensagem de texto.
     setText(reply.message && reply.message !== "null" ? reply.message : "");
@@ -2427,6 +2451,15 @@ export function MessageInput({
     if (!wFlow.body.trim() || !wFlow.flowCta.trim()) {
       toast.warning(t("fillMsgAndCta")); return;
     }
+    // Gupshup identifica o flow SÓ por id; Meta/Dialog360 aceitam id ou nome.
+    if (isGupshup) {
+      if (!wFlow.flowId.trim()) { toast.warning(t("flowIdRequiredGupshup")); return; }
+    } else if (!wFlow.flowId.trim() && !wFlow.flowName.trim()) {
+      toast.warning(t("flowIdOrNameRequired")); return;
+    }
+    if (wFlow.headerType !== "text" && wFlow.headerLink.trim() && !isValidHttpUrl(wFlow.headerLink)) {
+      toast.error(tErrors("invalidMediaHeaderUrl")); return;
+    }
     try {
       const header = wFlow.headerType === "text"
         ? (wFlow.headerText ? { type: "text", text: wFlow.headerText } : undefined)
@@ -2447,6 +2480,7 @@ export function MessageInput({
           flowAction: wFlow.action,
           flowActionPayload,
           ...(wFlow.headerText ? { headerText: wFlow.headerText } : {}),
+          ...(header ? { header } : {}),
         });
       } else if (isDialog360) {
         await senders.sendFlow({
@@ -2454,6 +2488,7 @@ export function MessageInput({
           body: signedBody,
           footer: wFlow.footer || "",
           flowId: wFlow.flowId || undefined,
+          flowName: wFlow.flowName || undefined,
           flowCta: wFlow.flowCta,
           flowToken: wFlow.flowToken || undefined,
           flowAction: wFlow.action,
@@ -3400,7 +3435,7 @@ export function MessageInput({
     try {
       const { data } = await listHubTemplates({ whatsappId });
       const list: WabaTemplate[] = Array.isArray(data) ? data : [];
-      // Filter: no VIDEO/IMAGE/DOCUMENT headers, no {{}} variables (matches Vue buscarTemplateWabaHub)
+ // Filter: no VIDEO/IMAGE/DOCUMENT headers, no {{}} variables (matches front legado buscarTemplateWabaHub)
       const filtered = list.filter((tmpl) => {
         const hasMediaHeader = tmpl.components?.some((c) =>
           c.type === "HEADER" && ["VIDEO", "IMAGE", "DOCUMENT"].includes(c.format || "")
@@ -3619,6 +3654,10 @@ if (data.model) setRewriteModel(data.model);
         conversation,
         type: summarizeForm.type,
         ticketId,
+        // Idioma da interface so quando o resumo e para LER na tela. Com destino
+        // "campo de mensagem" o texto pode ser enviado ao cliente, entao segue o
+        // idioma do tenant.
+        ...(summarizeForm.dest === "view" ? copilotUiLangPayload() : {}),
       });
       const summary = aiData.summary;
 
@@ -4007,6 +4046,12 @@ if (data.model) setRewriteModel(data.model);
             <X className="h-3 w-3" />
           </Button>
           <span className="text-xs text-muted-foreground">{t("quickReplyMediaPending")}</span>
+          {hybridInteractiveDegraded && (
+            <span className="flex items-center gap-1 text-xs text-amber-700 dark:text-amber-300">
+              <Route className="h-3 w-3 shrink-0" />
+              {t("hybridInteractiveDegradedShort")}
+            </span>
+          )}
         </div>
       )}
 
@@ -4128,7 +4173,11 @@ if (data.model) setRewriteModel(data.model);
               disabled={isDisabled || rewriting}
               rows={1}
               className={cn(
-                "w-full resize-none rounded-lg border bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring min-h-[36px] max-h-[120px] disabled:opacity-50",
+                // text-base no mobile de proposito: o Safari do iOS amplia a
+                // pagina inteira ao focar campo com fonte < 16px (e nao desfaz
+                // o zoom no blur), cortando a tela na lateral direita. A partir
+                // de sm volta a 14px — desktop inalterado.
+                "w-full resize-none rounded-lg border bg-background px-3 py-2 text-base sm:text-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring min-h-[36px] max-h-[120px] disabled:opacity-50",
                 text.trim().length > 0 && "pr-8"
               )}
               style={{ height: "auto", overflowY: "hidden" }}
@@ -4527,13 +4576,15 @@ if (data.model) setRewriteModel(data.model);
                   )}
 
                   {/* ── Grupo: mensagem fantasma, menção ── */}
-                  {supportsGhostMention && (
+                  {supportsMention && (
                     <>
                       <DropdownMenuSeparator />
                       <DropdownMenuLabel className="text-xs text-muted-foreground">{t("groupLabel")}</DropdownMenuLabel>
-                      <DropdownMenuItem onClick={() => setGroupModal("ghost")} disabled={isDisabled}>
-                        <Ghost className="mr-2 h-4 w-4" /> {t("ghostMessage")}
-                      </DropdownMenuItem>
+                      {supportsGhostMention && (
+                        <DropdownMenuItem onClick={() => setGroupModal("ghost")} disabled={isDisabled}>
+                          <Ghost className="mr-2 h-4 w-4" /> {t("ghostMessage")}
+                        </DropdownMenuItem>
+                      )}
                       <DropdownMenuItem onClick={() => setGroupModal("mention")} disabled={isDisabled}>
                         <AtSign className="mr-2 h-4 w-4" /> {t("mentionParticipant")}
                       </DropdownMenuItem>
@@ -4773,6 +4824,12 @@ if (data.model) setRewriteModel(data.model);
             <>
               <DialogHeader><DialogTitle className="flex items-center gap-2"><MousePointerClick className="h-4 w-4" /> {t("sendWabaButtonsTitle")}</DialogTitle></DialogHeader>
               <div className="space-y-3 py-2 overflow-y-auto flex-1 min-h-0">
+                {hybridInteractiveDegraded && (
+                  <div className="flex items-start gap-2 rounded-md border border-amber-300 bg-amber-50 dark:border-amber-800 dark:bg-amber-950/40 px-3 py-2 text-xs text-amber-800 dark:text-amber-300">
+                    <Route className="h-4 w-4 shrink-0 mt-0.5" />
+                    <span>{t("hybridInteractiveDegradedNote")}</span>
+                  </div>
+                )}
                 <div>
                   <Label className="text-xs">{t("messageRequired")}</Label>
                   <Textarea value={wBtn.msg} onChange={(e) => setWBtn((p) => ({ ...p, msg: e.target.value }))} placeholder={t("mainMessagePlaceholder")} className="mt-1 text-sm" rows={3} maxLength={WABA_LIMITS.body} />
@@ -4797,6 +4854,12 @@ if (data.model) setRewriteModel(data.model);
             <>
               <DialogHeader><DialogTitle className="flex items-center gap-2"><LayoutList className="h-4 w-4" /> {t("sendWabaListTitle")}</DialogTitle></DialogHeader>
               <div className="overflow-y-auto max-h-[60vh] space-y-3 py-2 pr-1">
+                {hybridInteractiveDegraded && (
+                  <div className="flex items-start gap-2 rounded-md border border-amber-300 bg-amber-50 dark:border-amber-800 dark:bg-amber-950/40 px-3 py-2 text-xs text-amber-800 dark:text-amber-300">
+                    <Route className="h-4 w-4 shrink-0 mt-0.5" />
+                    <span>{t("hybridInteractiveDegradedNote")}</span>
+                  </div>
+                )}
                 <div>
                   <Label className="text-xs">{t("headerRequired")}</Label>
                   <Input value={wList.header} onChange={(e) => setWList((p) => ({ ...p, header: e.target.value }))} className="mt-1 h-8 text-sm" maxLength={WABA_LIMITS.headerText} />
@@ -5275,7 +5338,7 @@ if (data.model) setRewriteModel(data.model);
                   </div>
                   <div>
                     <Label className="text-xs">Flow Name</Label>
-                    <Input value={wFlow.flowName} onChange={(e) => setWFlow((p) => ({ ...p, flowName: e.target.value }))} className="mt-1 h-8 text-sm" />
+                    <Input value={wFlow.flowName} onChange={(e) => setWFlow((p) => ({ ...p, flowName: e.target.value }))} className="mt-1 h-8 text-sm" disabled={isGupshup} />
                   </div>
                 </div>
                 <div>
@@ -5295,6 +5358,7 @@ if (data.model) setRewriteModel(data.model);
                       <SelectItem value="data_exchange">data_exchange</SelectItem>
                     </SelectContent>
                   </Select>
+                  <p className="text-[10px] text-muted-foreground mt-0.5">{t("wabaFlowHint.dataExchangeHelp")}</p>
                 </div>
                 <div>
                   <Label className="text-xs">{t("actionPayloadJson")}</Label>

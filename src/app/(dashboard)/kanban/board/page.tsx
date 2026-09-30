@@ -27,8 +27,9 @@ import {
   DropdownMenuSeparator, DropdownMenuItem, DropdownMenuCheckboxItem,
 } from "@/components/ui/dropdown-menu";
 import {
-  Save, RefreshCw, Search, Wallet, Phone, X, ChevronLeft, ChevronRight, MessageSquare, MessagesSquare, Filter, Eye,
+  Save, RefreshCw, Search, Wallet, Phone, X, ChevronLeft, ChevronRight, MessageSquare, MessagesSquare, Filter, Eye, Info,
 } from "lucide-react";
+import { Alert, AlertDescription } from "@/components/ui/alert";
 import { SpyContactMessagesPopover } from "@/components/atendimento/spy-contact-messages-dialog";
 import { ContactConversationDialog } from "@/components/atendimento/contact-conversation-dialog";
 import { toast } from "sonner";
@@ -352,7 +353,7 @@ export default function KanbanBoardPage() {
   const router = useRouter();
   const { user, isAdmin, isSuporte, supervisorAdmin, getConfigValue, isRestrictedUser } = useAuthStore();
   const whatsapps = useWhatsappStore((s) => s.whatsapps);
-  // Vue: admin ou (super && supervisorAdmin === 'disabled') vê todos os canais
+ // Front legado: admin ou (super && supervisorAdmin === 'disabled') vê todos os canais
   const isAdminLike = user?.profile === "admin" || (user?.profile === "super" && supervisorAdmin !== "enabled");
   const setWhatsapps = useWhatsappStore((s) => s.setWhatsapps);
 
@@ -511,6 +512,11 @@ export default function KanbanBoardPage() {
       if (NUMBER_CHANNEL_TYPES.includes(ch.type)) {
         return contact.number ? [{ ch, connections: sessions }] : [];
       }
+      // Bot do Telegram só escreve para quem já falou com ele (telegramId gravado
+      // na primeira mensagem do contato).
+      if (ch.type === "telegram") {
+        return contact.telegramId ? [{ ch, connections: sessions }] : [];
+      }
       // Messenger/Instagram require specific fields not present in KanbanContact
       return [];
     });
@@ -662,7 +668,7 @@ export default function KanbanBoardPage() {
         if (page > 30) break; // safety limit
       }
 
-      // Sort contacts by id ascending (matches Vue behaviour)
+ // Sort contacts by id ascending (matches legacy behaviour)
       allContacts.sort((a, b) => a.id - b.id);
 
       // 3. Distribute contacts into lanes
@@ -1139,6 +1145,14 @@ export default function KanbanBoardPage() {
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4 py-2">
+            {startTicketChannelType === "telegram" && (
+              <Alert className="py-2 px-3">
+                <Info className="h-4 w-4" />
+                <AlertDescription className="pl-6 text-xs">
+                  {tCommon("telegramStartTicketNote")}
+                </AlertDescription>
+              </Alert>
+            )}
             {startTicketConnections.length > 1 && (
               <div className="space-y-2">
                 <Label>{t("connection")} *</Label>

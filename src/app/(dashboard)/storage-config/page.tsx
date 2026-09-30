@@ -122,6 +122,23 @@ const EMPTY: Partial<StorageConfig> = {
   tenantId: null,
 };
 
+/**
+ * Cloudflare R2: o endpoint *.r2.cloudflarestorage.com é a API S3 PRIVADA — exige assinatura e
+ * nunca serve objetos publicamente. Sem a URL pública (domínio r2.dev do bucket ou domínio
+ * próprio) o backend recusa salvar com 400 (assertR2PublicUrl), então o campo NÃO é opcional
+ * nesse provedor. Espelhamos a mesma condição do backend, inclusive quando o endpoint do R2 é
+ * colado na aba "Personalizado". AWS S3 / MinIO seguem opcionais.
+ */
+const R2_S3_API_HOST = "r2.cloudflarestorage.com";
+
+function publicUrlBaseIsRequired(
+  tab: ProviderTab,
+  endpoint: string | null | undefined
+): boolean {
+  if (tab === "r2") return true;
+  return (endpoint ?? "").toLowerCase().includes(R2_S3_API_HOST);
+}
+
 export default function StorageConfigPage() {
   const t = useTranslations("storageConfigPage");
 
@@ -144,6 +161,7 @@ export default function StorageConfigPage() {
     progress.open &&
     progress.phase !== "done" &&
     progress.phase !== "error";
+  const publicUrlRequired = publicUrlBaseIsRequired(providerTab, editing.endpoint);
 
   const set = (k: keyof StorageConfig, v: unknown) =>
     setEditing((p) => ({ ...p, [k]: v }));
@@ -252,6 +270,16 @@ export default function StorageConfigPage() {
     if (!editing.bucket?.trim()) { toast.error(t("errorBucketRequired")); return; }
     if (!editing.accessKeyId?.trim()) { toast.error(t("errorAccessKeyRequired")); return; }
     if (!editing.secretAccessKey?.trim()) { toast.error(t("errorSecretKeyRequired")); return; }
+    // Mesma regra do backend: na criação sempre exige (a config nasce ativa); na edição só
+    // quando a config vai ficar ATIVA, para não travar quem só quer desativar uma config R2.
+    if (
+      publicUrlRequired &&
+      (!editing.id || editing.isActive) &&
+      !editing.publicUrlBase?.trim()
+    ) {
+      toast.error(t("errorPublicUrlRequiredR2"));
+      return;
+    }
 
     setSaving(true);
     try {
@@ -272,8 +300,13 @@ export default function StorageConfigPage() {
       }
       setDialogOpen(false);
       load();
-    } catch {
-      toast.error(editing.id ? t("errorUpdating") : t("errorCreating"));
+    } catch (err) {
+      // O backend recusa configurações inválidas com uma mensagem explicando o motivo
+      // (ex.: R2 sem URL pública). Engolir tudo num "Erro ao criar" deixava o operador
+      // sem saber o que corrigir.
+      const apiMessage = (err as { response?: { data?: { error?: string } } })
+        ?.response?.data?.error;
+      toast.error(apiMessage || (editing.id ? t("errorUpdating") : t("errorCreating")));
     } finally {
       setSaving(false);
     }
@@ -398,13 +431,18 @@ export default function StorageConfigPage() {
       </div>
 
       <div className="space-y-1.5">
-        <Label>{t("labelPublicUrlBase")}</Label>
+        <Label>
+          {publicUrlRequired ? t("labelPublicUrlBaseRequired") : t("labelPublicUrlBase")}
+          {publicUrlRequired && <span className="ml-0.5 text-destructive">*</span>}
+        </Label>
         <Input
           value={editing.publicUrlBase ?? ""}
           onChange={(e) => set("publicUrlBase", e.target.value)}
-          placeholder="https://cdn.example.com"
+          placeholder={publicUrlRequired ? "https://pub-xxxx.r2.dev" : "https://cdn.example.com"}
         />
-        <p className="text-xs text-muted-foreground">{t("publicUrlBaseHint")}</p>
+        <p className="text-xs text-muted-foreground">
+          {publicUrlRequired ? t("publicUrlBaseHintR2") : t("publicUrlBaseHint")}
+        </p>
       </div>
     </>
   );

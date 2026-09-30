@@ -23,6 +23,7 @@ export function channelSupportsEvaluation(channel: string | undefined): boolean 
 export interface EvaluationTicketLike {
   id: number;
   channel?: string;
+  isGroup?: boolean;
   contact: { number?: string; name?: string };
   whatsapp?: { id?: number; tokenAPI?: string };
   user?: { name?: string };
@@ -54,6 +55,9 @@ export async function sendEvaluationForTicket(
   ticket: EvaluationTicketLike,
   opts: SendEvaluationOptions = {}
 ): Promise<"native" | "link"> {
+  // Grupo não recebe pesquisa: sem esta trava a pergunta sairia no grupo antes de o
+  // backend recusar a avaliação.
+  if (ticket.isGroup) throw new Error("ERR_GROUP_NOT_SUPPORTED");
   const label = opts.questionLabel || DEFAULT_QUESTION_LABEL;
   const config = opts.config ?? null;
 

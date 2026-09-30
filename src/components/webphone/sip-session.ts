@@ -7,6 +7,9 @@
  */
 import type { UserAgent, Registerer, Session } from "sip.js";
 
+/** `name` do erro quando o pedido de microfone fica sem resposta (ver AsteriskSipProvider). */
+export const SIP_MIC_TIMEOUT_ERROR = "SipMicTimeout";
+
 export const sipSession = {
   ua: null as UserAgent | null,
   registerer: null as Registerer | null,

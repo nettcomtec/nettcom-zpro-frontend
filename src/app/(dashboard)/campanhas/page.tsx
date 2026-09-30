@@ -38,7 +38,7 @@ import {
   Target, Plus, Search, MoreHorizontal, Play, XCircle, Copy, Trash2,
   ChevronDown, Users, SkipForward, CheckCheck, Edit, RefreshCw, FileText,
   Pause, PlayCircle, Camera, Globe, Phone,
-  FolderOpen, Video, Sparkles, Loader2,
+  FolderOpen, Video, Sparkles, Loader2, Shuffle,
 } from "lucide-react";
 import { toast } from "sonner";
 import {
@@ -49,10 +49,11 @@ import {
   pauseCampaign, resumeCampaign,
 } from "@/services/campaigns";
 import {
-  fetchEmailTemplates, fetchEmailTemplate,
-  type EmailTemplate as EmailMktTemplate, type EmailTemplateAttachment,
+  fetchEmailTemplates, fetchEmailTemplate, fetchEmailEditorCapabilities, readApiError,
+  type EmailTemplate as EmailMktTemplate, type EmailTemplateAttachment, type EmailEditorCapabilities,
 } from "@/services/email-marketing";
-import { EmailHtmlEditor } from "@/components/email-marketing/email-html-editor";
+import { EmailBodyField } from "@/components/email-marketing/email-body-field";
+import { parseEmailDesign, type EmailDesign } from "@/lib/email-design";
 import { fetchQueues } from "@/services/queues";
 import { fetchKanbans } from "@/services/kanban";
 import { fetchStages } from "@/services/funnel";
@@ -65,6 +66,15 @@ import { fetchTags } from "@/services/tags";
 import { fetchAllUsers } from "@/services/users";
 import { generateTemplateViaCopilot } from "@/services/copilot";
 import { estadosBR } from "@/lib/constants";
+import { AddressFilterFields } from "@/components/contatos/address-filter-fields";
+import {
+  type AddressFilter,
+  AddressFilterUnsupportedError,
+  EMPTY_ADDRESS_FILTER,
+  assertAddressFilterEcho,
+  sameAddressFilter,
+  toAddressQuery,
+} from "@/lib/address-filter";
 import { usePageAccess } from "@/hooks/use-page-access";
 import { AccessDenied } from "@/components/layout/access-denied";
 // Cobranca (template ORDER_DETAILS) — PLANO_TEMPLATE_ORDER_DETAILS.md F6.2.
@@ -314,6 +324,11 @@ function buildTemplateComponents(template: WABATemplate | null, vars: Record<str
           if (btnAny.type === "URL" && btnAny.url && /\{\{[^}]+\}\}/.test(btnAny.url) && vars[`button_url_${idx}`]) {
             return { sub_type: "url", index: idx, parameters: [{ type: "text", text: vars[`button_url_${idx}`] }] };
           }
+          // Flow / Catálogo: botão sem variável, mas a Meta exige o component
+          // BUTTONS com o índice — sem ele o template ia sem o botão.
+          if (btnAny.type === "FLOW" || btnAny.type === "CATALOG") {
+            return { sub_type: btnAny.type.toLowerCase(), index: idx, parameters: [] };
+          }
           return null;
         })
         .filter(Boolean);
@@ -331,6 +346,53 @@ function buildTemplateComponents(template: WABATemplate | null, vars: Record<str
   }
 
   return result.length ? JSON.stringify(result) : null;
+}
+
+/**
+ * Inverso de buildTemplateComponents: reidrata os valores já configurados a
+ * partir da coluna `templateComponents` da campanha. Sem isso os campos de
+ * variável/botão voltavam vazios ao editar e o Salvar gravava espaço em branco
+ * por cima do que o cliente tinha preenchido.
+ *
+ * Os parâmetros de BODY são gravados nas DUAS chaves possíveis (`body_N` e
+ * `body_named_N`) de propósito: só uma delas é renderizada — depende de o
+ * template ser numerado ou nomeado — e payloads antigos nem sempre trazem o
+ * `name` do parâmetro para desempatar.
+ */
+function templateVarsFromSaved(raw: string | null | undefined): Record<string, string> {
+  const vars: Record<string, string> = {};
+  if (!raw) return vars;
+  let saved: unknown;
+  try {
+    saved = typeof raw === "string" ? JSON.parse(raw) : raw;
+  } catch {
+    return vars;
+  }
+  if (!Array.isArray(saved)) return vars;
+  // Campo não preenchido é gravado como " " (a Meta recusa string vazia).
+  const clean = (v: unknown) => (typeof v === "string" && v.trim() ? v : "");
+
+  for (const comp of saved as Record<string, any>[]) {
+    if (comp?.type === "HEADER" && ["IMAGE", "VIDEO", "DOCUMENT"].includes(String(comp.format))) {
+      const val = clean(comp.value);
+      if (val) vars["header_url"] = val;
+    } else if (comp?.type === "BODY" && Array.isArray(comp.parameters)) {
+      comp.parameters.forEach((p: Record<string, unknown>, i: number) => {
+        const val = clean(p?.text);
+        if (!val) return;
+        vars[`body_${i}`] = val;
+        vars[`body_named_${i}`] = val;
+      });
+    } else if (comp?.type === "BUTTONS" && Array.isArray(comp.buttons)) {
+      comp.buttons.forEach((btn: Record<string, any>) => {
+        const idx = Number(btn?.index);
+        const val = clean(btn?.parameters?.[0]?.text);
+        if (!Number.isFinite(idx) || !val) return;
+        vars[btn?.sub_type === "url" ? `button_url_${idx}` : `button_${idx}`] = val;
+      });
+    }
+  }
+  return vars;
 }
 
 /**
@@ -547,6 +609,8 @@ function CampaignFormDialog({ open, onClose, onSaved, editCampaign, sessions }: 
   const [templates, setTemplates] = useState<WABATemplate[]>([]);
   const [loadingTemplates, setLoadingTemplates] = useState(false);
   const [previewMsg, setPreviewMsg] = useState(0); // 0,1,2 → message1,2,3
+  // Destaca os campos de mensagem vazios só depois de uma tentativa de salvar
+  const [showMessageErrors, setShowMessageErrors] = useState(false);
 
   // Gallery picker (for WABA header media)
   const [galleryOpen, setGalleryOpen] = useState(false);
@@ -557,6 +621,8 @@ function CampaignFormDialog({ open, onClose, onSaved, editCampaign, sessions }: 
   const msgRefs = [msg1Ref, msg2Ref, msg3Ref];
   const messages = [formMessage1, formMessage2, formMessage3];
   const setMessages = [setFormMessage1, setFormMessage2, setFormMessage3];
+  const messageLabels = [t("message1"), t("message2"), t("message3")];
+  const messageInvalid = messages.map((m) => showMessageErrors && !m?.trim());
 
   // AI campaign generator
   const [aiDialogOpen, setAiDialogOpen] = useState(false);
@@ -585,7 +651,7 @@ function CampaignFormDialog({ open, onClose, onSaved, editCampaign, sessions }: 
       setAiDialogOpen(false);
       toast.success(tCampaignAI("apply"));
     } catch (err: unknown) {
-      const status = (err as { response?: { status?: number } })?.response?.status;
+      const { status } = readApiError(err);
       if (status === 422) {
         toast.error(tCopilot("noApiKey"));
       } else {
@@ -610,6 +676,10 @@ function CampaignFormDialog({ open, onClose, onSaved, editCampaign, sessions }: 
   const [formUnsubFooter, setFormUnsubFooter] = useState(true);
   const [emailTemplates, setEmailTemplates] = useState<EmailMktTemplate[]>([]);
   const [loadingEmailBody, setLoadingEmailBody] = useState(false);
+  // Editor visual (PLANO_EMAIL_EDITOR_VISUAL D6): a campanha guarda só o HTML; o projeto
+  // do modelo escolhido semeia uma cópia editável
+  const [emailEditorCaps, setEmailEditorCaps] = useState<EmailEditorCapabilities | null>(null);
+  const [emailBodySeed, setEmailBodySeed] = useState<{ design: EmailDesign | null; nonce: number } | undefined>(undefined);
   // Ações quando o contato responder (replyActions)
   const [raQueueId, setRaQueueId] = useState("");
   const [raUserId, setRaUserId] = useState("");
@@ -627,6 +697,7 @@ function CampaignFormDialog({ open, onClose, onSaved, editCampaign, sessions }: 
   const resetEmailForm = () => {
     setFormEmailSubject("");
     setFormEmailHtml("");
+    setEmailBodySeed({ design: null, nonce: Date.now() });
     setFormEmailTemplateId("");
     setFormEmailAttachments([]);
     setFormUnsubFooter(true);
@@ -676,6 +747,8 @@ function CampaignFormDialog({ open, onClose, onSaved, editCampaign, sessions }: 
       const arr = Array.isArray(res?.data) ? res.data : res?.data?.tags ?? res?.data?.data ?? [];
       setRaTags(Array.isArray(arr) ? arr : []);
     }).catch(() => setRaTags([]));
+    // Capacidades do editor visual (null = backend antigo → só o editor clássico)
+    fetchEmailEditorCapabilities().then(setEmailEditorCaps);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, isEmailSession]);
 
@@ -699,6 +772,8 @@ function CampaignFormDialog({ open, onClose, onSaved, editCampaign, sessions }: 
     fetchCampaign(editCampaign.id)
       .then(({ data: full }: any) => {
         setFormEmailHtml(full?.emailHtml || "");
+        // Campanha guarda só HTML: nada de projeto visual a semear
+        setEmailBodySeed({ design: null, nonce: Date.now() });
         try {
           const atts = full?.emailAttachments ? JSON.parse(String(full.emailAttachments)) : [];
           setFormEmailAttachments(Array.isArray(atts) ? atts : []);
@@ -719,6 +794,7 @@ function CampaignFormDialog({ open, onClose, onSaved, editCampaign, sessions }: 
       const full = await fetchEmailTemplate(Number(templateId));
       setFormEmailSubject(full.subject || "");
       setFormEmailHtml(full.html || "");
+      setEmailBodySeed({ design: parseEmailDesign(full.designJson), nonce: Date.now() });
       setFormEmailAttachments(full.attachments || []);
     } catch {
       toast.error(tEmail("errorLoadTemplate"));
@@ -773,17 +849,27 @@ function CampaignFormDialog({ open, onClose, onSaved, editCampaign, sessions }: 
       resetEmailForm();
     }
     setPreviewMsg(0);
+    setShowMessageErrors(false);
     setTemplates([]);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, editCampaign]);
 
   // Load WABA/Gupshup/Dialog360 templates
+  //
+  // `open` e `editCampaign?.id` são dependências OBRIGATÓRIAS: o diálogo fica
+  // sempre montado (só a prop `open` muda), então o estado sobrevive ao fechar.
+  // Sem elas, reabrir o formulário com a MESMA sessão não re-executava o efeito
+  // — mas a rotina que popula o form já tinha zerado a lista e a seleção — e o
+  // template gravado sumia do seletor ("Nenhum template aprovado encontrado")
+  // até um F5.
   useEffect(() => {
+    if (!open) return;
     if (!isWabaSession || !selectedSession) {
       setTemplates([]);
       setFormTemplate(null);
       return;
     }
+    let cancelled = false;
     const sessType = (selectedSession.type ?? "").toLowerCase();
     setLoadingTemplates(true);
     // getTemplatesForChannel resolve tokenAPI/id do canal e auto-cura pos-login
@@ -794,19 +880,27 @@ function CampaignFormDialog({ open, onClose, onSaved, editCampaign, sessions }: 
     );
     fetchPromise
       .then((list: any) => {
-        setTemplates(Array.isArray(list) ? [...list].sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase())) : []);
+        if (cancelled) return; // troca de sessão/fechamento: resposta antiga não escreve
+        const arr: any[] = Array.isArray(list) ? list : [];
+        setTemplates([...arr].sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase())));
         // If editing and had a template, re-select it
         if (editCampaign?.templateName) {
-          const found = list.find(
+          const found = arr.find(
             (t: any) => t.name === editCampaign.templateName && t.language === editCampaign.templateLanguage
           );
-          if (found) setFormTemplate(found);
+          if (found) {
+            setFormTemplate(found);
+            // Reidrata os valores gravados (variáveis, header e botões) — sem
+            // isso o Salvar sobrescreveria o conteúdo configurado com vazio.
+            setFormTemplateVars(templateVarsFromSaved(editCampaign.templateComponents));
+          }
         }
       })
-      .catch(() => setTemplates([]))
-      .finally(() => setLoadingTemplates(false));
+      .catch(() => { if (!cancelled) setTemplates([]); })
+      .finally(() => { if (!cancelled) setLoadingTemplates(false); });
+    return () => { cancelled = true; };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isWabaSession, selectedSession?.tokenAPI]);
+  }, [open, editCampaign?.id, isWabaSession, selectedSession?.id, selectedSession?.tokenAPI]);
 
   const insertVar = (varValue: string, msgIndex: number) => {
     const ref = msgRefs[msgIndex];
@@ -888,7 +982,19 @@ function CampaignFormDialog({ open, onClose, onSaved, editCampaign, sessions }: 
         return;
       }
     } else {
-      if (!formMessage1?.trim()) { toast.error(t("message1")); return; }
+      // O backend exige as TRÊS mensagens (cada contato recebe uma delas, sorteada
+      // no disparo). Validar só a 1ª deixava o usuário salvar com 2/3 vazias e
+      // levar um erro genérico — aqui a tela aponta o campo que falta.
+      const missing = messages
+        .map((m, i) => (m?.trim() ? -1 : i))
+        .filter((i) => i >= 0);
+      if (missing.length > 0) {
+        setShowMessageErrors(true);
+        setPreviewMsg(missing[0]);
+        msgRefs[missing[0]].current?.focus();
+        toast.error(t("messagesRequired", { fields: missing.map((i) => messageLabels[i]).join(", ") }));
+        return;
+      }
     }
 
     const startDate = new Date(formStart);
@@ -988,7 +1094,9 @@ function CampaignFormDialog({ open, onClose, onSaved, editCampaign, sessions }: 
       onSaved();
       onClose();
     } catch (e: unknown) {
-      const msg = (e as { response?: { data?: { message?: string } } })?.response?.data?.message;
+      // lib/api.ts rejeita com `error.response || error`: o corpo fica na RAIZ
+      const errBody = e as { data?: { message?: string }; response?: { data?: { message?: string } } } | null;
+      const msg = errBody?.data?.message ?? errBody?.response?.data?.message;
       // Código ERR_* cru do backend não vira toast (sem tradução) — cai no
       // fallback genérico traduzido (auditoria pós-impl. RISCO-6)
       const displayable = msg && !msg.startsWith("ERR_") ? msg : null;
@@ -1289,7 +1397,12 @@ function CampaignFormDialog({ open, onClose, onSaved, editCampaign, sessions }: 
                   {loadingEmailBody ? (
                     <Skeleton className="h-[260px] w-full" />
                   ) : (
-                    <EmailHtmlEditor value={formEmailHtml} onChange={setFormEmailHtml} />
+                    <EmailBodyField
+                      value={formEmailHtml}
+                      onChange={setFormEmailHtml}
+                      seed={emailBodySeed}
+                      capabilities={emailEditorCaps}
+                    />
                   )}
                 </div>
 
@@ -1502,7 +1615,14 @@ function CampaignFormDialog({ open, onClose, onSaved, editCampaign, sessions }: 
                     <p className="text-[11px] text-muted-foreground">{t("mediaKeepHint")}</p>
                   )}
                 </div>
-                {([t("message1"), t("message2"), t("message3")]).map((label, i) => (
+                <div className="rounded-md border border-blue-200 bg-blue-50 dark:border-blue-800 dark:bg-blue-950/30 px-3 py-2 flex gap-2 items-start text-xs text-blue-700 dark:text-blue-300">
+                  <Shuffle className="h-4 w-4 shrink-0 mt-0.5" />
+                  <div className="space-y-0.5">
+                    <p className="font-medium">{t("messagesVariationTitle")}</p>
+                    <p>{t("messagesVariationNote")}</p>
+                  </div>
+                </div>
+                {messageLabels.map((label, i) => (
                   <div key={i} className="space-y-1">
                     <div className="flex items-center justify-between">
                       <button
@@ -1511,6 +1631,7 @@ function CampaignFormDialog({ open, onClose, onSaved, editCampaign, sessions }: 
                         className={`text-sm font-medium px-2 py-0.5 rounded transition-colors ${previewMsg === i ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground"}`}
                       >
                         {label}
+                        <span className={previewMsg === i ? "ml-0.5" : "ml-0.5 text-destructive"}>*</span>
                       </button>
                       <div className="flex items-center gap-1">
                         <Button
@@ -1543,9 +1664,10 @@ function CampaignFormDialog({ open, onClose, onSaved, editCampaign, sessions }: 
                       value={messages[i]}
                       onChange={(e) => setMessages[i](e.target.value)}
                       onFocus={() => setPreviewMsg(i)}
-                      placeholder="Digite a mensagem..."
+                      placeholder={t("messagePlaceholder")}
                       rows={3}
-                      className="text-sm"
+                      aria-invalid={messageInvalid[i] || undefined}
+                      className={cn("text-sm", messageInvalid[i] && "border-destructive focus-visible:ring-destructive")}
                     />
                   </div>
                 ))}
@@ -1641,6 +1763,7 @@ interface ContactSelectDialogProps {
 function ContactSelectDialog({ open, campaignId, campaignStatus, onClose, onAdded }: ContactSelectDialogProps) {
   const t = useTranslations("campanhasPage");
   const tErrors = useTranslations("errors");
+  const tAddr = useTranslations("addressFilter");
   const { isLiveMode } = useLiveMode();
   const [tags, setTags] = useState<{ id: number; name: string; tag?: string }[]>([]);
   const [wallets, setWallets] = useState<{ id: number; name: string }[]>([]);
@@ -1652,6 +1775,15 @@ function ContactSelectDialog({ open, campaignId, campaignStatus, onClose, onAdde
     wallets: [] as number[],
     searchParam: "",
   });
+  // Endereço do cadastro (bairro, cidade, UF do cadastro) APLICADO: só ele vai na busca.
+  const [addressFilter, setAddressFilter] = useState<AddressFilter>(EMPTY_ADDRESS_FILTER);
+  // Retrato do filtro com que a lista foi montada: "Adicionar" exige que seja o aplicado.
+  const [listAddressFilter, setListAddressFilter] = useState<AddressFilter | null>(null);
+  const [addressUnsupported, setAddressUnsupported] = useState(false);
+  // Filtro digitado e ainda não aplicado: "Adicionar" espera o "Aplicar".
+  const [addressDraftPending, setAddressDraftPending] = useState(false);
+  // Geração da busca: resposta de busca velha (ou de antes de reabrir o diálogo) é descartada.
+  const loadGenRef = useRef(0);
   const [contacts, setContacts] = useState<ContactForCampaign[]>([]);
   const [selectedContacts, setSelectedContacts] = useState<ContactForCampaign[]>([]);
   const [loadingContacts, setLoadingContacts] = useState(false);
@@ -1661,8 +1793,12 @@ function ContactSelectDialog({ open, campaignId, campaignStatus, onClose, onAdde
 
   useEffect(() => {
     if (!open) return;
+    loadGenRef.current += 1;
+    setLoadingContacts(false);
     setSelectedContacts([]);
     setContacts([]);
+    setListAddressFilter(null);
+    setAddressUnsupported(false);
     Promise.all([fetchTags(), fetchAllUsers()]).then(([tagsRes, usersRes]) => {
       setTags((tagsRes?.data ?? []) as { id: number; name: string; tag?: string }[]);
       const usersArr = usersRes.data?.users ?? [];
@@ -1670,25 +1806,51 @@ function ContactSelectDialog({ open, campaignId, campaignStatus, onClose, onAdde
     }).catch(() => { toast.error(tErrors("loadFailed")); });
   }, [open]);
 
-  const loadContacts = async () => {
+  // Toda busca zera a seleção e a lista: "Todos" marcado na lista anterior nunca vira público
+  // da lista nova. Sem o eco, com filtro de endereço ativo, a lista fica vazia (backend antigo
+  // ignora o filtro e devolveria o público sem ele).
+  const loadContacts = async (filter: AddressFilter = addressFilter) => {
+    const gen = ++loadGenRef.current;
     setLoadingContacts(true);
+    setSelectedContacts([]);
+    setContacts([]);
+    setListAddressFilter(null);
     try {
-      const res = await fetchContactsReportCampaign({
+      const res = await fetchContactsReportCampaign<ContactForCampaign>({
         startDate: contactFilters.startDate,
         endDate: contactFilters.endDate,
         ddds: contactFilters.ddds.length ? contactFilters.ddds : undefined,
         tags: contactFilters.tags.length ? contactFilters.tags : undefined,
         wallets: contactFilters.wallets.length ? contactFilters.wallets : undefined,
         searchParam: contactFilters.searchParam || undefined,
+        ...toAddressQuery(filter),
       });
+      if (gen !== loadGenRef.current) return;
+      assertAddressFilterEcho(filter, res?.data);
       const list = (res?.data?.contacts ?? res?.data ?? []) as ContactForCampaign[];
+      setSelectedContacts([]);
       setContacts(Array.isArray(list) ? list : []);
-    } catch {
-      toast.error(t("errorLoad"));
+      setListAddressFilter(filter);
+      setAddressUnsupported(false);
+    } catch (err) {
+      if (gen !== loadGenRef.current) return;
+      setSelectedContacts([]);
       setContacts([]);
+      if (err instanceof AddressFilterUnsupportedError) {
+        setAddressUnsupported(true);
+        toast.error(tAddr("unsupported"));
+        return;
+      }
+      toast.error(t("errorLoad"));
     } finally {
-      setLoadingContacts(false);
+      if (gen === loadGenRef.current) setLoadingContacts(false);
     }
+  };
+
+  // Aplicar (ou limpar) o filtro de endereço refaz a busca com os demais filtros da tela.
+  const handleAddressFilterChange = (next: AddressFilter) => {
+    setAddressFilter(next);
+    void loadContacts(next);
   };
 
   const toggleContact = (c: ContactForCampaign) => {
@@ -1707,6 +1869,12 @@ function ContactSelectDialog({ open, campaignId, campaignStatus, onClose, onAdde
 
   const handleAdd = async () => {
     if (!campaignId || selectedContacts.length === 0) { toast.error(t("selectAtLeastOne")); return; }
+    // Lista ainda carregando, montada com outro filtro de endereço ou filtro digitado sem
+    // "Aplicar": nada é gravado.
+    if (loadingContacts || addressDraftPending || !sameAddressFilter(listAddressFilter, addressFilter)) {
+      toast.warning(tAddr("staleList"));
+      return;
+    }
     setAdding(true);
     try {
       await addCampaignContacts(campaignId, selectedContacts.map((c) => ({ id: c.id, name: c.name || "" })));
@@ -1722,7 +1890,7 @@ function ContactSelectDialog({ open, campaignId, campaignStatus, onClose, onAdde
 
   return (
     <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
-      <DialogContent className="w-[calc(100vw-2rem)] sm:max-w-4xl max-h-[92vh] overflow-hidden flex flex-col">
+      <DialogContent className="w-[calc(100vw-2rem)] sm:max-w-4xl max-h-[92vh] overflow-y-auto flex flex-col">
         <DialogHeader>
           <DialogTitle>{t("addContactsDialog")}</DialogTitle>
           <DialogDescription>
@@ -1799,26 +1967,45 @@ function ContactSelectDialog({ open, campaignId, campaignStatus, onClose, onAdde
                 </Popover>
               </div>
             </div>
-            <div className="flex gap-2">
-              <SearchableSelect
-                options={[{ value: "__all__", label: t("allStates") }, ...estadosBR.map((e) => ({ value: e.sigla, label: e.nome }))]}
-                value={contactFilters.ddds.join(",") || "__all__"}
-                onValueChange={(v) =>
-                  setContactFilters((p) => ({ ...p, ddds: v === "__all__" ? [] : [v] }))
-                }
-                placeholder={t("stateDdd")}
-                className="w-[180px] h-8 text-sm"
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-end">
+              <div className="space-y-1.5 sm:w-[180px] sm:shrink-0">
+                <Label className="text-xs">{t("stateDdd")}</Label>
+                <SearchableSelect
+                  options={[{ value: "__all__", label: t("allStates") }, ...estadosBR.map((e) => ({ value: e.sigla, label: e.nome }))]}
+                  value={contactFilters.ddds.join(",") || "__all__"}
+                  onValueChange={(v) =>
+                    setContactFilters((p) => ({ ...p, ddds: v === "__all__" ? [] : [v] }))
+                  }
+                  placeholder={t("stateDdd")}
+                  className="w-[180px] h-8 text-sm"
+                />
+              </div>
+              <div className="flex flex-1 gap-2">
+                <Input
+                  placeholder={t("searchNamePhone")}
+                  value={contactFilters.searchParam}
+                  onChange={(e) => setContactFilters((p) => ({ ...p, searchParam: e.target.value }))}
+                  onKeyDown={(e) => e.key === "Enter" && loadContacts()}
+                  className="flex-1 h-8 text-sm"
+                />
+                <Button size="sm" onClick={() => void loadContacts()} disabled={loadingContacts} className="h-8">
+                  {loadingContacts ? "..." : t("search")}
+                </Button>
+              </div>
+            </div>
+            <div className="space-y-2 border-t pt-3">
+              <AddressFilterFields
+                value={addressFilter}
+                onChange={handleAddressFilterChange}
+                mode="apply"
+                layout="row"
+                showTitle
+                disabled={adding}
+                onPendingChange={setAddressDraftPending}
               />
-              <Input
-                placeholder={t("searchNamePhone")}
-                value={contactFilters.searchParam}
-                onChange={(e) => setContactFilters((p) => ({ ...p, searchParam: e.target.value }))}
-                onKeyDown={(e) => e.key === "Enter" && loadContacts()}
-                className="flex-1 h-8 text-sm"
-              />
-              <Button size="sm" onClick={loadContacts} disabled={loadingContacts} className="h-8">
-                {loadingContacts ? "..." : t("search")}
-              </Button>
+              {addressUnsupported && (
+                <p role="alert" className="text-xs text-destructive">{tAddr("unsupported")}</p>
+              )}
             </div>
           </fieldset>
         )}
@@ -1870,7 +2057,11 @@ function ContactSelectDialog({ open, campaignId, campaignStatus, onClose, onAdde
 
         {contacts.length === 0 && canEdit && (
           <div className="flex-1 flex items-center justify-center border rounded-lg min-h-[120px]">
-            <p className="text-sm text-muted-foreground">Use os filtros acima e clique em Buscar</p>
+            {loadingContacts ? (
+              <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+            ) : (
+              <p className="text-sm text-muted-foreground">Use os filtros acima e clique em Buscar</p>
+            )}
           </div>
         )}
 
@@ -1883,7 +2074,7 @@ function ContactSelectDialog({ open, campaignId, campaignStatus, onClose, onAdde
         <DialogFooter className="shrink-0">
           <Button variant="outline" onClick={onClose} className="w-full sm:w-auto">{t("cancel")}</Button>
           {canEdit && (
-            <Button onClick={handleAdd} disabled={adding || selectedContacts.length === 0} className="w-full sm:w-auto">
+            <Button onClick={handleAdd} disabled={adding || loadingContacts || selectedContacts.length === 0} className="w-full sm:w-auto">
               {adding ? t("saving") : t("addNContacts", { n: selectedContacts.length })}
             </Button>
           )}
@@ -2141,7 +2332,7 @@ export default function CampanhasPage() {
         // Só 404 (backend antigo) e 402 (fora do plano) desligam o modo e-mail;
         // erro transitório (timeout/500) não pode sumir com o canal de uma
         // campanha de e-mail existente (auditoria pós-impl. #10)
-        const status = (probeErr as { response?: { status?: number } })?.response?.status;
+        const { status } = readApiError(probeErr);
         emailCapable = status !== 404 && status !== 402;
       }
       const { data: res } = await fetchWhatsapps();
@@ -2526,7 +2717,7 @@ export default function CampanhasPage() {
           sections: [
             {
               title: t("helpS0T"),
-              items: [t("helpS0I0"), t("helpS0I1"), t("helpS0I2"), t("helpS0I3")],
+              items: [t("helpS0I0"), t("helpS0I1"), t("helpS0I2"), t("helpS0I3"), t("helpS0I4")],
             },
             {
               title: t("helpS1T"),

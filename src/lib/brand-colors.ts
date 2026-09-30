@@ -125,7 +125,7 @@ function applyShadcnVars(flat: Record<string, string>): void {
 /**
  * Aplica a paleta de cores ao documento.
  *
- * - Sempre define --q-<key> (compatibilidade legado Vue/Quasar).
+ * - Sempre define --q-<key> (compatibilidade com o front legado).
  * - Modo claro: aplica paleta `input` às variáveis shadcn (--primary, etc.) em HSL.
  * - Modo escuro SEM paleta dark: remove overrides shadcn e deixa globals.css .dark assumir.
  * - Modo escuro COM paleta dark (`darkInput`): aplica `darkInput` às variáveis shadcn.
@@ -148,7 +148,7 @@ export function applyBrandColors(
   removeShadcnBrandVars();
 
   if (isDark) {
-    // Sempre aplica --q-* da paleta escura (ou light como fallback para Vue/Quasar)
+ // Sempre aplica --q-* da paleta escura (ou light como fallback para front legado)
     const darkFlat = darkInput ? normalizeColorInput(darkInput) : {};
     const hasDark = Object.values(darkFlat).some((v) => !!v);
 

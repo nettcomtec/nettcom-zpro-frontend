@@ -19,12 +19,13 @@ import {
 import { usePageAccess } from "@/hooks/use-page-access";
 import { AccessDenied } from "@/components/layout/access-denied";
 import { PageHelp } from "@/components/layout/page-help";
-import { EmailHtmlEditor } from "@/components/email-marketing/email-html-editor";
+import { EmailBodyField } from "@/components/email-marketing/email-body-field";
 import { fetchWhatsapps, type Whatsapp } from "@/services/whatsapp";
 import { filterWhatsappsForCurrentUser } from "@/lib/whatsapp-user-access";
+import { parseEmailDesign, type EmailDesign } from "@/lib/email-design";
 import {
-  fetchEmailTemplates, fetchEmailTemplate, sendBulkEmail,
-  type EmailTemplate,
+  fetchEmailTemplates, fetchEmailTemplate, sendBulkEmail, fetchEmailEditorCapabilities, readApiError,
+  type EmailTemplate, type EmailEditorCapabilities,
 } from "@/services/email-marketing";
 
 const EMAIL_CHANNEL_TYPES = ["email", "webmail"];
@@ -49,9 +50,13 @@ export default function MassaEmailPage() {
   const [lastResult, setLastResult] = useState<{
     total: number; blacklist: number; invalid: number;
   } | null>(null);
+  // Editor visual (PLANO_EMAIL_EDITOR_VISUAL D3): cópia do projeto do modelo escolhido
+  const [editorCaps, setEditorCaps] = useState<EmailEditorCapabilities | null>(null);
+  const [bodySeed, setBodySeed] = useState<{ design: EmailDesign | null; nonce: number } | undefined>(undefined);
 
   useEffect(() => {
     if (!hasAccess) return;
+    fetchEmailEditorCapabilities().then(setEditorCaps);
     (async () => {
       try {
         const res = await fetchWhatsapps();
@@ -78,6 +83,7 @@ export default function MassaEmailPage() {
       const full = await fetchEmailTemplate(Number(id));
       setSubject(full.subject || "");
       setHtml(full.html || "");
+      setBodySeed({ design: parseEmailDesign(full.designJson), nonce: Date.now() });
     } catch {
       toast.error(t("errorLoadTemplate"));
     }
@@ -117,10 +123,11 @@ export default function MassaEmailPage() {
         })
       );
     } catch (err: unknown) {
-      const resp = (err as { response?: { status?: number; data?: { error?: string } } })?.response;
-      if (resp?.data?.error === "ERR_EMAIL_ALL_RECIPIENTS_OPTOUT") {
+      // lib/api.ts rejeita com `error.response || error`: status/corpo na RAIZ
+      const { status, code } = readApiError(err);
+      if (code === "ERR_EMAIL_ALL_RECIPIENTS_OPTOUT") {
         toast.error(t("allOptOut"));
-      } else if (resp?.status === 404) {
+      } else if (status === 404) {
         // Backend antigo sem a rota /bulk-email (rollout parcial)
         toast.error(t("backendOld"));
       } else {
@@ -238,7 +245,7 @@ export default function MassaEmailPage() {
 
             <div className="space-y-1.5">
               <Label>{t("bodyLabel")}</Label>
-              <EmailHtmlEditor value={html} onChange={setHtml} />
+              <EmailBodyField value={html} onChange={setHtml} seed={bodySeed} capabilities={editorCaps} />
               <p className="text-xs text-muted-foreground">{t("variablesNote")}</p>
             </div>
 

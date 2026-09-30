@@ -2,7 +2,7 @@
 
 import { formatDate, formatTime } from "@/lib/format";
 
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useMemo } from "react";
 import { useTranslations } from "next-intl";
 import { Plus, Pencil, Trash2, ExternalLink, Video, Cake, CalendarDays, MapPin } from "lucide-react";
 import { PageHeader } from "@/components/layout/page-header";
@@ -74,6 +74,23 @@ export default function GoogleCalendarEventsPage() {
   const [selectedConfigId, setSelectedConfigId] = useState<string>("");
 
   const [events, setEvents] = useState<GoogleCalendarEvent[]>([]);
+
+  // O Google devolve o MESMO `id` para instancias de um evento recorrente e, com
+  // googleCalendarId "all", o mesmo evento ainda pode voltar por mais de um
+  // calendario. As duas coisas produziam "Encountered two children with the same
+  // key" no map da tabela, e a linha duplicada aparecia so ao refazer a busca.
+  // A instancia e identificada pelo par calendario + inicio; o indice entra so se
+  // AINDA assim colidir, nunca sozinho - chave puramente posicional quebraria a
+  // reconciliacao ao reordenar. Mesmo tratamento de configuracoes/google-calendar.
+  const eventRows = useMemo(() => {
+    const seen = new Set<string>();
+    return events.map((ev, idx) => {
+      const base = `${ev.calendarId ?? ""}|${ev.id}|${ev.start ?? ""}`;
+      const key = seen.has(base) ? `${base}#${idx}` : base;
+      seen.add(key);
+      return { ev, key };
+    });
+  }, [events]);
   const [loadingEvents, setLoadingEvents] = useState(false);
   const [filtros, setFiltros] = useState({
     dataInicio: new Date().toISOString().split("T")[0],
@@ -354,8 +371,8 @@ export default function GoogleCalendarEventsPage() {
                       </TableRow>
                     </TableHeader>
                     <TableBody>
-                      {events.map(ev => (
-                        <TableRow key={ev.id}>
+                      {eventRows.map(({ ev, key }) => (
+                        <TableRow key={key}>
                           <TableCell>
                             <div className="space-y-1 min-w-0">
                               <div className="flex items-center gap-1.5 flex-wrap">

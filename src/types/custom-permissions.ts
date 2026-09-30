@@ -38,6 +38,7 @@ export interface ICustomPermissions {
   // Kanban / Funil / Painel
   kanban_manage: boolean;
   funnel_manage: boolean;
+  relationship_manage: boolean;
   attendance_panel_view_all: boolean;
 
   // Relatórios
@@ -70,6 +71,8 @@ export interface ICustomPermissions {
   notes_manage: boolean;
   protocols_manage: boolean;
   chat_flow_manage: boolean;
+  ai_agents_manage: boolean;
+  ai_credits_manage: boolean;
   ratings_view: boolean;
   notifications_manage: boolean;
 
@@ -114,6 +117,7 @@ export const DEFAULT_CUSTOM_PERMISSIONS: ICustomPermissions = {
   tasks_view_all: false,
   kanban_manage: false,
   funnel_manage: false,
+  relationship_manage: false,
   attendance_panel_view_all: false,
   reports_view: false,
   reports_view_all: false,
@@ -138,6 +142,8 @@ export const DEFAULT_CUSTOM_PERMISSIONS: ICustomPermissions = {
   notes_manage: false,
   protocols_manage: false,
   chat_flow_manage: false,
+  ai_agents_manage: false,
+  ai_credits_manage: false,
   ratings_view: false,
   notifications_manage: false,
   api_service_access: false,

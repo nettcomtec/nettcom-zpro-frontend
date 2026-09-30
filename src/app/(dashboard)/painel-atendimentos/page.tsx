@@ -1247,7 +1247,7 @@ export default function PainelAtendimentosPage() {
                                 <UserIcon className="h-2.5 w-2.5 shrink-0" />
                                 {ticket.user?.name || t("unassigned")}
                               </p>
-                              {/* Fila e Canal sempre visíveis no card — espelha comportamento do painel Vue legado.
+ {/* Fila e Canal sempre visíveis no card — espelha comportamento do painel front legado.
                                   Os clientes usam essas infos pra decidir distribuição de pendentes mesmo
                                   quando agrupados por usuário. */}
                               <div className="flex gap-1 mt-1 flex-wrap">

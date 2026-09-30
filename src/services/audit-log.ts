@@ -10,7 +10,9 @@ export interface AuditLog {
   id: string;
   tenantId: number | null;
   userId: number | null;
-  user?: AuditLogUser;
+  user?: AuditLogUser | null;
+  /** Ator de sistema (webhook de canal, widget do webchat) quando nao ha usuario. Backend antigo nao envia. */
+  systemActor?: string | null;
   action: string;
   entity: string;
   entityId: string | null;

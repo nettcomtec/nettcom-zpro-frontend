@@ -82,7 +82,10 @@ import {
 } from "@/components/ui/tooltip";
 import type { FlowNodeData, FlowInteraction, FlowCondition } from "./lib/types";
 import { TextareaWithVars, InputWithVars } from "@/components/shared/variable-picker";
+import { PlatformAiSelector, usePlatformAiEnabled } from "@/components/ai-credits/platform-ai-selector";
+import { AI_PLATFORM_KEY_SENTINEL, isPlatformKey } from "@/services/ai-credits";
 import TimeTableEditor from "./time-table-editor";
+import AiActionsEditor, { type AiAction } from "./ai-actions-editor";
 import { INTERACTION_TYPES, defaultInteractionData, SWITCH_CHANNEL_DEFAULT_MESSAGE } from "./lib/types";
 import { useTranslations } from "next-intl";
 import { fetchQueues } from "@/services/queues";
@@ -93,6 +96,7 @@ import { fetchTags } from "@/services/tags";
 import { fetchKanbans } from "@/services/kanban";
 import { fetchReasons } from "@/services/reasons";
 import { fetchStages, fetchPipelines } from "@/services/funnel";
+import { fetchAiAgents } from "@/services/ai-agents";
 import { getTemplatesForChannel } from "@/services/channel-templates";
 import {
   type TemplateVarEntry,
@@ -133,6 +137,8 @@ export interface RouteOptions {
   pipelines: { id: number; name: string }[];
   /** Canais BSP conectados (waba/gupshup/dialog360) — fonte de templates do TemplateField */
   templateChannels: { id: number; name: string; type: string; tokenAPI?: string; appId?: string }[];
+  /** Agentes de IA (nó "agent") — lista enxuta; vazia em backend sem o recurso */
+  aiAgents: { id: number; name: string }[];
 }
 
 interface NodeFormProps {
@@ -150,7 +156,7 @@ export function NodeForm({ open, onOpenChange, node, allNodes, onSave }: NodeFor
   const [confirmCloseOpen, setConfirmCloseOpen] = useState(false);
   const [routeOptions, setRouteOptions] = useState<RouteOptions>({
     queues: [], users: [], channels: [], chatflows: [], tags: [], kanbans: [], reasons: [],
-    stages: [], pipelines: [], templateChannels: [],
+    stages: [], pipelines: [], templateChannels: [], aiAgents: [],
   });
   const [openSections, setOpenSections] = useState({ interactions: true, conditions: true, variable: true });
   const toggleSection = (key: keyof typeof openSections) =>
@@ -175,7 +181,9 @@ export function NodeForm({ open, onOpenChange, node, allNodes, onSave }: NodeFor
       fetchReasons().catch(() => ({ data: [] })),
       fetchStages(undefined, { background: true }).catch(() => ({ data: [] })),
       fetchPipelines(undefined, { background: true }).catch(() => ({ data: [] })),
-    ]).then(([qRes, uRes, wRes, cfRes, tRes, kRes, rRes, stRes, plRes]) => {
+      // Agentes de IA: backend antigo devolve erro → lista vazia (nó fica inerte)
+      fetchAiAgents().catch(() => []),
+    ]).then(([qRes, uRes, wRes, cfRes, tRes, kRes, rRes, stRes, plRes, agRes]) => {
       const queues = (qRes.data as { id: number; name: string }[]) ?? [];
       const usersRaw = (uRes as { data: { users?: unknown[] } }).data?.users ?? [];
       const users = (usersRaw as { id: number; name: string; profile?: string }[])
@@ -230,7 +238,10 @@ export function NodeForm({ open, onOpenChange, node, allNodes, onSave }: NodeFor
         : [];
       const pipelines = pipelinesRaw.map((p) => ({ id: p.id, name: p.name }));
 
-      setRouteOptions({ queues, users, channels, chatflows, tags, kanbans, reasons, stages, pipelines, templateChannels });
+      const aiAgentsRaw = Array.isArray(agRes) ? (agRes as { id: number; name: string }[]) : [];
+      const aiAgents = aiAgentsRaw.map((a) => ({ id: a.id, name: a.name }));
+
+      setRouteOptions({ queues, users, channels, chatflows, tags, kanbans, reasons, stages, pipelines, templateChannels, aiAgents });
     });
   }, [open]);
 
@@ -1156,8 +1167,11 @@ function InteractionFields({
   const t = useTranslations("flowBuilderNodeForm");
   const d = interaction.data as Record<string, unknown>;
   const scheduleFileRef = useRef<HTMLInputElement>(null);
+  // Gate do recurso "IA da plataforma" (usado no nó ChatGPT). Não faz request nenhum:
+  // é leitura do que a carga da empresa já trouxe.
+  const platformAiEnabled = usePlatformAiEnabled();
 
-  // Inicializa defaults do TransferField (paridade com Vue legado: transferField.vue#initializeData).
+ // Inicializa defaults do TransferField (paridade com front legado: transferField#initializeData).
   // Sem isso o JSON salvo fica sem `transferType` e o backend ignora a transferência.
   useEffect(() => {
     if (interaction.type !== "transfer") return;
@@ -1171,7 +1185,7 @@ function InteractionFields({
   }, [interaction.id, interaction.type]);
 
   // SwitchChannel (handoff híbrido): garante defaults PERSISTIDOS no data mesmo
-  // para nós criados fora do defaultInteractionData (import/Vue) — gotcha do
+ // para nós criados fora do defaultInteractionData (import/front legado) — gotcha do
   // Webhook Avançado: default só-exibição nunca é salvo e o backend fica sem fallback.
   useEffect(() => {
     if (interaction.type !== "SwitchChannel") return;
@@ -1305,19 +1319,38 @@ function InteractionFields({
     // ── ChatGPT ───────────────────────────────────────────────────────────────
     case "chatgpt": {
       const routeAction = d.routeAction !== undefined ? (d.routeAction as number) : null;
+      // IA da plataforma: o modo vive no PRÓPRIO campo de chave (é o marcador que o
+      // servidor entende), sem estado paralelo — abrir um nó salvo assim já começa
+      // nele. Sem o recurso liberado na empresa o seletor não renderiza e o modo é
+      // sempre falso, então o nó fica exatamente como sempre foi. Aqui o seletor vai
+      // SEM modelo de propósito: o nó não tem esse campo, e em atendimento vale o
+      // modelo da conexão (ou o padrão da plataforma).
+      const chatgptPlatformMode = platformAiEnabled && isPlatformKey(d.chatgptApiKey);
       return (
         <div className="space-y-2">
-          <Input
-            placeholder={t("chatgptApiKey")}
-            type="password"
-            value={(d.chatgptApiKey as string) || ""}
-            onChange={(e) => onUpdate("chatgptApiKey", e.target.value)}
+          <PlatformAiSelector
+            value={chatgptPlatformMode}
+            onChange={(next) =>
+              // Voltar para chave própria LIMPA o campo: o marcador nunca pode
+              // aparecer ali como se fosse uma chave digitada pelo operador.
+              onUpdate("chatgptApiKey", next ? AI_PLATFORM_KEY_SENTINEL : "")
+            }
           />
-          <Input
-            placeholder={t("chatgptOrgId")}
-            value={(d.chatgptOrgId as string) || ""}
-            onChange={(e) => onUpdate("chatgptOrgId", e.target.value)}
-          />
+          {!chatgptPlatformMode && (
+            <>
+              <Input
+                placeholder={t("chatgptApiKey")}
+                type="password"
+                value={(d.chatgptApiKey as string) || ""}
+                onChange={(e) => onUpdate("chatgptApiKey", e.target.value)}
+              />
+              <Input
+                placeholder={t("chatgptOrgId")}
+                value={(d.chatgptOrgId as string) || ""}
+                onChange={(e) => onUpdate("chatgptOrgId", e.target.value)}
+              />
+            </>
+          )}
           <TextareaWithVars
             rows={3}
             placeholder={t("chatgptPrompt")}
@@ -1407,9 +1440,38 @@ function InteractionFields({
               </SelectContent>
             </Select>
           )}
+          <Separator />
+          <div className="space-y-1">
+            <Label className="text-xs font-semibold">{t("aiActionsTitle")}</Label>
+            <p className="text-[11px] text-muted-foreground">{t("aiActionsNote")}</p>
+          </div>
+          <AiActionsEditor
+            value={d.aiActions as AiAction[] | undefined}
+            onChange={(next) => onUpdate("aiActions", next)}
+            routeOptions={routeOptions}
+          />
         </div>
       );
     }
+
+    // ── Agente de IA ──────────────────────────────────────────────────────────
+    case "agent":
+      return (
+        <div className="space-y-2">
+          <div className="space-y-1">
+            <Label className="text-xs">{t("agentLabel")}</Label>
+            <Select value={(d.agentId as string) || ""} onValueChange={(v) => onUpdate("agentId", v)}>
+              <SelectTrigger><SelectValue placeholder={t("selectAgent")} /></SelectTrigger>
+              <SelectContent className="max-h-60">
+                {routeOptions.aiAgents.map((a) => (
+                  <SelectItem key={a.id} value={String(a.id)}>{a.name}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <p className="text-[11px] text-muted-foreground">{t("agentTakeoverNote")}</p>
+        </div>
+      );
 
     // ── Typebot ───────────────────────────────────────────────────────────────
     case "typebot":

@@ -131,7 +131,8 @@ export async function fetchEvaluations(filters: EvaluationFilters = {}) {
   if (filters.search) params.set("search", filters.search);
   if (filters.startDate) params.set("startDate", filters.startDate);
   if (filters.endDate) params.set("endDate", filters.endDate);
-  if (filters.evaluation) params.set("evaluation", String(filters.evaluation));
+  // Checagem explícita: 0 é nota legítima da escala e a checagem falsy a descartava
+  if (filters.evaluation !== undefined) params.set("evaluation", String(filters.evaluation));
   return api.get<EvaluationsResponse>(`/ticketEvaluations?${params.toString()}`);
 }
 
@@ -189,7 +190,7 @@ export async function fetchEvaluationLogs(ticketId: number) {
   return api.get(`/ticketEvaluations/${ticketId}/logs`);
 }
 
-/** Atualiza o registro de avaliação pelo ticketId (equivalente ao AlterarAvaliacao do Vue) */
+/** Atualiza o registro de avaliação pelo ticketId (equivalente ao AlterarAvaliacao do front legado) */
 export async function updateEvaluationByTicket(ticketId: number, data: { attempts?: number; evaluation?: string }) {
   return api.put(`/ticketEvaluations/${ticketId}`, { ...data, id: ticketId, ticketId });
 }

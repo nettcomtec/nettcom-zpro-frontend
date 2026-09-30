@@ -180,7 +180,7 @@ const blankForm = (): FormState => ({
   active: true,
 });
 
-// ─── Template variable helpers (mirrors Vue logic) ───────────────────────────
+// ─── Template variable helpers (mirrors legacy logic) ───────────────────────────
 function getTemplateVariableLabels(t: WabaTemplate): string[] {
   const labels: string[] = [];
   if (!t?.components) return labels;
@@ -345,12 +345,19 @@ function getValuesFromComponents(t: WabaTemplate | null, components: any[]): str
 // ─────────────────────────────────────────────────────────────────────────────
 
 export default function FunilAcaoPage() {
+  // Gate isolado num wrapper: sair com `return` no meio dos hooks do conteúdo
+  // quebrava o React ("Rendered fewer hooks than expected") quando a permissão
+  // caía com a página montada — o teto do tenant chega após o 1º render.
+  const allowed = usePageAccess("funil", { alsoAccept: ["kanban"] });
+  if (!allowed) return <AccessDenied />;
+  return <FunilAcaoPageContent />;
+}
+
+function FunilAcaoPageContent() {
   const t = useTranslations("funilAcaoPage");
   const tErrors = useTranslations("errors");
   const tOrder = useTranslations("orderDetails");
   const { user } = useAuthStore();
-  const allowed = usePageAccess("funil", { alsoAccept: ["kanban"] });
-  if (!allowed) return <AccessDenied />;
 
   const ACTION_TYPES = [
     { value: "message",       label: t("actionTypeMessage") },
@@ -377,6 +384,12 @@ export default function FunilAcaoPage() {
   const [whatsapps, setWhatsapps] = useState<{ id: number; name: string }[]>([]);
   const [tags, setTags]           = useState<{ id: number; name: string }[]>([]);
   const [users, setUsers]         = useState<{ id: number; name: string }[]>([]);
+  // Ids de TODOS os canais existentes (qualquer tipo, conectado ou não) — usado
+  // só para detectar referência excluída. Os selects continuam usando whatsapps
+  // (canais de mensagem) e wabaConns (canais de template): canal WABA/BSP nunca
+  // entra em whatsapps, e canal desconectado continua existindo — nenhum dos
+  // dois pode ser lido como "excluído".
+  const [existingChannelIds, setExistingChannelIds] = useState<number[]>([]);
 
   // Filters
   const [fSearch,   setFSearch]   = useState("");
@@ -485,6 +498,8 @@ export default function FunilAcaoPage() {
 
       const wData: any[] = Array.isArray((wRes as any)?.data) ? (wRes as any).data : ((wRes as any)?.data?.data ?? []);
       const connected = wData.filter((w: any) => w.status === "CONNECTED" && !w.isDeleted);
+
+      setExistingChannelIds(wData.filter((w: any) => !w.isDeleted).map((w: any) => Number(w.id)));
 
       setWhatsapps(connected
         .filter((w: any) => ["baileys","zapo","whatsapp","evo","evogo","meow","zapi","uazapi"].includes((w.type||"").toLowerCase()))
@@ -1268,7 +1283,11 @@ export default function FunilAcaoPage() {
                   // excluídos após configurar) — listas vivas já carregadas pela
                   // página; cobre também sub-ações de fluxos (actionContent JSON).
                   const broken: string[] = [];
-                  const chkChannel = (id?: number | null) => { if (id && !whatsapps.some((w) => w.id === Number(id))) broken.push(t("brokenChannel", { id: Number(id) })); };
+                  // Canal: existência apenas (lista completa, não a dos selects).
+                  // Lista vazia = canais não carregaram (o catch do loadOptions é
+                  // silencioso) — nesse caso não acusa nada, para falha de rede não
+                  // marcar toda ação como quebrada.
+                  const chkChannel = (id?: number | null) => { if (id && existingChannelIds.length > 0 && !existingChannelIds.includes(Number(id))) broken.push(t("brokenChannel", { id: Number(id) })); };
                   const chkTag = (id?: number | null) => { if (id && !tags.some((x) => x.id === Number(id))) broken.push(t("brokenTag", { id: Number(id) })); };
                   const chkWallet = (id?: number | null) => { if (id && !users.some((u) => u.id === Number(id))) broken.push(t("brokenWallet", { id: Number(id) })); };
                   const chkStage = (id?: number | null) => { if (id && !allStages.some((s) => s.id === Number(id))) broken.push(t("brokenStage", { id: Number(id) })); };

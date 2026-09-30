@@ -32,6 +32,7 @@ import {
   listAvailableBackups, getAllBackupConfigs, getBackupConfigs,
   configureBackupForTenant, deleteBackupConfig, recreateBackupConfig,
   cleanOldBackups, cleanAllBackups, downloadBackupFile, deleteBackupFile,
+  fetchRunningBackups,
 } from "@/services/superadmin";
 import { fetchTenants } from "@/services/tenants";
 
@@ -60,6 +61,10 @@ interface BackupConfig {
   description?: string; isActive?: boolean; createdAt?: string;
   localPath?: string; retentionDays?: number; compression?: boolean;
   storageConfig?: Record<string, unknown>;
+}
+// Backup disparado em background (o backend responde 202 e segue trabalhando).
+interface RunningBackup {
+  scope?: string; tenantId?: number | null; tenantName?: string | null; startedAt?: string;
 }
 
 // Mantido em sincronia com a lista modelsWithTenantId em TenantBackupServiceZPRO.ts (backend).
@@ -138,6 +143,12 @@ export default function BackupPage() {
   const [selectedTenant, setSelectedTenant] = useState<string>("");
   const [runningTenant, setRunningTenant] = useState(false);
 
+  // Execuções em andamento (backend responde 202 e o backup segue em background)
+  const [runningBackups, setRunningBackups] = useState<RunningBackup[]>([]);
+  const hasRunningAll = runningBackups.some((r) => r.scope === "all");
+  const isTenantRunning = (id: string) =>
+    !!id && runningBackups.some((r) => String(r.tenantId ?? "") === String(id));
+
   // Config por tenant
   const [configTenant, setConfigTenant] = useState<string>("");
   const [tenantConfigs, setTenantConfigs] = useState<BackupConfig[]>([]);
@@ -150,6 +161,8 @@ export default function BackupPage() {
   const [configRetentionDays, setConfigRetentionDays] = useState<number>(30);
   const [configCompression, setConfigCompression] = useState(true);
   const [configDescription, setConfigDescription] = useState("");
+  // Somente leitura: quem define a pasta de gravação é o servidor.
+  const [configLocalPath, setConfigLocalPath] = useState("");
 
   // Cleanup
   const [cleanupTenant, setCleanupTenant] = useState<string>("");
@@ -188,6 +201,7 @@ export default function BackupPage() {
       setStats((unwrap(sRes) as BackupStats) || {});
       const raw = unwrap(rRes);
       setResults(Array.isArray(raw) ? raw : (raw as { results?: BackupResult[] })?.results || []);
+      loadRunningBackups();
     } catch { /* silencioso */ }
     finally { setLoadingStatus(false); }
   }
@@ -213,12 +227,56 @@ export default function BackupPage() {
     } catch { /* silencioso */ }
   }
 
+  // Backend antigo não tem a rota (404): a lista fica vazia e a tela segue como antes.
+  async function loadRunningBackups(): Promise<RunningBackup[]> {
+    try {
+      const body = unwrap(await fetchRunningBackups());
+      const list = Array.isArray(body)
+        ? (body as RunningBackup[])
+        : (body as { running?: RunningBackup[] })?.running || [];
+      setRunningBackups(list);
+      return list;
+    } catch {
+      setRunningBackups([]);
+      return [];
+    }
+  }
+
   useEffect(() => {
     load();
     loadTenants();
     loadAvailableBackups();
     loadAllConfigs();
+    loadRunningBackups();
   }, []);
+
+  // Acompanha o que está rodando em background: quando a última execução some, recarrega
+  // cards e histórico — o 202 não traz resultado, então é esta ronda que fecha o ciclo.
+  useEffect(() => {
+    if (runningBackups.length === 0) return;
+    const timer = setTimeout(async () => {
+      const stillRunning = await loadRunningBackups();
+      if (stillRunning.length === 0) {
+        toast.success(t("backupFinished"));
+        load();
+        loadAvailableBackups();
+      }
+    }, 5000);
+    return () => clearTimeout(timer);
+  }, [runningBackups]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // O interceptor rejeita com `error.response || error`: em timeout não há response, então
+  // o status fica indefinido e sobra o `code` do axios. Aborto por timeout NÃO é falha de
+  // backup — o servidor continua trabalhando —, e por isso não pode virar toast de erro.
+  function handleBackupError(err: unknown) {
+    const e = err as { status?: number; code?: string } | undefined;
+    if (e?.status === 409) { toast.info(t("backupAlreadyRunning")); return; }
+    if (!e?.status && (e?.code === "ECONNABORTED" || e?.code === "ETIMEDOUT")) {
+      toast.info(t("backupStillRunning"));
+      return;
+    }
+    toast.error(t("errorStartBackup"));
+  }
 
   function handleBackupAll() {
     askConfirm(t("confirmBackupAll"), async () => {
@@ -227,8 +285,8 @@ export default function BackupPage() {
         await backupAllTenants();
         toast.success(t("backupAllStarted"));
         setTimeout(load, 3000);
-      } catch { toast.error(t("errorStartBackup")); }
-      finally { setRunning(false); }
+      } catch (err) { handleBackupError(err); }
+      finally { setRunning(false); loadRunningBackups(); }
     });
   }
 
@@ -240,8 +298,8 @@ export default function BackupPage() {
         await backupTenant(Number(selectedTenant));
         toast.success(t("backupStarted"));
         setTimeout(load, 3000);
-      } catch { toast.error(t("errorStartBackup")); }
-      finally { setRunningTenant(false); }
+      } catch (err) { handleBackupError(err); }
+      finally { setRunningTenant(false); loadRunningBackups(); }
     });
   }
 
@@ -261,6 +319,7 @@ export default function BackupPage() {
     setConfigRetentionDays(30);
     setConfigCompression(true);
     setConfigDescription("");
+    setConfigLocalPath(tenantConfigs[0]?.localPath || "");
     setConfigTab("storage");
     setShowConfigForm(true);
   }
@@ -271,6 +330,7 @@ export default function BackupPage() {
     setConfigRetentionDays(cfg.retentionDays ?? 30);
     setConfigCompression(cfg.compression ?? true);
     setConfigDescription(cfg.description || "");
+    setConfigLocalPath(cfg.localPath || "");
     setConfigTab("storage");
     setShowConfigForm(true);
   }
@@ -399,7 +459,7 @@ export default function BackupPage() {
         }}
       >
         <div className="flex flex-wrap gap-2">
-          <Button variant="outline" size="sm" onClick={() => { load(); loadAvailableBackups(); loadAllConfigs(); }} title={t("refresh")}>
+          <Button variant="outline" size="sm" onClick={() => { load(); loadAvailableBackups(); loadAllConfigs(); loadRunningBackups(); }} title={t("refresh")}>
             <RefreshCw className="h-4 w-4 sm:mr-2" />
             <span className="hidden sm:inline">{t("refresh")}</span>
           </Button>
@@ -407,12 +467,26 @@ export default function BackupPage() {
             {loadingStatus ? <Loader2 className="h-4 w-4 animate-spin sm:mr-2" /> : <RefreshCw className="h-4 w-4 sm:mr-2" />}
             <span className="hidden sm:inline">{t("updateStatus")}</span>
           </Button>
-          <Button size="sm" disabled={running} onClick={handleBackupAll} title={t("generalBackup")}>
-            {running ? <Loader2 className="h-4 w-4 animate-spin sm:mr-2" /> : <Play className="h-4 w-4 sm:mr-2" />}
+          <Button size="sm" disabled={running || hasRunningAll} onClick={handleBackupAll} title={t("generalBackup")}>
+            {running || hasRunningAll ? <Loader2 className="h-4 w-4 animate-spin sm:mr-2" /> : <Play className="h-4 w-4 sm:mr-2" />}
             <span className="hidden sm:inline">{t("generalBackup")}</span>
           </Button>
         </div>
       </PageHeader>
+
+      {runningBackups.length > 0 && (
+        <Alert>
+          <Loader2 className="h-4 w-4 animate-spin" />
+          <AlertDescription>
+            <span className="font-medium">{t("backupInProgress")}</span>
+            {": "}
+            {runningBackups
+              .map((r) => (r.scope === "all" ? t("backupInProgressAll") : r.tenantName || `#${r.tenantId}`))
+              .join(", ")}
+            <span className="block text-xs text-muted-foreground">{t("backupInProgressDesc")}</span>
+          </AlertDescription>
+        </Alert>
+      )}
 
       {/* Stats */}
       {loading ? (
@@ -503,8 +577,14 @@ export default function BackupPage() {
               <SelectTrigger className="flex-1"><SelectValue placeholder={t("selectTenant")} /></SelectTrigger>
               <SelectContent>{tenants.map((ten) => <SelectItem key={ten.id} value={ten.id.toString()}>{ten.name}</SelectItem>)}</SelectContent>
             </Select>
-            <Button className="w-full sm:w-auto" disabled={!selectedTenant || runningTenant} onClick={handleBackupTenant}>
-              {runningTenant ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Play className="mr-2 h-4 w-4" />}
+            <Button
+              className="w-full sm:w-auto"
+              disabled={!selectedTenant || runningTenant || isTenantRunning(selectedTenant)}
+              onClick={handleBackupTenant}
+            >
+              {runningTenant || isTenantRunning(selectedTenant)
+                ? <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                : <Play className="mr-2 h-4 w-4" />}
               {t("doBackup")}
             </Button>
           </div>
@@ -577,7 +657,12 @@ export default function BackupPage() {
                   {configStorageType === "local" && (
                     <div className="space-y-1.5">
                       <Label>{t("storagePath")}</Label>
-                      <Input value="/backups" readOnly className="bg-muted" />
+                      <Input
+                        value={configLocalPath || t("storagePathServerDefault")}
+                        readOnly
+                        className="bg-muted"
+                      />
+                      <p className="text-xs text-muted-foreground">{t("storagePathNote")}</p>
                     </div>
                   )}
                 </TabsContent>

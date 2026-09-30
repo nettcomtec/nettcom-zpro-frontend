@@ -1,7 +1,7 @@
 import type { FlowData } from "./types";
 
 /**
- * Returns the default flow structure matching the Vue ccFlowBuilder defaultFlow.js format.
+ * Returns the default flow structure matching the legacy ccFlowBuilder defaultFlow.js format.
  * The backend stores { name, nodeList, lineList } under the `flow` key in the chatflow record.
  *
  * i18n: Node label strings below ("Início", "Configurações", "Boas vindas!", "Novo Fluxo")

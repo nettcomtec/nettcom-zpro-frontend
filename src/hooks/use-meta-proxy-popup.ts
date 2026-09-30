@@ -64,7 +64,7 @@ interface OpenPopupOptions {
   channel: MetaProxyChannel;
   credentials: MetaProxyCredentials;
   onSuccess?: (data: MetaProxySuccessPayload) => void;
-  onError?: (msg: string, hijack?: MetaProxyHijackPayload | null) => void;
+  onError?: (msg: string, hijack?: MetaProxyHijackPayload | null, errorCode?: string | null) => void;
   onCancelled?: () => void;
   windowFeatures?: string; // e.g. "width=600,height=700"
 }
@@ -132,6 +132,9 @@ export function useMetaProxyPopup() {
         const data = event.data as {
           type?:   string;
           error?:  string;
+          // Codigo estruturado do erro (ex.: ERR_NO_PERMISSION_CHANNEL_TYPE_LIMIT) —
+          // proxy antigo nao manda; o caller cai na mensagem crua.
+          errorCode?: string | null;
           hijack?: {
             channel?:     string;
             errorCode?:   string;
@@ -169,7 +172,7 @@ export function useMetaProxyPopup() {
                   registeredAt: data.hijack.existing?.registeredAt || null,
                 }
               : null;
-            onError?.(data.error || "UNKNOWN_ERROR", hijackPayload);
+            onError?.(data.error || "UNKNOWN_ERROR", hijackPayload, data.errorCode || null);
             cleanup();
             return;
           }

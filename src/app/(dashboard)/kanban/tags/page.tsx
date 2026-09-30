@@ -19,7 +19,8 @@ import {
   DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuLabel,
   DropdownMenuSeparator, DropdownMenuItem,
 } from "@/components/ui/dropdown-menu";
-import { RefreshCw, Search, Tag, Phone, MessageSquare, MessagesSquare, ChevronLeft, ChevronRight, Eye, Filter } from "lucide-react";
+import { RefreshCw, Search, Tag, Phone, MessageSquare, MessagesSquare, ChevronLeft, ChevronRight, Eye, Filter, Info } from "lucide-react";
+import { Alert, AlertDescription } from "@/components/ui/alert";
 import { ContactConversationDialog } from "@/components/atendimento/contact-conversation-dialog";
 import { SpyContactMessagesPopover } from "@/components/atendimento/spy-contact-messages-dialog";
 import { toast } from "sonner";
@@ -58,6 +59,7 @@ const CHANNEL_TYPES = [
   { type: "hub_instagram", label: "Hub Instagram", logo: "hub_instagram-logo.png" },
   { type: "hub_facebook", label: "Hub Facebook", logo: "hub_facebook-logo.png" },
   { type: "hub_whatsapp_business_account", label: "Hub WBA", logo: "hub_whatsapp-logo.png" },
+  { type: "telegram", label: "Telegram", logo: "telegram-logo.png" },
 ];
 
 const NUMBER_CHANNEL_TYPES = ["whatsapp", "baileys", "zapo", "meow", "evo", "evogo", "zapi", "uazapi", "waba", "hub_whatsapp_business_account"];
@@ -75,6 +77,8 @@ interface TagContact {
   profilePicUrl?: string;
   tags?: ContactTag[] | null;
   wallet?: { id: number; name: string } | null;
+  // Id do chat no Telegram (vem de /contactsTags/): libera iniciar atendimento pelo bot.
+  telegramId?: string | number | null;
 }
 
 interface TagColumn {
@@ -146,6 +150,11 @@ export default function KanbanTagsPage() {
       if (sessions.length === 0) return [];
       if (NUMBER_CHANNEL_TYPES.includes(ch.type)) {
         return contact.number ? [{ ch, connections: sessions }] : [];
+      }
+      // Bot do Telegram só escreve para quem já falou com ele (telegramId gravado
+      // na primeira mensagem do contato).
+      if (ch.type === "telegram") {
+        return contact.telegramId ? [{ ch, connections: sessions }] : [];
       }
       return [];
     });
@@ -489,6 +498,14 @@ export default function KanbanTagsPage() {
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4 py-2">
+            {startTicketChannelType === "telegram" && (
+              <Alert className="py-2 px-3">
+                <Info className="h-4 w-4" />
+                <AlertDescription className="pl-6 text-xs">
+                  {tCommon("telegramStartTicketNote")}
+                </AlertDescription>
+              </Alert>
+            )}
             {startTicketConnections.length > 1 && (
               <div className="space-y-2">
                 <Label>{t("connection")} *</Label>

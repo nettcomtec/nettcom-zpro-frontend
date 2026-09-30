@@ -154,18 +154,17 @@ const API_DOCS: ApiRouteCategory[] = [
     routes: [
       {
         method: "GET", path: "/params/", name: "SendMessageParams",
-        description: "Enviar mensagem via query params (GET). Útil para integrações simples sem body.",
+        description: "Enviar mensagem via query params (GET). Útil para integrações simples sem body. É a única rota do catálogo que não aceita o token no header Authorization: o token vai obrigatoriamente no parâmetro bearertoken.",
         params: [
           { key: "body", desc: "Texto da mensagem", required: true, defaultValue: "Olá!" },
           { key: "number", desc: "Número do destinatário (5511999999999)", required: true, defaultValue: "5511999999999" },
           { key: "externalKey", desc: "Chave única de controle", required: true, defaultValue: "chave-001" },
-          { key: "bearertoken", desc: "Token de autenticação (substitui header)", required: false },
-          { key: "isClosed", desc: "Fechar ticket após envio (true/false)", required: false, defaultValue: "false" },
+          { key: "bearertoken", desc: "Token da API — obrigatório nesta rota (o header Authorization é ignorado)", required: true },
         ],
       },
       {
         method: "POST", path: "/", name: "SendMessageAPIText",
-        description: "Enviar mensagem de texto. Abre ou reutiliza ticket existente. O campo number carrega o ID da plataforma do canal do token: telefone (família WhatsApp), IGSID (Instagram), PSID (Messenger), telegramId (Telegram). Canal e-mail usa o campo email (+ subject opcional). Aceita ticketId opcional — usado apenas quando consistente com o contato/canal do ticket.",
+        description: "Enviar mensagem de texto. Abre ou reutiliza ticket existente. O campo number carrega o ID da plataforma do canal do token: telefone (família WhatsApp), IGSID (Instagram), PSID (Messenger), telegramId (Telegram). O canal e-mail também exige number (ou bsuid) e usa email como destinatário e subject como assunto. Aceita ticketId opcional — usado apenas quando consistente com o contato/canal do ticket.",
         bodyType: "json",
         bodyExample: JSON.stringify({ body: "A mensagem desejada", number: "5511999999999", externalKey: "chave-001", isClosed: false }, null, 2),
       },
@@ -242,9 +241,9 @@ const API_DOCS: ApiRouteCategory[] = [
       },
       {
         method: "POST", path: "/group", name: "SendGroupMessageAPIFile",
-        description: "Enviar arquivo para grupo via multipart/form-data.",
+        description: "Enviar arquivo para grupo via multipart/form-data. Um arquivo por requisição.",
         bodyType: "formdata",
-        bodyExample: "Campos (form-data):\n  media      → arquivo(s) (tipo: file)\n  body       → texto da mensagem\n  number     → 12356818915189153 (ID do grupo)\n  externalKey → chave-001\n  isClosed   → false",
+        bodyExample: "Campos (form-data):\n  media      → arquivo único (tipo: file, apenas 1 por requisição)\n  body       → texto da mensagem\n  number     → 12356818915189153 (ID do grupo)\n  externalKey → chave-001\n  isClosed   → false",
       },
       {
         method: "POST", path: "/groupMediaUrl", name: "SendMessageAPIFileURLGroup",
@@ -281,20 +280,20 @@ const API_DOCS: ApiRouteCategory[] = [
   {
     name: "Interativo Waba",
     emoji: "🔘",
-    channelTypes: ["waba", "dialog360", "gupshup"],
+    channelTypes: ["waba"],
     routes: [
       {
         method: "POST", path: "/sendButtonWABA", name: "SendButtonWABA",
-        description: "Enviar mensagem com botões interativos (até 3) via WABA.",
+        description: "Enviar mensagem com botões interativos (até 3) via WABA. Exige canal do tipo WhatsApp Business API (waba): canais Dialog360 e Gupshup respondem 400 ERR_CHANNEL_WABA_REQUIRED.",
         bodyType: "json",
-        channelTypes: ["waba", "dialog360", "gupshup"],
+        channelTypes: ["waba"],
         bodyExample: JSON.stringify({ number: "5511999999999", message: "Escolha uma opção:", button1: "Opção 1", button2: "Opção 2", button3: "Opção 3", ticketId: 1262 }, null, 2),
       },
       {
         method: "POST", path: "/sendListWABA", name: "SendListWABA",
-        description: "Enviar lista interativa com seções e itens selecionáveis via WABA.",
+        description: "Enviar lista interativa com seções e itens selecionáveis via WABA. Exige canal do tipo WhatsApp Business API (waba): canais Dialog360 e Gupshup respondem 400 ERR_CHANNEL_WABA_REQUIRED.",
         bodyType: "json",
-        channelTypes: ["waba", "dialog360", "gupshup"],
+        channelTypes: ["waba"],
         bodyExample: JSON.stringify({ number: "5511999999999", header: "Menu Principal", body: "Escolha uma opção:", footer: "Selecione uma opção", button_text: "Ver opções", sections: [{ title: "Seção 1", rows: [{ id: "1", title: "Opção 1", description: "Desc 1" }, { id: "2", title: "Opção 2", description: "Desc 2" }] }], ticketId: 1262 }, null, 2),
       },
     ],
@@ -305,21 +304,21 @@ const API_DOCS: ApiRouteCategory[] = [
     routes: [
       {
         method: "POST", path: "/createContact", name: "CreateContact",
-        description: "Criar um novo contato no sistema.",
+        description: "Criar um novo contato no sistema. Endereço opcional: cep (até 20 caracteres), logradouro (rua), numeroEndereco, complemento, bairro e cidade (até 255 cada) e estado (até 100). Os textos são aparados e o que passar do limite é cortado, sem erro; o estado é gravado como veio. A resposta traz o contato com os 7 campos de endereço (cep, logradouro, numeroEndereco, complemento, bairro, cidade, estado).",
         bodyType: "json",
-        bodyExample: JSON.stringify({ name: "Nome Completo", number: "5511999999999", email: "contato@email.com", cpf: "000.000.000-00", firstName: "Nome", lastName: "Sobrenome", businessName: "Empresa", birthdayDate: "01/01/1990", externalKey: "chave-001" }, null, 2),
+        bodyExample: JSON.stringify({ name: "Nome Completo", number: "5511999999999", email: "contato@email.com", cpf: "000.000.000-00", firstName: "Nome", lastName: "Sobrenome", businessName: "Empresa", birthdayDate: "01/01/1990", cep: "01310-100", logradouro: "Avenida Paulista", numeroEndereco: "1000", complemento: "Sala 101", bairro: "Bela Vista", cidade: "São Paulo", estado: "SP" }, null, 2),
       },
       {
         method: "POST", path: "/showcontact", name: "ShowContact",
-        description: "Buscar dados de um contato pelo número do WhatsApp.",
+        description: "Buscar dados de um contato pelo número do WhatsApp. A resposta traz o endereço do contato: cep, logradouro, numeroEndereco, complemento, bairro, cidade e estado.",
         bodyType: "json",
         bodyExample: JSON.stringify({ number: "5511999999999" }, null, 2),
       },
       {
         method: "POST", path: "/updateContact", name: "UpdateContact",
-        description: "Atualizar dados de um contato existente.",
+        description: "Atualizar dados de um contato existente. Endereço: cep (até 20 caracteres), logradouro (rua), numeroEndereco, complemento, bairro e cidade (até 255 cada) e estado (até 100), aparados e cortados no limite, sem erro; o estado é gravado como veio. Em cada campo de endereço, \"\" ou null apaga o valor e campo ausente fica como está. A resposta traz o contato com os 7 campos de endereço.",
         bodyType: "json",
-        bodyExample: JSON.stringify({ name: "Nome Atualizado", number: "5511999999999", email: "novo@email.com", cpf: "000.000.000-00", firstName: "Nome", lastName: "Sobrenome", businessName: "Empresa", birthdayDate: "01/01/1990", kanban: 2, externalKey: "ID_UNICA_SISTEMA" }, null, 2),
+        bodyExample: JSON.stringify({ name: "Nome Atualizado", number: "5511999999999", email: "novo@email.com", cpf: "000.000.000-00", firstName: "Nome", lastName: "Sobrenome", businessName: "Empresa", birthdayDate: "01/01/1990", kanban: 2, cep: "01310-100", logradouro: "Avenida Paulista", numeroEndereco: "1000", complemento: "Sala 101", bairro: "Bela Vista", cidade: "São Paulo", estado: "SP" }, null, 2),
       },
       {
         method: "POST", path: "/blockContact", name: "BlockContact",
@@ -329,9 +328,9 @@ const API_DOCS: ApiRouteCategory[] = [
       },
       {
         method: "POST", path: "/contacts/search", name: "SearchContacts",
-        description: "Buscar contatos com filtros avançados (texto, tag, wallet, bloqueado).",
+        description: "Buscar contatos com filtros avançados (texto, tag, wallet, bloqueado e endereço). addressBairro e addressCidade buscam por \"contém\", sem diferenciar acento e maiúsculas. addressUfs aceita as siglas das 27 UFs em texto separado por vírgula (\"SP,RJ\") ou em lista ([\"SP\", \"RJ\"]) e acha também o estado gravado por extenso (ex.: \"São Paulo\"); UF pedida sem nenhuma sigla válida devolve lista vazia. Resposta: { success, data, pagination: { page, limit, total, totalPages, hasMore }, meta: { addressFilter } }; cada contato de data traz id, number, name, email, blocked, cep, logradouro, numeroEndereco, complemento, bairro, cidade, estado, tags e wallets. meta.addressFilter false indica servidor sem as colunas de endereço: os filtros de endereço foram ignorados.",
         bodyType: "json",
-        bodyExample: JSON.stringify({ searchParam: "", page: 1, limit: 40, tagId: null, walletId: null, blocked: false }, null, 2),
+        bodyExample: JSON.stringify({ searchParam: "", page: 1, limit: 40, tagId: null, walletId: null, blocked: false, addressBairro: "Bela Vista", addressCidade: "São Paulo", addressUfs: "SP,RJ" }, null, 2),
       },
       {
         method: "POST", path: "/updateContactKanban", name: "UpdateContactKanban",
@@ -341,7 +340,7 @@ const API_DOCS: ApiRouteCategory[] = [
       },
       {
         method: "POST", path: "/updateContactWallet", name: "UpdateContactWallet",
-        description: "Atribuir uma ou mais wallets a um contato.",
+        description: "Definir as wallets (carteiras) de um contato. A lista enviada substitui a atual: para tirar uma wallet, reenvie apenas as que devem permanecer; walletIds: [] (ou walletId: null) descarteiriza o contato.",
         bodyType: "json",
         bodyExample: JSON.stringify({ contactId: 1, walletId: 2 }, null, 2),
       },
@@ -358,21 +357,21 @@ const API_DOCS: ApiRouteCategory[] = [
       },
       {
         method: "POST", path: "/findduplicatecontacts", name: "FindDuplicateContacts",
-        description: "Listar pares de contatos duplicados (variantes do 9º dígito BR / colisões) candidatos a mesclagem.",
+        description: "Listar pares de contatos duplicados (variantes do 9º dígito BR / colisões) candidatos a mesclagem. Sem paginação: use limit para ampliar o lote. O limit é aplicado antes do filtro matchKinds.",
         bodyType: "json",
-        bodyExample: JSON.stringify({ page: 1, limit: 50 }, null, 2),
+        bodyExample: JSON.stringify({ limit: 500, matchKinds: ["nine_digit_variant", "cross_collision"] }, null, 2),
       },
       {
         method: "POST", path: "/mergecontacts", name: "MergeContacts",
-        description: "Mesclar contatos duplicados em lote. Cada par indica o contato principal e o duplicado (por id ou número).",
+        description: "Mesclar contatos duplicados em lote. Cada par indica o contato principal e o duplicado, por id (primaryId/duplicateId) ou por número (primaryNumber/duplicateNumber).",
         bodyType: "json",
-        bodyExample: JSON.stringify({ pairs: [{ primaryContactId: 1, duplicateContactId: 2 }] }, null, 2),
+        bodyExample: JSON.stringify({ pairs: [{ primaryId: 1, duplicateId: 2 }, { primaryNumber: "5511999999999", duplicateNumber: "551199999999" }] }, null, 2),
       },
       {
         method: "POST", path: "/unmergecontacts", name: "UnmergeContacts",
-        description: "Desfazer a mesclagem de um contato previamente mesclado.",
+        description: "Desfazer a mesclagem de contatos previamente mesclados. Informe duplicateIds (ids dos contatos duplicados) ou mergeLogIds (ids dos registros de mesclagem). Um dos dois é obrigatório.",
         bodyType: "json",
-        bodyExample: JSON.stringify({ contactId: 2 }, null, 2),
+        bodyExample: JSON.stringify({ duplicateIds: [2] }, null, 2),
       },
     ],
   },
@@ -406,7 +405,7 @@ const API_DOCS: ApiRouteCategory[] = [
       },
       {
         method: "POST", path: "/updatetag", name: "SetTag",
-        description: "Definir a tag principal de um ticket.",
+        description: "Substituir as tags do contato do ticket pela tag informada. Atenção: as demais tags do contato são removidas, e o efeito vale para todos os tickets desse contato. Para acrescentar sem remover, use /addTag.",
         bodyType: "json",
         bodyExample: JSON.stringify({ ticketId: 4, tag: 1 }, null, 2),
       },
@@ -418,13 +417,13 @@ const API_DOCS: ApiRouteCategory[] = [
       },
       {
         method: "POST", path: "/showticket", name: "ShowTicketInformation",
-        description: "Buscar informações do ticket mais recente de um contato.",
+        description: "Buscar informações de um ticket aberto do contato. Só considera tickets com status open: contato sem ticket aberto responde 404, mesmo tendo histórico. Havendo mais de um aberto, não há garantia de que seja o mais recente.",
         bodyType: "json",
         bodyExample: JSON.stringify({ number: "5511999999999" }, null, 2),
       },
       {
         method: "POST", path: "/showticketchatbot", name: "ShowTicketInformationChatBot",
-        description: "Buscar ticket ativo de um contato (contexto chatbot).",
+        description: "Buscar o primeiro ticket do contato que tenha fluxo de chatbot vinculado, independente do status. Ticket fechado com fluxo também é retornado; ticket aberto sem fluxo responde 404.",
         bodyType: "json",
         bodyExample: JSON.stringify({ number: "5511999999999" }, null, 2),
       },
@@ -531,7 +530,7 @@ const API_DOCS: ApiRouteCategory[] = [
       },
       {
         method: "POST", path: "/updateUser", name: "UpdateUser",
-        description: "Atualizar nome e/ou email de um usuário existente.",
+        description: "Atualizar dados de um usuário existente: nome, email, senha, perfil, filas, canais permitidos, permissões de menu, ramal SIP, horário de atendimento e usuário restrito. Só userId é obrigatório; campos ausentes ficam inalterados. Perfil superadmin é recusado com 403.",
         bodyType: "json",
         bodyExample: JSON.stringify({ userId: 1, name: "Nome Atualizado", email: "novoemail@example.com" }, null, 2),
       },
@@ -562,9 +561,9 @@ const API_DOCS: ApiRouteCategory[] = [
         description: "Listar tickets com filtros de status, fila e canal.",
         params: [
           { key: "pageNumber", desc: "Número da página", required: true, defaultValue: "1" },
-          { key: "status", desc: "open, pending, closed", required: false, defaultValue: "open" },
+          { key: "status", desc: "open, pending ou closed — obrigatório (sem ele a rota responde 404)", required: true, defaultValue: "open" },
           { key: "searchParam", desc: "Busca textual (opcional)", required: false },
-          { key: "queuesIds", desc: "IDs das filas (opcional)", required: false },
+          { key: "queuesIds", desc: "IDs das filas (opcional). Só é aplicado às filas do usuário vinculado à API; fora delas o filtro é ignorado e a lista volta completa", required: false },
           { key: "whatsappIds", desc: "IDs dos canais (opcional)", required: false },
         ],
       },
@@ -580,7 +579,7 @@ const API_DOCS: ApiRouteCategory[] = [
       },
       {
         method: "GET", path: "/listContacts", name: "ListContacts",
-        description: "Listar contatos com paginação e filtros.",
+        description: "Listar contatos com paginação e filtros. Cada contato traz o endereço: cep, logradouro, numeroEndereco, complemento, bairro, cidade e estado.",
         params: [
           { key: "pageNumber", desc: "Número da página", required: true, defaultValue: "1" },
           { key: "searchParam", desc: "Busca textual (opcional)", required: false },
@@ -591,7 +590,7 @@ const API_DOCS: ApiRouteCategory[] = [
       {
         method: "GET", path: "/listTags", name: "ListTags",
         description: "Listar tags disponíveis.",
-        params: [{ key: "isActive", desc: "true ou false", required: false, defaultValue: "true" }],
+        params: [{ key: "isActive", desc: "true lista só as tags ativas; omitido (ou false) lista todas", required: false, defaultValue: "true" }],
       },
       { method: "GET", path: "/listQueues", name: "ListQueues", description: "Listar todas as filas de atendimento." },
     ],
@@ -656,15 +655,15 @@ const API_DOCS: ApiRouteCategory[] = [
     routes: [
       {
         method: "POST", path: "/sendLocation", name: "SendLocation",
-        description: "Enviar localização geográfica para um contato.",
+        description: "Enviar localização geográfica para um contato. O destinatário vem de number; ticketId é opcional e só vincula a mensagem ao ticket.",
         bodyType: "json",
-        bodyExample: JSON.stringify({ ticketId: 1262, latitude: -23.5505, longitude: -46.6333, name: "São Paulo", address: "Av. Paulista, 1000" }, null, 2),
+        bodyExample: JSON.stringify({ number: "5511999999999", latitude: -23.5505, longitude: -46.6333, name: "São Paulo", address: "Av. Paulista, 1000", ticketId: 1262 }, null, 2),
       },
       {
         method: "POST", path: "/sendVcard", name: "SendVcard",
-        description: "Enviar contato (vCard) para um ticket.",
+        description: "Enviar contato (vCard). O destinatário vem de number; ticketId é opcional e só vincula a mensagem ao ticket. Dentro de contact, os campos fullName, wuid e phoneNumber são obrigatórios.",
         bodyType: "json",
-        bodyExample: JSON.stringify({ ticketId: 1262, contact: { name: "Nome Contato", number: "5511999999999", email: "contato@email.com" } }, null, 2),
+        bodyExample: JSON.stringify({ number: "5511999999999", contact: { fullName: "Nome Contato", wuid: "5511888888888", phoneNumber: "5511888888888", organization: "Empresa Exemplo", email: "contato@email.com" }, ticketId: 1262 }, null, 2),
       },
       {
         method: "GET", path: "/searchMessages", name: "SearchMessages",
@@ -683,15 +682,15 @@ const API_DOCS: ApiRouteCategory[] = [
       { method: "GET", path: "/listKanban", name: "ListKanban", description: "Listar todos os kanbans do tenant." },
       {
         method: "POST", path: "/createKanban", name: "CreateKanban",
-        description: "Criar um novo kanban.",
+        description: "Criar um novo kanban. Esta rota não define cor: o kanban nasce sem cor e ela só pode ser ajustada pelo painel.",
         bodyType: "json",
-        bodyExample: JSON.stringify({ name: "Kanban 1", color: "#FF5733" }, null, 2),
+        bodyExample: JSON.stringify({ name: "Kanban 1", position: 1 }, null, 2),
       },
       {
         method: "POST", path: "/updateKanban/:id", name: "UpdateKanban",
-        description: "Atualizar um kanban existente.",
+        description: "Atualizar um kanban existente. Esta rota não altera a cor: a cor atual é preservada e só pode ser ajustada pelo painel.",
         bodyType: "json",
-        bodyExample: JSON.stringify({ name: "Kanban Atualizado", color: "#33A1FF" }, null, 2),
+        bodyExample: JSON.stringify({ name: "Kanban Atualizado", position: 2 }, null, 2),
       },
       {
         method: "POST", path: "/deleteKanban/:id", name: "DeleteKanban",
@@ -707,15 +706,15 @@ const API_DOCS: ApiRouteCategory[] = [
     routes: [
       {
         method: "POST", path: "/createTag", name: "CreateTag",
-        description: "Criar uma nova tag.",
+        description: "Criar uma nova tag. O nome da tag vai no campo tag. tag e color são obrigatórios.",
         bodyType: "json",
-        bodyExample: JSON.stringify({ name: "Tag Nova", color: "#FF5733", isActive: true }, null, 2),
+        bodyExample: JSON.stringify({ tag: "Tag Nova", color: "#FF5733", isActive: true }, null, 2),
       },
       {
         method: "POST", path: "/updateTagData/:id", name: "UpdateTagData",
-        description: "Atualizar dados de uma tag existente.",
+        description: "Atualizar dados de uma tag existente. O nome da tag vai no campo tag.",
         bodyType: "json",
-        bodyExample: JSON.stringify({ name: "Tag Atualizada", color: "#33A1FF", isActive: true }, null, 2),
+        bodyExample: JSON.stringify({ tag: "Tag Atualizada", color: "#33A1FF", isActive: true }, null, 2),
       },
       {
         method: "POST", path: "/deleteTag/:id", name: "DeleteTag",
@@ -732,15 +731,15 @@ const API_DOCS: ApiRouteCategory[] = [
       { method: "GET", path: "/listReasons", name: "ListReasons", description: "Listar motivos de encerramento de atendimento." },
       {
         method: "POST", path: "/createReason", name: "CreateReason",
-        description: "Criar um novo motivo de encerramento.",
+        description: "Criar um novo motivo de encerramento. Esta rota não define cor: o motivo nasce sem cor e ela só pode ser ajustada pelo painel.",
         bodyType: "json",
-        bodyExample: JSON.stringify({ name: "Resolvido", color: "#00C851" }, null, 2),
+        bodyExample: JSON.stringify({ name: "Resolvido" }, null, 2),
       },
       {
         method: "POST", path: "/updateReason/:id", name: "UpdateReason",
-        description: "Atualizar um motivo existente.",
+        description: "Atualizar um motivo existente. Esta rota não altera a cor: a cor atual é preservada e só pode ser ajustada pelo painel.",
         bodyType: "json",
-        bodyExample: JSON.stringify({ name: "Resolvido (atualizado)", color: "#00C851" }, null, 2),
+        bodyExample: JSON.stringify({ name: "Resolvido (atualizado)" }, null, 2),
       },
       {
         method: "POST", path: "/deleteReason/:id", name: "DeleteReason",
@@ -756,15 +755,15 @@ const API_DOCS: ApiRouteCategory[] = [
     routes: [
       {
         method: "POST", path: "/createQueueData", name: "CreateQueueData",
-        description: "Criar uma nova fila de atendimento.",
+        description: "Criar uma nova fila de atendimento. O nome da fila vai no campo queue, único obrigatório. Cor e responsável não são definidos por esta rota: a fila nasce sem cor e vinculada ao usuário dono do token.",
         bodyType: "json",
-        bodyExample: JSON.stringify({ name: "Fila Suporte", color: "#4A90E2", greetingMessage: "Olá! Como posso ajudar?", userId: null }, null, 2),
+        bodyExample: JSON.stringify({ queue: "Fila Suporte", isActive: true, businessHours: [], messageBusinessHours: "Estamos fora do horário de atendimento." }, null, 2),
       },
       {
         method: "POST", path: "/updateQueueData/:id", name: "UpdateQueueData",
-        description: "Atualizar uma fila de atendimento existente.",
+        description: "Atualizar uma fila de atendimento existente. O nome da fila vai no campo queue. Atenção: esta rota zera a cor da fila e refaz o vínculo com o usuário dono do token; para preservar a cor, edite pelo painel.",
         bodyType: "json",
-        bodyExample: JSON.stringify({ name: "Fila Suporte Atualizada", color: "#E24A4A", greetingMessage: "Olá! Aguarde um momento.", userId: 1 }, null, 2),
+        bodyExample: JSON.stringify({ queue: "Fila Suporte Atualizada", isActive: true, businessHours: [], messageBusinessHours: "Estamos fora do horário de atendimento." }, null, 2),
       },
       {
         method: "POST", path: "/deleteQueueData/:id", name: "DeleteQueueData",
@@ -780,7 +779,7 @@ const API_DOCS: ApiRouteCategory[] = [
     routes: [
       {
         method: "POST", path: "/campaign/create", name: "CampaignCreate",
-        description: "Criar uma nova campanha de disparo. Campos obrigatórios: name e sessionId (ou whatsappId). Informe message1/message2/message3 (ou message) — ou, para WABA, templateName + templateLanguage. start e delay têm default (agora e 20s).",
+        description: "Criar uma nova campanha de disparo. Campos obrigatórios: name e sessionId (ou whatsappId). Informe message1/message2/message3 (ou message) — ou, para WABA, templateName + templateLanguage. start e delay têm default (agora e 20s). Esta rota não anexa mídia: a campanha nasce só com texto e o arquivo precisa ser anexado pelo painel.",
         bodyType: "json",
         bodyExample: JSON.stringify({
           name: "Campanha Promo",
@@ -790,8 +789,6 @@ const API_DOCS: ApiRouteCategory[] = [
           message3: "Oi {{name}}!",
           start: "2026-05-01 10:00",
           delay: 20,
-          mediaUrl: null,
-          mediaType: null,
           sendTimeWindowEnabled: false,
           sendTimeStart: null,
           sendTimeEnd: null
@@ -799,17 +796,17 @@ const API_DOCS: ApiRouteCategory[] = [
       },
       {
         method: "GET", path: "/campaign/list", name: "CampaignList",
-        description: "Listar campanhas com paginação e filtros.",
+        description: "Listar campanhas com paginação. Esta rota não filtra por status.",
         params: [
-          { key: "pageNumber", desc: "Número da página", required: true, defaultValue: "1" },
-          { key: "status", desc: "pending, running, completed, cancelled (opcional)", required: false },
+          { key: "page", desc: "Número da página", required: false, defaultValue: "1" },
+          { key: "limit", desc: "Itens por página", required: false, defaultValue: "20" },
         ],
       },
       {
         method: "POST", path: "/campaign/update/:campaignId", name: "CampaignUpdate",
-        description: "Atualizar dados de uma campanha.",
+        description: "Atualizar dados de uma campanha. Só é aceito enquanto a campanha estiver em pending, scheduled, paused ou canceled; em processing ou finished a rota responde 404. O texto vai em message1/message2/message3 e a variável é {{name}}. O status não é editável aqui: use start, cancel, pause ou resume.",
         bodyType: "json",
-        bodyExample: JSON.stringify({ name: "Campanha Atualizada", message: "Nova mensagem {nome}!" }, null, 2),
+        bodyExample: JSON.stringify({ name: "Campanha Atualizada", message1: "Nova mensagem {{name}}!" }, null, 2),
       },
       {
         method: "POST", path: "/campaign/duplicate/:campaignId", name: "CampaignDuplicate",
@@ -890,34 +887,35 @@ const API_DOCS: ApiRouteCategory[] = [
     routes: [
       {
         method: "POST", path: "/bulkFastMessage", name: "BulkFastMessage",
-        description: "Disparo rápido para lista de números sem criar tickets.",
+        description: "Disparo rápido para lista de números sem criar tickets. Só funciona em canais whatsapp, baileys e zapo, e whatsappType é obrigatório.",
         bodyType: "formdata",
-        bodyExample: "Campos (form-data):\n  contacts   → JSON array: [{\"number\":\"5511999999999\",\"name\":\"Nome\"}]\n  message    → Texto da mensagem\n  whatsappId → ID da sessão\n  media      → arquivo (opcional)",
+        bodyExample: "Campos (form-data):\n  whatsappId   → ID da sessão\n  whatsappType → whatsapp, baileys ou zapo (obrigatório)\n  arrayNumbers → 5511999999999,5511888888888 (lista separada por vírgula)\n  groups       → false\n  message      → Texto da mensagem\n  min          → 3 (intervalo mínimo em segundos)\n  max          → 8 (intervalo máximo em segundos)\n  media        → arquivo (opcional)\n  mediaLocal   → true (obrigatório ao enviar o arquivo)",
       },
       {
         method: "POST", path: "/bulkSendMessage", name: "BulkSendMessage",
-        description: "Disparo em lote criando tickets para cada contato.",
+        description: "Disparo em lote criando tickets para cada contato. whatsappType é obrigatório.",
         bodyType: "formdata",
-        bodyExample: "Campos (form-data):\n  contacts   → JSON array: [{\"number\":\"5511999999999\",\"name\":\"Nome\"}]\n  message    → Texto da mensagem\n  whatsappId → ID da sessão\n  media      → arquivo (opcional)",
+        bodyExample: "Campos (form-data):\n  whatsappId   → ID da sessão\n  whatsappType → whatsapp, baileys, zapo, meow, evo, evogo, zapi ou uazapi (obrigatório)\n  arrayNumbers → 5511999999999,5511888888888 (lista separada por vírgula)\n  groups       → false\n  message      → Texto da mensagem\n  min          → 3 (intervalo mínimo em segundos)\n  max          → 8 (intervalo máximo em segundos)\n  media        → arquivo (opcional; por URL use media=true + mediaUrl)\n  mediaLocal   → true (obrigatório ao enviar o arquivo)",
       },
       {
         method: "POST", path: "/bulkSendMessageWithVariable", name: "BulkSendMessageWithVariable",
-        description: "Disparo em lote com variáveis personalizadas por contato.",
+        description: "Disparo com registro de lote, um destinatário por chamada. A substituição das variáveis é feita pelo integrador: o texto enviado em message sai literalmente como está.",
         bodyType: "formdata",
-        bodyExample: "Campos (form-data):\n  contacts   → JSON array: [{\"number\":\"5511999999999\",\"name\":\"Nome\",\"variables\":{\"campo\":\"valor\"}}]\n  message    → Mensagem com {variavel}\n  whatsappId → ID da sessão",
+        bodyExample: "Campos (form-data):\n  whatsappId     → ID da sessão\n  whatsappType   → whatsapp, baileys, zapo, meow, evo, evogo, zapi ou uazapi (obrigatório)\n  number         → 5511999999999\n  message        → Olá João, seu pedido chegou (já interpolado)\n  min            → 3 (intervalo mínimo em segundos)\n  max            → 8 (intervalo máximo em segundos)\n  dataInput      → linhas do lote (opcional; só dimensiona o relatório)\n  bulkDispatchId → id devolvido na 1ª chamada (opcional; agrupa o relatório)",
       },
       {
         method: "POST", path: "/bulkIndividual", name: "BulkIndividual",
-        description: "Disparo individual de mensagem a um único número.",
+        description: "Disparo individual de mensagem a um único número. whatsappType é obrigatório.",
         bodyType: "formdata",
-        bodyExample: "Campos (form-data):\n  number     → 5511999999999\n  message    → Texto da mensagem\n  whatsappId → ID da sessão\n  media      → arquivo (opcional)",
+        bodyExample: "Campos (form-data):\n  whatsappId   → ID da sessão\n  whatsappType → whatsapp, baileys, zapo, meow, evo, evogo, zapi, uazapi, waba, gupshup ou dialog360 (obrigatório)\n  number       → 5511999999999\n  message      → Texto da mensagem\n  media        → arquivo (opcional)\n  mediaLocal   → true (obrigatório ao enviar o arquivo; whatsapp, baileys e zapo)",
       },
       {
         method: "GET", path: "/bulkDispatch/list", name: "BulkDispatchList",
-        description: "Listar registros de disparos em lote.",
+        description: "Listar registros de disparos em lote. Disparos de SMS em massa (dispatchType \"sms\") não têm canal (whatsapp null) e vêm sem a lista de números (metadata.contacts); o detalhe traz a lista.",
         params: [
-          { key: "page", desc: "Número da página", required: true, defaultValue: "1" },
-          { key: "status", desc: "pending, running, completed, cancelled (opcional)", required: false },
+          { key: "page", desc: "Número da página", required: false, defaultValue: "1" },
+          { key: "limit", desc: "Itens por página", required: false, defaultValue: "20" },
+          { key: "status", desc: "pending, processing, completed, failed ou cancelled (opcional)", required: false },
         ],
       },
       {
@@ -926,13 +924,13 @@ const API_DOCS: ApiRouteCategory[] = [
       },
       {
         method: "POST", path: "/bulkDispatch/update/:id", name: "BulkDispatchUpdate",
-        description: "Atualizar status de um disparo em lote.",
+        description: "Atualizar status de um disparo em lote. Disparos de SMS em massa (dispatchType \"sms\") são controlados pelo servidor e respondem 400 ERR_SMS_BULK_READONLY por aqui.",
         bodyType: "json",
         bodyExample: JSON.stringify({ status: "cancelled", cancellationReason: "Motivo do cancelamento" }, null, 2),
       },
       {
         method: "POST", path: "/bulkDispatch/incrementProgress/:id", name: "BulkDispatchIncrementProgress",
-        description: "Incrementar o progresso de um disparo em lote.",
+        description: "Incrementar o progresso de um disparo em lote. Disparos de SMS em massa (dispatchType \"sms\") são controlados pelo servidor e respondem 400 ERR_SMS_BULK_READONLY.",
         bodyType: "json",
         bodyExample: JSON.stringify({ success: true, error: null }, null, 2),
       },
@@ -956,61 +954,67 @@ const API_DOCS: ApiRouteCategory[] = [
       },
       {
         method: "POST", path: "/group/create", name: "GroupCreate",
-        description: "Criar um novo grupo no WhatsApp.",
+        description: "Criar um ou mais grupos no WhatsApp. titles aceita texto ou lista e cria um grupo por título; number é o participante inicial (um só). A resposta traz apenas o status por título, sem o ID do grupo: para obter o ID, chame /group/list logo depois e localize o grupo pelo nome.",
         bodyType: "json",
-        bodyExample: JSON.stringify({ whatsappId: 1, name: "Grupo de Suporte", participants: ["5511999999999", "5511888888888"] }, null, 2),
+        bodyExample: JSON.stringify({ whatsappId: 1, titles: ["Grupo de Suporte"], number: "5511999999999" }, null, 2),
       },
       {
         method: "POST", path: "/group/listParticipants", name: "GroupListParticipants",
-        description: "Listar participantes de um grupo.",
+        description: "Listar participantes de um ou mais grupos.",
         bodyType: "json",
-        bodyExample: JSON.stringify({ whatsappId: 1, groupId: "12345678901@g.us" }, null, 2),
+        bodyExample: JSON.stringify({ whatsappId: 1, groupIds: ["12345678901@g.us"] }, null, 2),
       },
       {
         method: "POST", path: "/group/addParticipant", name: "GroupAddParticipant",
-        description: "Adicionar participante(s) a um grupo.",
+        description: "Adicionar participante(s) a um ou mais grupos. Em geral exige que o número conectado seja administrador (a não ser que o grupo permita que qualquer membro adicione). A resposta traz um item por grupo: { groupId, status, message?, reason?, providerStatus?, participants? }. Nos canais por QR Code (Baileys e Zapo), participants traz cada número: { participant, jid, status (success, error ou unknown), code, reason }; reason do número: invite_required (a pessoa só entra por convite), already_in_group, not_allowed, not_on_whatsapp ou rejected. Se todos os números forem recusados, o grupo vem com status error, message ERR_GROUP_PARTICIPANTS_REJECTED e reason participants_rejected. Nas demais falhas, reason do grupo: session_not_connected, not_admin, group_not_found, timeout, invalid_request (por exemplo participants vazio, com message ERR_GROUP_PARTICIPANTS_REQUIRED), provider_error (com providerStatus, o status HTTP do provedor) ou unknown.",
         bodyType: "json",
-        bodyExample: JSON.stringify({ whatsappId: 1, groupId: "12345678901@g.us", participants: ["5511777777777"] }, null, 2),
+        bodyExample: JSON.stringify({ whatsappId: 1, groupIds: ["12345678901@g.us"], participants: ["5511777777777"] }, null, 2),
       },
       {
         method: "POST", path: "/group/removeParticipant", name: "GroupRemoveParticipant",
-        description: "Remover participante(s) de um grupo.",
+        description: "Remover participante(s) de um ou mais grupos. Requer que o número conectado seja administrador do grupo. A resposta traz um item por grupo: { groupId, status, message?, reason?, providerStatus?, participants? }. Nos canais por QR Code (Baileys e Zapo), participants traz cada número: { participant, jid, status (success, error ou unknown), code, reason }; reason do número: not_in_group (o número não está no grupo) ou rejected. Se todos os números forem recusados, o grupo vem com status error, message ERR_GROUP_PARTICIPANTS_REJECTED e reason participants_rejected. Nas demais falhas, reason do grupo: session_not_connected, not_admin, group_not_found, timeout, invalid_request (por exemplo participants vazio, com message ERR_GROUP_PARTICIPANTS_REQUIRED), provider_error (com providerStatus, o status HTTP do provedor) ou unknown.",
         bodyType: "json",
-        bodyExample: JSON.stringify({ whatsappId: 1, groupId: "12345678901@g.us", participants: ["5511777777777"] }, null, 2),
+        bodyExample: JSON.stringify({ whatsappId: 1, groupIds: ["12345678901@g.us"], participants: ["5511777777777"] }, null, 2),
       },
       {
         method: "POST", path: "/group/promote", name: "GroupPromote",
-        description: "Promover participante(s) a administrador do grupo.",
+        description: "Promover participante(s) a administrador do grupo. Requer que o número conectado seja administrador do grupo. A resposta traz um item por grupo: { groupId, status, message?, reason?, providerStatus?, participants? }. Nos canais por QR Code (Baileys e Zapo), participants traz cada número: { participant, jid, status (success, error ou unknown), code, reason }; reason do número: not_in_group (o número não está no grupo) ou rejected. Se todos os números forem recusados, o grupo vem com status error, message ERR_GROUP_PARTICIPANTS_REJECTED e reason participants_rejected. Nas demais falhas, reason do grupo: session_not_connected, not_admin, group_not_found, timeout, invalid_request (por exemplo participants vazio, com message ERR_GROUP_PARTICIPANTS_REQUIRED), provider_error (com providerStatus, o status HTTP do provedor) ou unknown.",
         bodyType: "json",
-        bodyExample: JSON.stringify({ whatsappId: 1, groupId: "12345678901@g.us", participants: ["5511777777777"] }, null, 2),
+        bodyExample: JSON.stringify({ whatsappId: 1, groupIds: ["12345678901@g.us"], participants: ["5511777777777"] }, null, 2),
       },
       {
         method: "POST", path: "/group/demote", name: "GroupDemote",
-        description: "Rebaixar administrador(es) a participante comum.",
+        description: "Rebaixar administrador(es) a participante comum. Requer que o número conectado seja administrador do grupo. A resposta traz um item por grupo: { groupId, status, message?, reason?, providerStatus?, participants? }. Nos canais por QR Code (Baileys e Zapo), participants traz cada número: { participant, jid, status (success, error ou unknown), code, reason }; reason do número: not_in_group (o número não está no grupo) ou rejected. Se todos os números forem recusados, o grupo vem com status error, message ERR_GROUP_PARTICIPANTS_REJECTED e reason participants_rejected. Nas demais falhas, reason do grupo: session_not_connected, not_admin, group_not_found, timeout, invalid_request (por exemplo participants vazio, com message ERR_GROUP_PARTICIPANTS_REQUIRED), provider_error (com providerStatus, o status HTTP do provedor) ou unknown.",
         bodyType: "json",
-        bodyExample: JSON.stringify({ whatsappId: 1, groupId: "12345678901@g.us", participants: ["5511777777777"] }, null, 2),
+        bodyExample: JSON.stringify({ whatsappId: 1, groupIds: ["12345678901@g.us"], participants: ["5511777777777"] }, null, 2),
       },
       {
         method: "POST", path: "/group/changeTitle", name: "GroupChangeTitle",
         description: "Alterar o nome/título de um grupo.",
         bodyType: "json",
-        bodyExample: JSON.stringify({ whatsappId: 1, groupId: "12345678901@g.us", title: "Novo Nome do Grupo" }, null, 2),
+        bodyExample: JSON.stringify({ whatsappId: 1, groupIds: ["12345678901@g.us"], title: "Novo Nome do Grupo" }, null, 2),
       },
       {
         method: "POST", path: "/group/changeDescription", name: "GroupChangeDescription",
         description: "Alterar a descrição de um grupo.",
         bodyType: "json",
-        bodyExample: JSON.stringify({ whatsappId: 1, groupId: "12345678901@g.us", description: "Nova descrição do grupo" }, null, 2),
+        bodyExample: JSON.stringify({ whatsappId: 1, groupIds: ["12345678901@g.us"], description: "Nova descrição do grupo" }, null, 2),
       },
       {
         method: "POST", path: "/group/setAdminsOnly", name: "GroupSetAdminsOnly",
         description: "Configurar se apenas admins podem enviar mensagens.",
         bodyType: "json",
-        bodyExample: JSON.stringify({ whatsappId: 1, groupId: "12345678901@g.us", adminsOnly: true }, null, 2),
+        bodyExample: JSON.stringify({ whatsappId: 1, groupIds: ["12345678901@g.us"], adminsOnly: true }, null, 2),
       },
       {
         method: "POST", path: "/group/getInviteLink", name: "GroupGetInviteLink",
-        description: "Obter o link de convite de um grupo.",
+        description: "Obter o link de convite de um grupo. Requer que o número conectado seja administrador do grupo. Disponível nos canais por QR Code (Baileys e Zapo); em outros canais responde com inviteCode nulo. Resposta: { groupId, inviteCode, inviteLink } e, quando não houver código, um campo adicional reason (not_admin, group_not_found, timeout, channel_not_supported ou unknown).",
+        bodyType: "json",
+        bodyExample: JSON.stringify({ whatsappId: 1, groupId: "12345678901@g.us" }, null, 2),
+      },
+      {
+        method: "POST", path: "/group/revokeInviteLink", name: "GroupRevokeInviteLink",
+        description: "Revogar o link de convite atual do grupo e gerar um novo. Requer que o número conectado seja administrador. O link anterior deixa de funcionar imediatamente. Disponível nos canais por QR Code (Baileys e Zapo).",
         bodyType: "json",
         bodyExample: JSON.stringify({ whatsappId: 1, groupId: "12345678901@g.us" }, null, 2),
       },
@@ -1018,7 +1022,7 @@ const API_DOCS: ApiRouteCategory[] = [
         method: "POST", path: "/group/changePicture", name: "GroupChangePicture",
         description: "Alterar a foto de perfil de um grupo (multipart/form-data).",
         bodyType: "formdata",
-        bodyExample: "Campos (form-data):\n  picture    → arquivo de imagem (tipo: file)\n  whatsappId → ID da sessão\n  groupId    → ID do grupo (12345678901@g.us)",
+        bodyExample: "Campos (form-data):\n  picture    → arquivo de imagem (tipo: file)\n  whatsappId → ID da sessão\n  groupIds   → ID(s) do grupo, separados por vírgula (12345678901@g.us,98765432109@g.us)",
       },
       {
         method: "POST", path: "/group/leave", name: "GroupLeave",
@@ -1034,17 +1038,20 @@ const API_DOCS: ApiRouteCategory[] = [
     routes: [
       {
         method: "POST", path: "/appointment/create", name: "AppointmentCreate",
-        description: "Criar um novo agendamento.",
+        description: "Criar um novo agendamento. A data vai em startAt (obrigatória). Esta rota não define responsável: o agendamento nasce sem atendente vinculado.",
         bodyType: "json",
-        bodyExample: JSON.stringify({ contactId: 1, userId: 1, scheduledAt: "2025-01-15T14:30:00", title: "Reunião", notes: "Detalhes do agendamento" }, null, 2),
+        bodyExample: JSON.stringify({ title: "Reunião", description: "Alinhamento de projeto", contactId: 1, contactName: "João Silva", contactPhone: "5511999999999", whatsappId: 1, startAt: "2025-01-15T14:30:00", endAt: "2025-01-15T15:30:00", status: "pending", notes: "Detalhes do agendamento" }, null, 2),
       },
       {
         method: "GET", path: "/appointment/list", name: "AppointmentList",
         description: "Listar agendamentos com filtros.",
         params: [
-          { key: "pageNumber", desc: "Número da página", required: true, defaultValue: "1" },
-          { key: "startDate", desc: "Data inicial (YYYY-MM-DD)", required: false },
-          { key: "endDate", desc: "Data final (YYYY-MM-DD)", required: false },
+          { key: "page", desc: "Número da página", required: false, defaultValue: "1" },
+          { key: "limit", desc: "Itens por página", required: false, defaultValue: "20" },
+          { key: "status", desc: "pending, confirmed, cancelled ou completed (opcional)", required: false },
+          { key: "startFrom", desc: "Data inicial (YYYY-MM-DD)", required: false },
+          { key: "startTo", desc: "Data final (YYYY-MM-DD)", required: false },
+          { key: "search", desc: "Busca no título e no nome do contato (opcional)", required: false },
         ],
       },
       {
@@ -1053,9 +1060,9 @@ const API_DOCS: ApiRouteCategory[] = [
       },
       {
         method: "POST", path: "/appointment/update/:id", name: "AppointmentUpdate",
-        description: "Atualizar um agendamento existente.",
+        description: "Atualizar um agendamento existente. Para remarcar, use startAt (e endAt): campo com outro nome é descartado sem erro.",
         bodyType: "json",
-        bodyExample: JSON.stringify({ scheduledAt: "2025-01-16T10:00:00", title: "Reunião Atualizada", notes: "Novos detalhes" }, null, 2),
+        bodyExample: JSON.stringify({ startAt: "2025-01-16T10:00:00", endAt: "2025-01-16T11:00:00", title: "Reunião Atualizada", status: "confirmed", notes: "Novos detalhes" }, null, 2),
       },
       {
         method: "POST", path: "/appointment/delete/:id", name: "AppointmentDelete",
@@ -1065,23 +1072,19 @@ const API_DOCS: ApiRouteCategory[] = [
       },
       {
         method: "POST", path: "/scheduleReminder/create", name: "ScheduleReminderCreate",
-        description: "Criar um lembrete agendado com mensagem automática.",
+        description: "Criar um lembrete automático para agendamentos. O lembrete não tem data própria: ele dispara hoursBeforeEvent horas antes de cada agendamento. hoursBeforeEvent e messageType (message ou waba_template) são obrigatórios.",
         bodyType: "json",
-        bodyExample: JSON.stringify({ contactId: 1, whatsappId: 1, scheduledAt: "2025-01-15T08:00:00", message: "Lembrete: sua consulta é hoje!", isActive: true }, null, 2),
+        bodyExample: JSON.stringify({ name: "Lembrete de consulta", description: "Aviso enviado antes do agendamento", hoursBeforeEvent: 24, messageType: "message", messageContent: "Lembrete: sua consulta é amanhã!", whatsappId: 1, active: true }, null, 2),
       },
       {
         method: "GET", path: "/scheduleReminder/list", name: "ScheduleReminderList",
-        description: "Listar lembretes agendados.",
-        params: [
-          { key: "pageNumber", desc: "Número da página", required: true, defaultValue: "1" },
-          { key: "isActive", desc: "true ou false (opcional)", required: false },
-        ],
+        description: "Listar lembretes agendados. Devolve todos os lembretes do tenant, do mais recente para o mais antigo. Sem paginação e sem filtros.",
       },
       {
         method: "POST", path: "/scheduleReminder/update/:id", name: "ScheduleReminderUpdate",
-        description: "Atualizar um lembrete agendado.",
+        description: "Atualizar um lembrete agendado. Campos aceitos: name, description, hoursBeforeEvent, messageType, messageContent, whatsappId e active. Campo com outro nome é descartado sem erro.",
         bodyType: "json",
-        bodyExample: JSON.stringify({ message: "Mensagem atualizada", scheduledAt: "2025-01-16T09:00:00" }, null, 2),
+        bodyExample: JSON.stringify({ name: "Lembrete de consulta", hoursBeforeEvent: 12, messageType: "message", messageContent: "Mensagem atualizada", whatsappId: 1, active: true }, null, 2),
       },
       {
         method: "POST", path: "/scheduleReminder/delete/:id", name: "ScheduleReminderDelete",
@@ -1091,9 +1094,9 @@ const API_DOCS: ApiRouteCategory[] = [
       },
       {
         method: "POST", path: "/scheduleReminder/toggle/:id", name: "ScheduleReminderToggle",
-        description: "Ativar ou desativar um lembrete agendado.",
+        description: "Alternar o estado de um lembrete: a cada chamada ele inverte entre ativo e inativo. Não recebe corpo e não é idempotente, então repetir a chamada volta ao estado anterior.",
         bodyType: "json",
-        bodyExample: JSON.stringify({ isActive: false }, null, 2),
+        bodyExample: JSON.stringify({}, null, 2),
       },
     ],
   },
@@ -1103,10 +1106,11 @@ const API_DOCS: ApiRouteCategory[] = [
     routes: [
       {
         method: "GET", path: "/dash/ticketsAndTimes", name: "DashTicketsAndTimes",
-        description: "Estatísticas gerais: total de tickets, tempos médios de atendimento.",
+        description: "Estatísticas gerais do período: quantidade de atendimentos, demanda ativa e receptiva, tempos médios e novos contatos. Por padrão considera apenas atendimentos individuais.",
         params: [
           { key: "startDate", desc: "Data inicial (YYYY-MM-DD)", required: false },
           { key: "endDate", desc: "Data final (YYYY-MM-DD)", required: false },
+          { key: "isGroup", desc: "true traz somente grupos; ausente ou false traz somente atendimentos individuais (não há valor que some os dois)", required: false, defaultValue: "false" },
         ],
       },
       {
@@ -1115,6 +1119,7 @@ const API_DOCS: ApiRouteCategory[] = [
         params: [
           { key: "startDate", desc: "Data inicial (YYYY-MM-DD)", required: false },
           { key: "endDate", desc: "Data final (YYYY-MM-DD)", required: false },
+          { key: "isGroup", desc: "true traz somente grupos; ausente ou false traz somente atendimentos individuais (não há valor que some os dois)", required: false, defaultValue: "false" },
         ],
       },
       {
@@ -1123,6 +1128,7 @@ const API_DOCS: ApiRouteCategory[] = [
         params: [
           { key: "startDate", desc: "Data inicial (YYYY-MM-DD)", required: false },
           { key: "endDate", desc: "Data final (YYYY-MM-DD)", required: false },
+          { key: "isGroup", desc: "true traz somente grupos; ausente ou false traz somente atendimentos individuais (não há valor que some os dois)", required: false, defaultValue: "false" },
         ],
       },
       {
@@ -1131,6 +1137,7 @@ const API_DOCS: ApiRouteCategory[] = [
         params: [
           { key: "startDate", desc: "Data inicial (YYYY-MM-DD)", required: false },
           { key: "endDate", desc: "Data final (YYYY-MM-DD)", required: false },
+          { key: "isGroup", desc: "true traz somente grupos; ausente ou false traz somente atendimentos individuais (não há valor que some os dois)", required: false, defaultValue: "false" },
         ],
       },
       {
@@ -1139,6 +1146,7 @@ const API_DOCS: ApiRouteCategory[] = [
         params: [
           { key: "startDate", desc: "Data inicial (YYYY-MM-DD)", required: false },
           { key: "endDate", desc: "Data final (YYYY-MM-DD)", required: false },
+          { key: "isGroup", desc: "true traz somente grupos; ausente ou false traz somente atendimentos individuais (não há valor que some os dois)", required: false, defaultValue: "false" },
         ],
       },
       {
@@ -1147,6 +1155,7 @@ const API_DOCS: ApiRouteCategory[] = [
         params: [
           { key: "startDate", desc: "Data inicial (YYYY-MM-DD)", required: false },
           { key: "endDate", desc: "Data final (YYYY-MM-DD)", required: false },
+          { key: "isGroup", desc: "true traz somente grupos; ausente ou false traz somente atendimentos individuais (não há valor que some os dois)", required: false, defaultValue: "false" },
         ],
       },
       {
@@ -1155,6 +1164,7 @@ const API_DOCS: ApiRouteCategory[] = [
         params: [
           { key: "startDate", desc: "Data inicial (YYYY-MM-DD)", required: false },
           { key: "endDate", desc: "Data final (YYYY-MM-DD)", required: false },
+          { key: "isGroup", desc: "true traz somente grupos; ausente ou false traz somente atendimentos individuais (não há valor que some os dois)", required: false, defaultValue: "false" },
         ],
       },
       {
@@ -1163,6 +1173,7 @@ const API_DOCS: ApiRouteCategory[] = [
         params: [
           { key: "startDate", desc: "Data inicial (YYYY-MM-DD)", required: false },
           { key: "endDate", desc: "Data final (YYYY-MM-DD)", required: false },
+          { key: "isGroup", desc: "true traz somente grupos; ausente ou false traz somente atendimentos individuais (não há valor que some os dois)", required: false, defaultValue: "false" },
         ],
       },
       {
@@ -1171,6 +1182,7 @@ const API_DOCS: ApiRouteCategory[] = [
         params: [
           { key: "startDate", desc: "Data inicial (YYYY-MM-DD)", required: false },
           { key: "endDate", desc: "Data final (YYYY-MM-DD)", required: false },
+          { key: "isGroup", desc: "true traz somente grupos; ausente ou false traz somente atendimentos individuais (não há valor que some os dois)", required: false, defaultValue: "false" },
         ],
       },
       {
@@ -1179,6 +1191,7 @@ const API_DOCS: ApiRouteCategory[] = [
         params: [
           { key: "startDate", desc: "Data inicial (YYYY-MM-DD)", required: false },
           { key: "endDate", desc: "Data final (YYYY-MM-DD)", required: false },
+          { key: "isGroup", desc: "true traz somente grupos; ausente ou false traz somente atendimentos individuais (não há valor que some os dois)", required: false, defaultValue: "false" },
         ],
       },
     ],
@@ -1189,21 +1202,28 @@ const API_DOCS: ApiRouteCategory[] = [
     routes: [
       {
         method: "POST", path: "/pipeline/create", name: "PipelineCreate",
-        description: "Criar um novo pipeline de CRM.",
+        description: "Criar um novo pipeline de CRM. O pipeline só tem nome: não existe campo de descrição.",
         bodyType: "json",
-        bodyExample: JSON.stringify({ name: "Pipeline de Vendas", description: "Pipeline principal" }, null, 2),
+        bodyExample: JSON.stringify({ name: "Pipeline de Vendas" }, null, 2),
       },
-      { method: "GET", path: "/pipeline/list", name: "PipelineList", description: "Listar todos os pipelines do tenant." },
+      {
+        method: "GET", path: "/pipeline/list", name: "PipelineList",
+        description: "Listar os pipelines do tenant, com paginação.",
+        params: [
+          { key: "page", desc: "Número da página", required: false, defaultValue: "1" },
+          { key: "limit", desc: "Itens por página", required: false, defaultValue: "20" },
+        ],
+      },
       { method: "GET", path: "/pipeline/show/:id", name: "PipelineShow", description: "Buscar detalhes de um pipeline pelo ID." },
       {
         method: "POST", path: "/pipeline/update/:id", name: "PipelineUpdate",
-        description: "Atualizar um pipeline existente.",
+        description: "Atualizar um pipeline existente. O pipeline só tem nome: não existe campo de descrição.",
         bodyType: "json",
-        bodyExample: JSON.stringify({ name: "Pipeline Atualizado", description: "Nova descrição" }, null, 2),
+        bodyExample: JSON.stringify({ name: "Pipeline Atualizado" }, null, 2),
       },
       {
         method: "POST", path: "/pipeline/delete/:id", name: "PipelineDelete",
-        description: "Excluir um pipeline.",
+        description: "Excluir um pipeline. Só é aceito quando o pipeline não tem nenhuma etapa, oportunidade ou ação vinculada; caso contrário a rota responde 500. Apague as etapas e oportunidades antes.",
         bodyType: "json",
         bodyExample: JSON.stringify({}, null, 2),
       },
@@ -1223,7 +1243,7 @@ const API_DOCS: ApiRouteCategory[] = [
       },
       {
         method: "POST", path: "/stage/delete/:id", name: "StageDelete",
-        description: "Excluir uma etapa de pipeline.",
+        description: "Excluir uma etapa de pipeline. Só é aceito quando a etapa não tem oportunidade nem ação apontando para ela; caso contrário a rota responde 500. Mova as oportunidades antes.",
         bodyType: "json",
         bodyExample: JSON.stringify({}, null, 2),
       },
@@ -1243,7 +1263,7 @@ const API_DOCS: ApiRouteCategory[] = [
         method: "POST", path: "/ticket/pause/start/:ticketId", name: "StartTicketPause",
         description: "Iniciar pausa em um ticket (para controle de SLA).",
         bodyType: "json",
-        bodyExample: JSON.stringify({ reason: "Aguardando retorno do cliente" }, null, 2),
+        bodyExample: JSON.stringify({ pauseReason: "Aguardando retorno do cliente" }, null, 2),
       },
       {
         method: "POST", path: "/ticket/pause/end/:ticketId", name: "EndTicketPause",
@@ -1259,9 +1279,12 @@ const API_DOCS: ApiRouteCategory[] = [
         method: "GET", path: "/listTicketEvaluations", name: "ListTicketEvaluations",
         description: "Listar avaliações de atendimento.",
         params: [
-          { key: "pageNumber", desc: "Número da página", required: true, defaultValue: "1" },
+          { key: "page", desc: "Número da página", required: false, defaultValue: "1" },
+          { key: "limit", desc: "Itens por página", required: false, defaultValue: "20" },
+          { key: "search", desc: "Busca textual (opcional)", required: false },
           { key: "startDate", desc: "Data inicial (opcional)", required: false },
           { key: "endDate", desc: "Data final (opcional)", required: false },
+          { key: "evaluation", desc: "Filtrar por nota (opcional)", required: false },
         ],
       },
       {
@@ -1272,9 +1295,9 @@ const API_DOCS: ApiRouteCategory[] = [
       },
       {
         method: "POST", path: "/ticket/share", name: "TicketShareCreate",
-        description: "Compartilhar um ticket com outro usuário.",
+        description: "Compartilhar um ticket com outros usuários. Os usuários que ganham acesso vão em userIdArray. Um ticket só aceita um convite de compartilhamento: repetir a chamada responde 400.",
         bodyType: "json",
-        bodyExample: JSON.stringify({ ticketId: 1262, userId: 2 }, null, 2),
+        bodyExample: JSON.stringify({ ticketId: 1262, userIdArray: [2], inviteUrl: "" }, null, 2),
       },
       {
         method: "GET", path: "/ticket/share/:ticketId", name: "TicketShareShow",
@@ -1318,7 +1341,15 @@ const API_DOCS: ApiRouteCategory[] = [
     name: "Galeria",
     emoji: "🖼️",
     routes: [
-      { method: "GET", path: "/gallery/list", name: "GalleryList", description: "Listar arquivos da galeria do tenant." },
+      {
+        method: "GET", path: "/gallery/list", name: "GalleryList",
+        description: "Listar arquivos da galeria do tenant, com paginação fixa de 20 itens por página.",
+        params: [
+          { key: "pageNumber", desc: "Número da página", required: false, defaultValue: "1" },
+          { key: "searchParam", desc: "Busca por nome do arquivo ou descrição (opcional)", required: false },
+          { key: "fileType", desc: "image, pdf, video, audio, document, archive ou other — aceita lista separada por vírgula (opcional)", required: false },
+        ],
+      },
       {
         method: "POST", path: "/gallery/upload", name: "GalleryUpload",
         description: "Fazer upload de arquivo(s) para a galeria (máx. 10 arquivos, 500MB).",
@@ -1350,19 +1381,28 @@ const API_DOCS: ApiRouteCategory[] = [
         method: "GET", path: "/wavoip/calls", name: "WavoipCallList",
         description: "Listar chamadas WaVoIP do tenant.",
         params: [
-          { key: "pageNumber", desc: "Número da página", required: true, defaultValue: "1" },
+          { key: "page", desc: "Número da página", required: false, defaultValue: "1" },
+          { key: "limit", desc: "Itens por página", required: false, defaultValue: "20" },
           { key: "startDate", desc: "Data inicial (opcional)", required: false },
           { key: "endDate", desc: "Data final (opcional)", required: false },
+          { key: "phone", desc: "Filtrar por telefone (opcional)", required: false },
+          { key: "direction", desc: "Sentido da chamada (opcional)", required: false },
+          { key: "callStatus", desc: "Situação da chamada (opcional)", required: false },
+          { key: "userId", desc: "Filtrar por usuário (opcional)", required: false },
+          { key: "ticketId", desc: "Filtrar por atendimento (opcional)", required: false },
+          { key: "queueId", desc: "Filtrar por fila (opcional)", required: false },
+          { key: "contactId", desc: "Filtrar por contato (opcional)", required: false },
         ],
       },
       { method: "GET", path: "/wavoip/calls/:id", name: "WavoipCallShow", description: "Buscar detalhes de uma chamada WaVoIP pelo ID." },
       {
         method: "GET", path: "/callLog/list", name: "CallLogList",
-        description: "Listar logs de chamadas do sistema.",
+        description: "Listar logs de chamadas do sistema. Esta rota não filtra por período: para recorte por data use /wavoip/calls.",
         params: [
-          { key: "pageNumber", desc: "Número da página", required: true, defaultValue: "1" },
-          { key: "startDate", desc: "Data inicial (opcional)", required: false },
-          { key: "endDate", desc: "Data final (opcional)", required: false },
+          { key: "page", desc: "Número da página", required: false, defaultValue: "1" },
+          { key: "limit", desc: "Itens por página", required: false, defaultValue: "20" },
+          { key: "orderBy", desc: "Campo de ordenação (padrão createdAt)", required: false },
+          { key: "orderDirection", desc: "ASC ou DESC (padrão DESC)", required: false },
         ],
       },
       { method: "GET", path: "/callLog/show/:id", name: "CallLogShow", description: "Buscar detalhes de um log de chamada pelo ID." },
@@ -1522,10 +1562,10 @@ const API_DOCS: ApiRouteCategory[] = [
       },
       {
         method: "POST", path: "/sendInteractive/uazapi/requestPayment", name: "UazapiRequestPayment",
-        description: "Enviar cobrança interativa via UazAPI. Suporta PIX, boleto, link de pagamento e anexo.",
+        description: "Enviar cobrança interativa via UazAPI. Obrigatórios: ticketId e amount. Opcionais: PIX (pixType, pixKey, pixName), boleto (boletoCode), link de pagamento (paymentLink) e anexo (fileUrl, fileName).",
         bodyType: "json",
         channelTypes: ["uazapi"],
-        bodyExample: JSON.stringify({ ticketId: 1262, amount: 150.00, title: "Pedido #001", text: "Sua cobrança está pronta:", footer: "Vencimento em 3 dias", itemName: "Produto X", invoiceNumber: "NF-001", pixType: "EVP", pixKey: "chave-aleatoria-uuid", pixName: "Nome Beneficiário" }, null, 2),
+        bodyExample: JSON.stringify({ ticketId: 1262, amount: 150.00, title: "Pedido #001", text: "Sua cobrança está pronta:", footer: "Vencimento em 3 dias", itemName: "Produto X", invoiceNumber: "NF-001", pixType: "EVP", pixKey: "chave-aleatoria-uuid", pixName: "Nome Beneficiário", paymentLink: "https://pagamento.exemplo.com/001", boletoCode: "34191790010104351004791020150008291070026000", fileUrl: "https://exemplo.com/boleto.pdf", fileName: "boleto.pdf" }, null, 2),
       },
     ],
   },
@@ -1634,7 +1674,7 @@ const API_DOCS: ApiRouteCategory[] = [
       },
       {
         method: "POST", path: "/messenger/personas", name: "MessengerPersonas",
-        description: "Gerenciar Personas da página do Messenger. action: list | create | delete.",
+        description: "Gerenciar Personas da página do Messenger. action: list | create | delete. Para create, informe name e profilePictureUrl; para delete, informe personaId (o id vem do retorno de list).",
         bodyType: "json",
         channelTypes: ["messenger"],
         bodyExample: JSON.stringify({ action: "create", name: "Atendente Ana", profilePictureUrl: "https://exemplo.com/ana.jpg" }, null, 2),

@@ -152,6 +152,7 @@ export const SETTINGS_CATALOG: SettingCatalogEntry[] = [
   { key: "bsuidStrictMode", section: "orgDistTitle", group: "groupIntegrations", tags: [] },
   { key: "forcarAdmin", section: "orgDistTitle", group: "groupIntegrations", tags: ["permissions", "routing"] },
   { key: "uazapiDisableLid", section: "orgDistTitle", group: "groupIntegrations", tags: [] },
+  { key: "aiAgentPrivateWebhookEnabled", section: "orgDistTitle", group: "groupIntegrations", tags: [] },
 
   // ── Atendimento e Recursos · Atendimento ──────────────────────────────────
   { key: "signed", section: "attendanceResourcesTitle", group: "groupService", tags: [] },
@@ -160,6 +161,9 @@ export const SETTINGS_CATALOG: SettingCatalogEntry[] = [
   { key: "allowPause", section: "attendanceResourcesTitle", group: "groupService", tags: [] },
   { key: "autoUnpauseOnReply", section: "attendanceResourcesTitle", group: "groupService", tags: [] },
   { key: "allowDuplicateMessages", section: "attendanceResourcesTitle", group: "groupService", tags: [] },
+  { key: "groupTimeMetricsEnabled", section: "attendanceResourcesTitle", group: "groupService", tags: ["visibility"] },
+  { key: "contactEventsRetentionDays", section: "attendanceResourcesTitle", group: "groupService", tags: ["limits"] },
+  { key: "scheduleSentNoticeEnabled", section: "attendanceResourcesTitle", group: "groupService", tags: ["visibility"] },
 
   // ── Atendimento e Recursos · Reabertura e agendamento ─────────────────────
   { key: "botReopenGraceSeconds", section: "attendanceResourcesTitle", group: "groupReopen", tags: ["bot", "limits"] },

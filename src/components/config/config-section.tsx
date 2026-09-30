@@ -36,8 +36,34 @@ export interface ConfigField {
   tooltipContent?: React.ReactNode;
   /** Texto do chip exibido ao lado do Label quando o campo tem valor non-empty. */
   badgeWhenSet?: string;
-  /** Renderiza o field apenas quando outro field tiver o valor especificado. */
-  visibleWhen?: { field: string; value: string };
+  /**
+   * Renderiza o field apenas quando outro field casar com a condicao. As tres formas
+   * sao ADITIVAS e exclusivas entre si — `value` (igualdade) e a original e continua
+   * valendo byte a byte:
+   *   `{ field, value }`     -> so quando o outro field for exatamente esse valor
+   *   `{ field, notEquals }` -> so quando for QUALQUER valor diferente desse
+   *   `{ field, in: [...] }` -> so quando estiver na lista
+   */
+  visibleWhen?:
+    | { field: string; value: string }
+    | { field: string; notEquals: string }
+    | { field: string; in: string[] };
+}
+
+/**
+ * Avaliador do `visibleWhen`. Forma desconhecida (chamador de uma versao mais nova
+ * do que este componente) conta como VISIVEL: esconder um campo por uma condicao que
+ * nao sabemos ler tiraria da tela algo que o usuario precisa configurar.
+ */
+function isVisibleWhenSatisfied(
+  condition: NonNullable<ConfigField["visibleWhen"]>,
+  settings: Record<string, string>
+): boolean {
+  const current = String(settings[condition.field] || "");
+  if ("value" in condition) return current === condition.value;
+  if ("notEquals" in condition) return current !== condition.notEquals;
+  if ("in" in condition) return Array.isArray(condition.in) && condition.in.includes(current);
+  return true;
 }
 
 export interface ConfigSectionDef {
@@ -97,7 +123,7 @@ export function ConfigPage({
             {section.fields.map((field) => {
               const val = settings[field.key] || "";
 
-              if (field.visibleWhen && String(settings[field.visibleWhen.field] || "") !== field.visibleWhen.value) {
+              if (field.visibleWhen && !isVisibleWhenSatisfied(field.visibleWhen, settings)) {
                 return null;
               }
 

@@ -73,7 +73,7 @@ export default function NotasPage() {
     try {
       const { data: res } = await fetchTicketNotes();
       const list = Array.isArray(res) ? res : res.notes || res.ticketNotes || res.data || [];
-      // normalize: Vue uses `notes` field, Next uses `content`
+ // normalize: the legacy front uses `notes` field, Next uses `content`
       setData(list.map((n: TicketNote & { notes?: string }) => ({
         ...n,
         content: n.content || n.notes || "",

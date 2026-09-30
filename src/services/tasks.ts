@@ -15,6 +15,11 @@ export interface TodoItem {
   recurrenceTimes?: number;
   userId?: number;
   user?: { id: number; name: string };
+  /** PLANO_CRM_CONTATO D19: vínculos (backend antigo não manda) */
+  contactId?: number | null;
+  ticketId?: number | null;
+  relationshipId?: number | null;
+  contact?: { id: number; name: string } | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -30,10 +35,14 @@ export interface TodoPayload {
   ownerId?: number;
   recurrence?: number;
   recurrenceTimes?: number;
+  contactId?: number | null;
+  ticketId?: number | null;
+  relationshipId?: number | null;
 }
 
-export async function fetchTodoLists() {
-  return api.get("/todoLists");
+/** `contactId` (PLANO_CRM_CONTATO D19): só as tarefas vinculadas ao contato. Backend antigo ignora o filtro. */
+export async function fetchTodoLists(params?: { contactId?: number }) {
+  return api.get("/todoLists", params?.contactId ? { params: { contactId: params.contactId } } : undefined);
 }
 
 export async function createTodoList(data: TodoPayload) {

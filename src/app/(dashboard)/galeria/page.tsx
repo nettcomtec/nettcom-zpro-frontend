@@ -23,7 +23,7 @@ import { fetchGallery, fetchGalleryUsage, uploadGalleryFiles, deleteGalleryItem,
 import { usePageAccess } from "@/hooks/use-page-access";
 import { AccessDenied } from "@/components/layout/access-denied";
 
-// All file type categories matching the Vue backend slugs
+// All file type categories matching the legacy backend slugs
 type MediaFilter = "all" | "image" | "video" | "audio" | "pdf" | "document" | "archive" | "other";
 
 function formatFileSize(bytes?: number): string {
@@ -50,7 +50,7 @@ function formatDate(dateStr: string): string {
 
 /** Resolve the category slug from the normalized GalleryItem.type field.
  *  The backend may return a slug ("image", "pdf", "audio" …) or a MIME type
- *  ("image/jpeg", "video/mp4" …).  We normalise both to the Vue slug set. */
+ * ("image/jpeg", "video/mp4" …). We normalise both to the legacy slug set. */
 function resolveCategory(type: string): MediaFilter {
   if (!type) return "other";
   const t = type.toLowerCase();
@@ -382,7 +382,7 @@ export default function GaleriaPage() {
           />
         </div>
 
-        {/* File type tabs — all 8 categories matching Vue */}
+ {/* File type tabs — all 8 categories matching the legacy front */}
         <div className="w-full overflow-x-auto -mx-3 px-3 sm:mx-0 sm:px-0">
         <Tabs value={typeFilter} onValueChange={handleTypeFilterChange}>
           <TabsList className="h-9 w-max sm:w-auto sm:flex-wrap">

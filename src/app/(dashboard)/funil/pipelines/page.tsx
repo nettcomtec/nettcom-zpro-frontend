@@ -59,6 +59,12 @@ interface Pipeline {
   name: string;
 }
 
+// O interceptor de `lib/api` rejeita com `error.response || error`, então o
+// corpo está em `.data`; o caminho de refresh de sessão rejeita o erro inteiro
+// do axios, daí o segundo salto.
+const readApiError = (err: any): { error?: string; code?: string; details?: unknown } | null =>
+  err?.data ?? err?.response?.data ?? null;
+
 interface Stage {
   id?: number;
   _uid: string;
@@ -211,9 +217,16 @@ const SortableStage: React.FC<SortableStageProps> = ({
 };
 
 export default function FunilPipelinesPage() {
-  const t = useTranslations("funilPipelinesPage");
+  // Gate isolado num wrapper: sair com `return` no meio dos hooks do conteúdo
+  // quebrava o React ("Rendered fewer hooks than expected") quando a permissão
+  // caía com a página montada — o teto do tenant chega após o 1º render.
   const allowed = usePageAccess("funil", { alsoAccept: ["kanban"] });
   if (!allowed) return <AccessDenied />;
+  return <FunilPipelinesPageContent />;
+}
+
+function FunilPipelinesPageContent() {
+  const t = useTranslations("funilPipelinesPage");
   const [loading, setLoading] = useState(true);
   const [pipelines, setPipelines] = useState<Pipeline[]>([]);
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -278,31 +291,36 @@ export default function FunilPipelinesPage() {
     setDialogOpen(true);
   };
 
-  const openEdit = async (p: Pipeline) => {
-    setEditing(p);
-    setName(p.name);
-    setDeletedStages([]);
+  // Devolve as etapas do servidor, ou `null` quando a leitura falha — quem
+  // chama decide: abrir o modal zera a lista (como sempre foi), recarregar
+  // depois de uma falha de exclusão PRESERVA o que está na tela.
+  const fetchStagesOf = async (pipelineId: number): Promise<Stage[] | null> => {
     try {
-      const res = await fetchStages({ pipelineId: p.id });
+      const res = await fetchStages({ pipelineId });
       const raw = res.data?.data ?? (Array.isArray(res.data) ? res.data : []);
       const list = (Array.isArray(raw) ? raw : []).slice().sort(
         (a: any, b: any) => (a.order ?? 0) - (b.order ?? 0)
       );
-      setStages(
-        list.map((s: any) => ({
-          id: s.id,
-          _uid: `db-${s.id}`,
-          name: s.name ?? s.nome ?? "",
-          color: s.color ?? s.cor ?? "#00a300",
-          order: s.order,
-          pipelineId: s.pipelineId,
-          notifyUserId: s.notifyUserId ?? null,
-          notifyQueueId: s.notifyQueueId ?? null,
-        }))
-      );
+      return list.map((s: any) => ({
+        id: s.id,
+        _uid: `db-${s.id}`,
+        name: s.name ?? s.nome ?? "",
+        color: s.color ?? s.cor ?? "#00a300",
+        order: s.order,
+        pipelineId: s.pipelineId,
+        notifyUserId: s.notifyUserId ?? null,
+        notifyQueueId: s.notifyQueueId ?? null,
+      }));
     } catch {
-      setStages([]);
+      return null;
     }
+  };
+
+  const openEdit = async (p: Pipeline) => {
+    setEditing(p);
+    setName(p.name);
+    setDeletedStages([]);
+    setStages((await fetchStagesOf(p.id)) ?? []);
     setDialogOpen(true);
   };
 
@@ -336,36 +354,105 @@ export default function FunilPipelinesPage() {
     setStages((prev) => prev.map((s, i) => (i === idx ? { ...s, notifyQueueId: val } : s)));
   };
 
+  const stageLabel = (value?: string) => (value || "").trim() || t("unnamedStage");
+
+  // Traduz a recusa do backend. `code`/`details` são aditivos: backend antigo
+  // manda só `error` e a mensagem cai no texto genérico, sem quebrar a tela.
+  const describeStageDeleteError = (stageName: string | undefined, err: unknown): string => {
+    const data = readApiError(err);
+    const stage = stageLabel(stageName);
+    const details = (data?.details ?? {}) as Record<string, any>;
+
+    if (data?.code === "ERR_STAGE_HAS_OPPORTUNITIES") {
+      const byStatus = (details.byStatus ?? {}) as Record<string, number>;
+      const known: Record<string, string> = {
+        open: t("oppStatusOpen"),
+        win: t("oppStatusWin"),
+        lose: t("oppStatusLose"),
+      };
+      const parts: string[] = [];
+      let others = 0;
+      for (const [status, amount] of Object.entries(byStatus)) {
+        const count = Number(amount) || 0;
+        if (count <= 0) continue;
+        if (known[status]) parts.push(`${known[status]}: ${count}`);
+        else others += count;
+      }
+      if (others > 0) parts.push(`${t("oppStatusOther")}: ${others}`);
+      // Sem detalhe utilizável cai no texto genérico, que carrega a mensagem
+      // crua do servidor — melhor que um parêntese vazio.
+      if (parts.length > 0) return t("blockedOpportunities", { stage, detail: parts.join(", ") });
+    }
+
+    if (data?.code === "ERR_STAGE_HAS_ACTIONS") {
+      const parts: string[] = [];
+      if (Number(details.asSource) > 0) parts.push(`${t("actionsFromStage")}: ${details.asSource}`);
+      if (Number(details.asTarget) > 0) parts.push(`${t("actionsToStage")}: ${details.asTarget}`);
+      if (Number(details.inactive) > 0) parts.push(`${t("actionsInactive")}: ${details.inactive}`);
+      if (parts.length > 0) return t("blockedActions", { stage, detail: parts.join(", ") });
+    }
+
+    return t("blockedStageGeneric", { stage, reason: data?.error || t("genericFailure") });
+  };
+
+  // Apaga as ações do funil vinculadas à etapa. Segue engolindo erro de propósito:
+  // é limpeza preparatória, e o que decide o resultado é o DELETE da etapa.
+  const deleteActionsOfStage = async (stageId: number) => {
+    try {
+      const actRes = await fetchPipelineActionsByStage(stageId);
+      const acts: any[] = actRes.data?.data ?? (Array.isArray(actRes.data) ? actRes.data : []);
+      for (const act of acts) {
+        try { await deletePipelineAction(act.id); } catch { /* ignore */ }
+      }
+    } catch { /* ignore */ }
+  };
+
+  // Tenta excluir a etapa e devolve o erro quando o backend recusa (ou `null`).
+  // A etapa é tentada ANTES da limpeza de ações: quando a recusa é por
+  // oportunidade vinculada, as ações do funil ficam intactas em vez de serem
+  // apagadas por uma exclusão que nunca vai acontecer. Backend antigo não manda
+  // `code` — nesse caso cai no comportamento de sempre (limpa e tenta de novo).
+  const tryDeleteStage = async (stageId: number): Promise<unknown | null> => {
+    try {
+      await deleteStage(stageId);
+      return null;
+    } catch (err) {
+      if (readApiError(err)?.code === "ERR_STAGE_HAS_OPPORTUNITIES") return err;
+      await deleteActionsOfStage(stageId);
+      try {
+        await deleteStage(stageId);
+        return null;
+      } catch (retryErr) {
+        return retryErr;
+      }
+    }
+  };
+
   const handleSubmit = async () => {
     if (!name.trim()) {
       toast.error(t("validationName"));
       return;
     }
+    const isEdit = !!editing;
     setSubmitting(true);
     try {
       let pipelineId: number;
       if (editing) {
         await updatePipeline(editing.id, { name });
         pipelineId = editing.id;
-        toast.success(t("pipelineUpdated"));
       } else {
         const res = await createPipeline({ name });
         pipelineId = res.data?.id ?? res.data?.data?.id;
-        toast.success(t("pipelineCreated"));
       }
 
-      // Delete removed stages (first delete associated pipeline actions)
+      // Motivos de recusa acumulados: o modal só fecha quando está vazio.
+      const blocked: string[] = [];
+
+      // Delete removed stages
       for (const stage of deletedStages) {
-        if (stage.id) {
-          try {
-            const actRes = await fetchPipelineActionsByStage(stage.id);
-            const acts: any[] = actRes.data?.data ?? (Array.isArray(actRes.data) ? actRes.data : []);
-            for (const act of acts) {
-              try { await deletePipelineAction(act.id); } catch { /* ignore */ }
-            }
-          } catch { /* ignore */ }
-          try { await deleteStage(stage.id); } catch { /* ignore */ }
-        }
+        if (!stage.id) continue;
+        const err = await tryDeleteStage(stage.id);
+        if (err) blocked.push(describeStageDeleteError(stage.name, err));
       }
 
       // Create/update stages
@@ -385,13 +472,38 @@ export default function FunilPipelinesPage() {
           } else {
             await createStage(payload);
           }
-        } catch { /* ignore individual stage errors */ }
+        } catch (err) {
+          blocked.push(
+            t("stageSaveFailed", {
+              stage: stageLabel(stage.name),
+              reason: readApiError(err)?.error || t("genericFailure"),
+            })
+          );
+        }
       }
 
+      if (blocked.length > 0) {
+        // Nada de "salvo com sucesso": o modal fica aberto mostrando o que o
+        // servidor realmente tem, para a etapa recusada não sumir e só voltar no F5.
+        if (Number.isFinite(pipelineId)) {
+          // Sem isso, um 2º clique em Salvar criaria outro pipeline.
+          if (!isEdit) setEditing({ id: pipelineId, name });
+          const fresh = await fetchStagesOf(pipelineId);
+          if (fresh) setStages(fresh);
+        }
+        // A etapa recusada volta VISÍVEL na lista, logo não está mais marcada
+        // para exclusão: para tentar de novo o operador remove outra vez.
+        setDeletedStages([]);
+        blocked.slice(0, 3).forEach((msg) => toast.error(msg, { duration: 10000 }));
+        loadData();
+        return;
+      }
+
+      toast.success(isEdit ? t("pipelineUpdated") : t("pipelineCreated"));
       setDialogOpen(false);
       loadData();
     } catch {
-      toast.error(editing ? t("errorUpdate") : t("errorCreate"));
+      toast.error(isEdit ? t("errorUpdate") : t("errorCreate"));
     } finally {
       setSubmitting(false);
     }

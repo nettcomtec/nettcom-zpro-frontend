@@ -35,7 +35,7 @@ export async function createTicketNote(data: TicketNotePayload) {
       headers: { "Content-Type": "multipart/form-data" },
     });
   }
-  // Vue sends `notes` + `idFront` to /ticketNotes/ (NOT /messages/)
+ // The legacy front sends `notes` + `idFront` to /ticketNotes/ (NOT /messages/)
   return api.post("/ticketNotes/", { notes: data.content, ticketId: data.ticketId, idFront: data.idFront });
 }
 

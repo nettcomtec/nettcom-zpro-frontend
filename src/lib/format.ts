@@ -63,3 +63,13 @@ export function formatCurrencyBRL(n: number, opts?: Intl.NumberFormatOptions): s
     ...opts,
   });
 }
+
+// Créditos de IA trafegam em CENTAVOS. `precise` é para o consumo por chamada, que
+// custa fração de centavo: com 2 casas toda linha apareceria como R$ 0,00.
+export function formatCentsBRL(cents: number, opts?: { precise?: boolean }): string {
+  const value = (Number(cents) || 0) / 100;
+  return formatCurrencyBRL(
+    value,
+    opts?.precise ? { minimumFractionDigits: 2, maximumFractionDigits: 6 } : undefined
+  );
+}

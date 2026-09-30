@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { useTranslations } from "next-intl";
 import { toast } from "sonner";
-import { CheckCircle2, AlertTriangle, XCircle, Loader2, RefreshCw, Zap } from "lucide-react";
+import { CheckCircle2, AlertTriangle, XCircle, Loader2, RefreshCw, Zap, ExternalLink } from "lucide-react";
 import {
   Dialog,
   DialogContent,
@@ -23,6 +23,7 @@ import {
   ProbeResult,
   ProbeStatus,
 } from "@/services/meta-channel-health";
+import { WHATSAPP_MANAGER_URL } from "@/lib/meta-send-health";
 
 interface DiagnoseModalProps {
   whatsappId: number | null;
@@ -115,9 +116,20 @@ export function DiagnoseModal({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, whatsappId]);
 
-  const showReconnect = !!result && result.overallStatus !== "ok";
+  // O probe PHONE_NUMBER (health_status do número) não se resolve reconectando nem
+  // revalidando o webhook: pagamento/bloqueio da conta é no WhatsApp Manager. Por isso
+  // "Reconectar"/"Revalidar" só acendem com outro probe fora de "ok"; resultado sem
+  // probes mantém a regra antiga (geral ≠ ok).
+  const resultProbes: ProbeResult[] = result && Array.isArray(result.probes) ? result.probes : [];
+  const channelNeedsAction = !!result && (
+    resultProbes.length > 0
+      ? resultProbes.some((p) => p.id !== "PHONE_NUMBER" && p.status !== "ok")
+      : result.overallStatus !== "ok"
+  );
+  const showReconnect = channelNeedsAction;
   const revalidatableChannel = channelType === "instagram" || channelType === "messenger";
-  const showRevalidate = revalidatableChannel && !!result && result.overallStatus !== "ok";
+  const showRevalidate = revalidatableChannel && channelNeedsAction;
+  const showOpenManager = resultProbes.some((p) => p.id === "PHONE_NUMBER" && p.status === "error");
 
   async function runRevalidate() {
     if (!whatsappId) return;
@@ -225,6 +237,14 @@ export function DiagnoseModal({
                 <Zap className="w-4 h-4 mr-2" />
               )}
               {revalidating ? t("revalidate.running") : t("revalidate.action")}
+            </Button>
+          )}
+          {!loading && showOpenManager && (
+            <Button asChild variant="outline" size="sm" className="w-full sm:w-auto">
+              <a href={WHATSAPP_MANAGER_URL} target="_blank" rel="noopener noreferrer">
+                <ExternalLink className="w-4 h-4 mr-2" />
+                {t("openManager")}
+              </a>
             </Button>
           )}
           {!loading && showReconnect && onReconnect && (

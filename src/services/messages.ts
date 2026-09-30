@@ -1,7 +1,7 @@
 import api from "@/lib/api";
 import type { AxiosProgressEvent } from "axios";
 
-/** Retorna o endpoint de envio de mensagem conforme o canal (como no Vue InputMensagem). */
+/** Retorna o endpoint de envio de mensagem conforme o canal (como no front legado InputMensagem). */
 function getMessageSendPath(channel: string | undefined, ticketId: number): string {
   const ch = (channel || "").toLowerCase();
   if (ch.includes("hub")) return `/hub-message/${ticketId}`;
@@ -122,10 +122,15 @@ export async function sendEmailWebmail(whatsappId: number, payload: {
   try {
     return await api.post(`/wbot-email/send/${whatsappId}`, payload);
   } catch (err: unknown) {
-    const resp = (err as { response?: { status?: number; data?: { error?: string; optOut?: { createdAt?: string } } } })?.response;
-    if (resp?.status === 409 && resp.data?.error === "ERR_EMAIL_OPTOUT" && !payload.allowOptOutOverride) {
+    // lib/api.ts rejeita com `error.response || error`: status/corpo chegam na RAIZ.
+    // Ler só `err.response` nunca detectava o 409 e o aviso de descadastro não abria.
+    type OptOutBody = { error?: string; optOut?: { createdAt?: string } };
+    const e = err as { status?: number; data?: OptOutBody; response?: { status?: number; data?: OptOutBody } } | null;
+    const status = e?.status ?? e?.response?.status;
+    const data = e?.data ?? e?.response?.data;
+    if (status === 409 && data?.error === "ERR_EMAIL_OPTOUT" && !payload.allowOptOutOverride) {
       const { confirmEmailOptOut } = await import("@/stores/email-optout-confirm-store");
-      const confirmed = await confirmEmailOptOut(resp.data?.optOut?.createdAt || null);
+      const confirmed = await confirmEmailOptOut(data?.optOut?.createdAt || null);
       if (confirmed) {
         return api.post(`/wbot-email/send/${whatsappId}`, { ...payload, allowOptOutOverride: true });
       }
@@ -137,7 +142,7 @@ export async function sendEmailWebmail(whatsappId: number, payload: {
 /** Alias mais semântico para o canal IMAP/SMTP genérico. */
 export const sendEmailImap = sendEmailWebmail;
 
-/** DELETE /messages — sends { id (DB), messageId (WA id) } as the Vue's DeletarMensagem */
+/** DELETE /messages — sends { id (DB), messageId (WA id) } as the legacy front's DeletarMensagem */
 export async function deleteMessage(data: { id: string | number; messageId?: string }) {
   return api.delete("/messages", { data });
 }
@@ -271,7 +276,7 @@ export async function exportMessages(ticketId: number, asBlob = false) {
   return api.get(`/exportMessages/${ticketId}`, asBlob ? { responseType: "blob" } : {});
 }
 
-/** Enviar conversa avulsa (sem ticket existente) — Vue: TextoIndividual */
+/** Enviar conversa avulsa (sem ticket existente) — front legado: TextoIndividual */
 export async function sendIndividualMessage(data: {
   whatsappId: number;
   whatsappType: string;
@@ -422,6 +427,13 @@ export async function sendWabaAddress(data: Record<string, unknown>) {
 
 export async function sendWabaLocationRequest(data: Record<string, unknown>) {
   return api.post("/wabametaLocationRequest/", data);
+}
+
+// Pedido oficial do telefone ao cliente (contato que chegou sem numero, com nome
+// de usuario do WhatsApp). Rota nova: servidor antigo responde 404 e a tela esconde
+// a acao. Body: { tokenApi, from, ticketId, bodyText }.
+export async function sendWabaRequestContactInfo(data: Record<string, unknown>) {
+  return api.post("/wabametaRequestContactInfo/", data);
 }
 
 export async function sendWabaLocationMsg(data: Record<string, unknown>) {

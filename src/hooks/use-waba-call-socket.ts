@@ -63,10 +63,19 @@ export function useWabaCallSocket({
     const socket = getSocket()
     const tenantId = user.tenantId
 
-    // BSPs (Gupshup/Dialog360) emitem em prefixos próprios — registra todos pra
-    // suportar inbound de qualquer canal. Backend deve adicionar emit no
-    // webhook handler quando call event chegar.
-    const prefixes = ["waba", "gupshup", "dialog360"] as const
+    // Prefixos SEPARADOS POR TIPO DE EVENTO.
+    //
+    // Chamada recebida: só o prefixo do WABA. Dialog360 e Gupshup têm provider
+    // próprio; escutar os três aqui abria DOIS modais e tocava DUAS vezes para a
+    // mesma chamada de BSP.
+    const INCOMING_PREFIXES = ["waba"] as const
+    // Ciclo de vida: os TRÊS prefixos, de propósito. A chamada de SAÍDA de
+    // Dialog360/Gupshup usa o RTC e o store do WABA (ticket-detail.tsx), mas o
+    // sdpAnswer volta em `<tenant>:dialog360:call:answer` / `:gupshup:...`.
+    // Estreitar esta lista para ["waba"] quebra o outbound dos dois BSPs: o
+    // answer nunca chega ao PeerConnection certo, o áudio não conecta e o store
+    // fica preso em pre_accepting. NÃO "limpar" para ficar igual à de cima.
+    const LIFECYCLE_PREFIXES = ["waba", "gupshup", "dialog360"] as const
 
     const handleIncoming = (payload: WabaCallIncomingPayload) => {
       onIncomingCall?.(payload)
@@ -85,9 +94,13 @@ export function useWabaCallSocket({
     }
 
     const registered: Array<[string, (p: any) => void]> = []
-    for (const prefix of prefixes) {
+    for (const prefix of INCOMING_PREFIXES) {
+      const evt = `${tenantId}:${prefix}:call:incoming`
+      socket.on(evt, handleIncoming)
+      registered.push([evt, handleIncoming])
+    }
+    for (const prefix of LIFECYCLE_PREFIXES) {
       const evts: Array<[string, (p: any) => void]> = [
-        [`${tenantId}:${prefix}:call:incoming`, handleIncoming],
         [`${tenantId}:${prefix}:call:answer`, handleAnswer],
         [`${tenantId}:${prefix}:call:status`, handleStatus],
         [`${tenantId}:${prefix}:call:terminated`, handleTerminated],

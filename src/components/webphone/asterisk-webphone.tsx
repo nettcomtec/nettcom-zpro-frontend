@@ -21,8 +21,10 @@ import { SipConsultPanel } from "./sip-consult-panel";
 import { Wifi, WifiOff } from "lucide-react";
 import { useTranslations } from "next-intl";
 import { toast } from "sonner";
-import { sipSession } from "./sip-session";
+import { sipSession, SIP_MIC_TIMEOUT_ERROR } from "./sip-session";
 import { createCallLog } from "@/services/call-logs";
+
+const NO_RESPONSE_TIMEOUT_MS = 15_000;
 
 interface AsteriskWebphoneProps {
   server: string;
@@ -45,6 +47,8 @@ export function AsteriskWebphone({ server, initialPhoneNumber = "" }: AsteriskWe
     isMuted,
     isOnHold,
     setOnHold,
+    pendingSipCall,
+    clearPendingSipCall,
   } = useWebphoneStore();
   const { user } = useAuthStore();
 
@@ -92,7 +96,7 @@ export function AsteriskWebphone({ server, initialPhoneNumber = "" }: AsteriskWe
         case SessionState.Established:
           setCallStatus("established");
           if (sipSession.session) setupRemoteAudio(sipSession.session);
-          // Vue: setupSession → Established → CriarCallLog('Completed')
+ // Front legado: setupSession → Established → CriarCallLog('Completed')
           if (user && sipSession.sipUsername) {
             createCallLog({
               userId: user.userId,
@@ -106,7 +110,7 @@ export function AsteriskWebphone({ server, initialPhoneNumber = "" }: AsteriskWe
           }
           break;
         case SessionState.Terminated:
-          // Vue: setupSession → Terminated → CriarCallLog('Ended', callDuration)
+ // Front legado: setupSession → Terminated → CriarCallLog('Ended', callDuration)
           if (user && sipSession.sipUsername) {
             createCallLog({
               userId: user.userId,
@@ -370,30 +374,110 @@ export function AsteriskWebphone({ server, initialPhoneNumber = "" }: AsteriskWe
     setHold(false); // retoma a chamada original
   }, [resetConsult, setHold]);
 
+  // Discagem real (Inviter + INVITE) — compartilhada entre o botão verde
+  // (handleDial) e o pedido externo pendingSipCall (botão SIP do contato).
+  const dialNumber = useCallback(
+    (rawNumber: string, tag?: string) => {
+      const number = rawNumber.trim();
+      if (!number) return;
+      if (!sipSession.ua) {
+        toast.error(t("disconnectedWebphone"));
+        return;
+      }
+      if (sipSession.session) {
+        toast.error(t("callInProgress"));
+        return;
+      }
+      const target = UserAgent.makeURI(`sip:${number}@${server}`);
+      if (!target) {
+        toast.error(t("callError"));
+        return;
+      }
+      const inviter = new Inviter(sipSession.ua, target);
+      sipSession.session = inviter;
+      setPhoneNumber(number);
+      startCall({ phone: number, tag, direction: "outgoing" });
+ // Front legado: makeCall → CriarCallLog('Calling')
+      if (user && sipSession.sipUsername) {
+        createCallLog({
+          userId: user.userId,
+          tenantId: user.tenantId,
+          phoneNumber: sipSession.sipUsername,
+          originNumber: sipSession.sipUsername,
+          destinationNumber: number,
+          callDuration: null,
+          callStatus: "Calling",
+        }).catch(() => {});
+      }
+      // Provedor que não responde NADA ao INVITE (nem 100 Trying) — caso típico:
+      // modo UDP com provedor sem WebRTC, onde o INVITE (~2 KB) se perde
+      // fragmentado enquanto REGISTER/OPTIONS passam. Sem este teto a tela
+      // ficava em "Chamando..." até o Timer B (32 s) derrubar em silêncio.
+      let gotResponse = false;
+      let noResponseTimedOut = false;
+      let noResponseTimer: ReturnType<typeof setTimeout> | null = null;
+      const markResponse = () => {
+        gotResponse = true;
+        if (noResponseTimer) clearTimeout(noResponseTimer);
+      };
+      inviter.stateChange.addListener((s: SessionState) => {
+        if (s === SessionState.Terminated && noResponseTimer) clearTimeout(noResponseTimer);
+        // Chamada já encerrada pelo teto: o Terminated tardio (Timer B) não pode
+        // zerar sipSession.session de uma chamada NOVA feita nesse meio-tempo.
+        if (noResponseTimedOut) return;
+        handleSessionStateChange(s);
+      });
+      // Rejeição aqui = INVITE nem saiu (ex.: microfone negado). Sem o reset,
+      // o modal ficaria preso em "Chamando..." sem chamada real no fio.
+      inviter
+        .invite({
+          requestDelegate: {
+            onTrying: markResponse,
+            onProgress: markResponse,
+            onRedirect: markResponse,
+            onAccept: markResponse,
+            onReject: markResponse,
+          },
+        })
+        .then(() => {
+          if (gotResponse || sipSession.session !== inviter) return;
+          noResponseTimer = setTimeout(() => {
+            if (gotResponse || sipSession.session !== inviter) return;
+            if (inviter.state !== SessionState.Initial && inviter.state !== SessionState.Establishing) return;
+            noResponseTimedOut = true;
+            inviter.cancel().catch(() => {});
+            endCall();
+            sipSession.session = null;
+            toast.error(t("noProviderResponse"));
+          }, NO_RESPONSE_TIMEOUT_MS);
+        })
+        .catch((err: unknown) => {
+          endCall();
+          sipSession.session = null;
+          toast.error(
+            (err as { name?: string } | null)?.name === SIP_MIC_TIMEOUT_ERROR
+              ? t("micTimeout")
+              : t("callError")
+          );
+        });
+    },
+    [server, startCall, endCall, handleSessionStateChange, user, t]
+  );
+
   const handleDial = useCallback(() => {
-    if (!sipSession.ua || !phoneNumber.trim()) return;
-    const target = UserAgent.makeURI(`sip:${phoneNumber}@${server}`);
-    if (!target) return;
-    const inviter = new Inviter(sipSession.ua, target);
-    sipSession.session = inviter;
-    startCall({ phone: phoneNumber, direction: "outgoing" });
-    // Vue: makeCall → CriarCallLog('Calling')
-    if (user && sipSession.sipUsername) {
-      createCallLog({
-        userId: user.userId,
-        tenantId: user.tenantId,
-        phoneNumber: sipSession.sipUsername,
-        originNumber: sipSession.sipUsername,
-        destinationNumber: phoneNumber,
-        callDuration: null,
-        callStatus: "Calling",
-      }).catch(() => {});
-    }
-    inviter.stateChange.addListener((s: SessionState) =>
-      handleSessionStateChange(s)
-    );
-    inviter.invite();
-  }, [phoneNumber, server, startCall, handleSessionStateChange, user]);
+    dialNumber(phoneNumber);
+  }, [dialNumber, phoneNumber]);
+
+  // Consome o pedido de discagem vindo do botão SIP do contato. Consumo único
+  // (limpa antes de discar) e nunca observa callInfo/callStatus — chamada
+  // recebida jamais dispara discagem por aqui. Pedido velho (modal sem config
+  // SIP na hora do clique) é descartado em vez de discar sozinho mais tarde.
+  useEffect(() => {
+    if (!pendingSipCall) return;
+    clearPendingSipCall();
+    if (Date.now() - pendingSipCall.requestedAt > 15000) return;
+    dialNumber(pendingSipCall.phone, pendingSipCall.tag);
+  }, [pendingSipCall, clearPendingSipCall, dialNumber]);
 
   const handleHangup = useCallback(() => {
     // Derruba também qualquer perna de consulta em aberto.
@@ -431,7 +515,7 @@ export function AsteriskWebphone({ server, initialPhoneNumber = "" }: AsteriskWe
     // accept() is only valid in Initial state — guard against double-clicks / re-renders
     if (session.state !== SessionState.Initial) return;
     if ("accept" in session) {
-      // Vue: acceptCall → CriarCallLog('Accepted')
+ // Front legado: acceptCall → CriarCallLog('Accepted')
       if (user && sipSession.sipUsername && callInfo?.phone) {
         createCallLog({
           userId: user.userId,

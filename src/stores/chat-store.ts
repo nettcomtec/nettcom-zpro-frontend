@@ -20,6 +20,30 @@ export interface PrivateMessage {
   quotedMsg?: PrivateMessage | null;
 }
 
+/**
+ * Ordem da conversa = id (sequência do banco = ordem em que o servidor recebeu).
+ * Nunca `timestamp`: ele vem do relógio do PC de quem enviou, e relógios divergentes
+ * invertem mensagens próximas ao recarregar a tela.
+ */
+export function comparePrivateMessages(a: PrivateMessage, b: PrivateMessage) {
+  return Number(a.id) - Number(b.id);
+}
+
+/** Instante exibido: `createdAt` (servidor); `timestamp` do remetente só quando ele não veio (socket de backend antigo). */
+export function getPrivateMessageTime(msg: PrivateMessage): number {
+  if (msg.createdAt) {
+    const fromServer = new Date(msg.createdAt).getTime();
+    if (!isNaN(fromServer)) return fromServer;
+  }
+  const raw = msg.timestamp as number | string | undefined;
+  if (!raw) return 0;
+  if (typeof raw === "string") {
+    const parsed = Number(raw);
+    return isNaN(parsed) ? new Date(raw).getTime() || 0 : parsed;
+  }
+  return raw;
+}
+
 export interface ChatGroup {
   id: number;
   name: string;
@@ -94,18 +118,20 @@ export const useChatStore = create<ChatState>((set) => ({
       seen.add(m.id);
       return true;
     });
-    const sorted = deduped.sort((a, b) => {
-      const ta = a.timestamp || (a.createdAt ? new Date(a.createdAt).getTime() : 0);
-      const tb = b.timestamp || (b.createdAt ? new Date(b.createdAt).getTime() : 0);
-      return ta - tb;
-    });
+    const sorted = deduped.sort(comparePrivateMessages);
     set({ messages: sorted });
   },
 
   addMessage: (message) =>
     set((state) => {
       if (state.messages.some((m) => m.id === message.id)) return state;
-      return { messages: [...state.messages, message] };
+      // Mesma ordem do setMessages: a resposta do próprio envio e o socket de outro
+      // usuário podem chegar trocados, e a tela ao vivo tem de bater com a recarregada.
+      const idx = state.messages.findIndex((m) => comparePrivateMessages(m, message) > 0);
+      if (idx === -1) return { messages: [...state.messages, message] };
+      const next = [...state.messages];
+      next.splice(idx, 0, message);
+      return { messages: next };
     }),
 
   updateMessage: (id, updates) =>

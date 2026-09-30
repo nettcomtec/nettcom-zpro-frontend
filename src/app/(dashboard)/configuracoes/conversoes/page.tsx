@@ -171,14 +171,14 @@ function ConfigTab() {
       platform: cred.platform,
       name: cred.name,
       platformId: cred.platformId,
-      platformSecret: cred.platformSecret,
+      platformSecret: "",
       isActive: cred.isActive,
     });
     setCredDialog(true);
   };
 
   const saveCred = async () => {
-    if (!credForm.name || !credForm.platformId || !credForm.platformSecret) {
+    if (!credForm.name || !credForm.platformId || (!editingCredId && !credForm.platformSecret)) {
       toast.error(t("errorRequiredFields"));
       return;
     }
@@ -272,6 +272,10 @@ function ConfigTab() {
     platform === "meta" ? "Meta / Facebook" : "Google GA4";
   const getCredentialName = (credentialId: number) =>
     credentials.find((c) => c.id === credentialId)?.name || "-";
+  const getCredentialLabel = (credentialId: number) => {
+    const cred = credentials.find((c) => c.id === credentialId);
+    return cred ? `${cred.name} (${getPlatformLabel(cred.platform)})` : "-";
+  };
 
   return (
     <div className="space-y-6">
@@ -467,6 +471,9 @@ function ConfigTab() {
                 onChange={(e) => setCredForm((f) => ({ ...f, platformSecret: e.target.value }))}
                 placeholder={credForm.platform === "meta" ? "EAAxxxxx..." : "api_secret"}
               />
+              {editingCredId && (
+                <p className="text-xs text-muted-foreground">{t("secretKeepHint")}</p>
+              )}
             </div>
             <div className="flex items-center gap-2">
               <Switch
@@ -487,7 +494,7 @@ function ConfigTab() {
 
       {/* Dialog: Regra */}
       <Dialog open={ruleDialog} onOpenChange={setRuleDialog}>
-        <DialogContent className="max-w-md">
+        <DialogContent className="max-w-lg">
           <DialogHeader>
             <DialogTitle>{editingRuleId ? t("editRule") : t("newRule")}</DialogTitle>
           </DialogHeader>
@@ -498,7 +505,11 @@ function ConfigTab() {
                 value={String(ruleForm.credentialId)}
                 onValueChange={(v) => setRuleForm((f) => ({ ...f, credentialId: Number(v) }))}
               >
-                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectTrigger>
+                  <SelectValue>
+                    <span className="block truncate">{getCredentialLabel(ruleForm.credentialId)}</span>
+                  </SelectValue>
+                </SelectTrigger>
                 <SelectContent>
                   {credentials.map((c) => (
                     <SelectItem key={c.id} value={String(c.id)}>
@@ -514,7 +525,11 @@ function ConfigTab() {
                 value={ruleForm.trigger}
                 onValueChange={(v) => setRuleForm((f) => ({ ...f, trigger: v as ConversionRule["trigger"] }))}
               >
-                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectTrigger>
+                  <SelectValue>
+                    <span className="block truncate">{getTriggerLabel(ruleForm.trigger)}</span>
+                  </SelectValue>
+                </SelectTrigger>
                 <SelectContent>
                   {TRIGGERS.map((tr) => (
                     <SelectItem key={tr} value={tr}>

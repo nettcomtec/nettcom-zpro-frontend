@@ -18,6 +18,7 @@ import { safeJsonParse } from "@/lib/safe-json-parse";
 
 interface SipConfig {
   server: string;
+  domain?: string;
   port: number;
   username: string;
   password: string;
@@ -32,7 +33,7 @@ export function WebphoneModal() {
   const [position, setPosition] = useState({ x: 0, y: 0 });
   const constraintsRef = useRef<HTMLDivElement>(null);
 
-  // Tenta sipConfig do store; fallback: constrói a partir dos campos flat no localStorage (igual ao Vue)
+ // Tenta sipConfig do store; fallback: constrói a partir dos campos flat no localStorage (igual ao front legado)
   const sipConfig: SipConfig | null = (() => {
     if (user?.sipConfig) return user.sipConfig as SipConfig;
     try {
@@ -40,6 +41,7 @@ export function WebphoneModal() {
       if (u?.sipEnabled && u?.sipServer && u?.sipUsername && u?.sipPassword) {
         return {
           server: u.sipServer as string,
+          domain: (u.sipDomain as string) || undefined,
           port: (u.sipPort as number) ?? 5060,
           username: u.sipUsername as string,
           password: u.sipPassword as string,
@@ -102,7 +104,7 @@ export function WebphoneModal() {
           </div>
 
           <AsteriskWebphone
-            server={sipConfig.server}
+            server={sipConfig.domain || sipConfig.server}
             port={sipConfig.port}
             username={sipConfig.username}
             password={sipConfig.password}

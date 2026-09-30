@@ -4,6 +4,7 @@ import React, { useState, useEffect, useCallback, useRef } from "react";
 import { useTranslations } from "next-intl";
 import { displayContactIdentity } from "@/lib/contact-identity";
 import { useRouter } from "next/navigation";
+import Link from "next/link";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
@@ -32,12 +33,13 @@ import {
 } from "@/components/ui/collapsible";
 import { EmptyState } from "@/components/layout/empty-state";
 import {
-  Search, Plus, Pencil, Trash2, Upload, Download, Users, Phone, Mail,
+  Search, Plus, Pencil, Trash2, Upload, Download, Users, Phone, PhoneOff, AtSign, Mail,
   MessageSquare, SlidersHorizontal, X, FileDown,
-  RefreshCw, Eye, Bot, FileSpreadsheet, Info, Loader2, ChevronDown,
+  RefreshCw, Eye, Bot, FileSpreadsheet, Info, Loader2, ChevronDown, MapPin,
 } from "lucide-react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { toast } from "sonner";
 import { cn, getInitials } from "@/lib/utils";
 import { ProfilePicPreviewDialog, type ProfilePicPreview } from "@/components/shared/profile-pic-preview-dialog";
@@ -45,11 +47,18 @@ import {
   fetchContacts, fetchContact, createContact, updateContact, deleteContact, forceDeleteContact,
   importContacts, exportContacts, exportContactsCount, syncContacts, syncContactGroups,
   removeDuplicateContacts, groupContactLid, checkNinthDigit,
-  updateContactBlock, removeContactProfilePicture, updateContactTags,
+  updateContactBlock, updateContactTags,
   updateContactName, updateContactNumber, updateContactLidFromContactId,
   type Contact, type ContactPayload, type DuplicateCleanupResult,
 } from "@/services/contacts";
 import { ImportWizardDialog } from "@/components/contatos/ImportWizardDialog";
+import { TagMultiFilter, type TagMatch } from "@/components/contatos/tag-multi-filter";
+import { ContactAddressFields, addressPayloadFrom, isAddressBlockDirty } from "@/components/contatos/contact-address-fields";
+import { AddressFilterFields } from "@/components/contatos/address-filter-fields";
+import {
+  type AddressFilter, EMPTY_ADDRESS_FILTER, addressFilterActiveCount, hasAddressFilterEcho,
+  isAddressFilterActive, toAddressQuery,
+} from "@/lib/address-filter";
 import { TicketAlreadyAssignedDialog, type TicketAssignedInfo } from "@/components/atendimento/ticket-already-assigned-dialog";
 import { fetchTags, type Tag } from "@/services/tags";
 import { fetchAllUsers, type User } from "@/services/users";
@@ -75,12 +84,20 @@ import { AccessDenied } from "@/components/layout/access-denied";
 import { useSortable } from "@/hooks/use-sortable";
 import { SortableTableHead } from "@/components/ui/sortable-table-head";
 import { PhoneInput } from "@/components/ui/phone-input";
-import { formatBirthdayDisplay } from "@/lib/birthday-format";
+import { formatBirthdayDisplay, formatBirthdayInput } from "@/lib/birthday-format";
 
-function makeContactSchema(msgs: { nameMin: string; numberMin: string; emailInvalid: string }) {
+// `numberRequired` false so na EDICAO de contato que ja chegou sem telefone (canal
+// que nao entrega numero: WhatsApp oficial com nome de usuario, Instagram, Messenger,
+// Telegram...). Sem isso o operador nao consegue salvar nem uma tag nesse contato.
+// A criacao manual e a edicao de quem tem telefone seguem exigindo o minimo.
+function makeContactSchema(
+  msgs: { nameMin: string; numberMin: string; emailInvalid: string },
+  opts?: { numberRequired?: boolean }
+) {
+  const numberRequired = opts?.numberRequired !== false;
   return z.object({
     name: z.string().min(2, msgs.nameMin),
-    number: z.string().min(8, msgs.numberMin),
+    number: numberRequired ? z.string().min(8, msgs.numberMin) : z.string(),
     email: z.string().email(msgs.emailInvalid).or(z.literal("")).optional(),
     cpf: z.string().optional(),
     birthDate: z.string().optional(),
@@ -93,6 +110,10 @@ function makeContactSchema(msgs: { nameMin: string; numberMin: string; emailInva
     instagramPK: z.string().optional(),
     hubWhatsapp: z.string().optional(),
     cep: z.string().optional(),
+    logradouro: z.string().optional(),
+    numeroEndereco: z.string().optional(),
+    complemento: z.string().optional(),
+    bairro: z.string().optional(),
     cidade: z.string().optional(),
     estado: z.string().optional(),
     telegramId: z.string().optional(),
@@ -122,13 +143,13 @@ type ColumnKey =
   | "select" | "id" | "avatar" | "name" | "whatsapp" | "email" | "cpf" | "empresa"
   | "tags" | "lid" | "firstName" | "lastName" | "wallet" | "queue" | "kanban"
   | "birthdayDate" | "telegramId" | "messengerId" | "instagramPK" | "hubWhatsapp"
-  | "bloquearContato" | "bloquearChatbot" | "cep" | "cidade" | "estado" | "actions";
+  | "bloquearContato" | "bloquearChatbot" | "cep" | "logradouro" | "bairro" | "cidade" | "estado" | "actions";
 
 const ALL_COLUMN_KEYS: ColumnKey[] = [
   "select", "id", "avatar", "name", "whatsapp", "email", "cpf", "empresa",
   "tags", "lid", "firstName", "lastName", "wallet", "queue", "kanban",
   "birthdayDate", "telegramId", "messengerId", "instagramPK", "hubWhatsapp",
-  "bloquearContato", "bloquearChatbot", "cep", "cidade", "estado", "actions",
+  "bloquearContato", "bloquearChatbot", "cep", "logradouro", "bairro", "cidade", "estado", "actions",
 ];
 
 const DEFAULT_VISIBLE: ColumnKey[] = ["select", "avatar", "name", "whatsapp", "tags", "actions"];
@@ -150,16 +171,32 @@ const CHANNEL_TYPES = [
   { type: "hub_instagram", label: "Hub Instagram", logo: "hub_instagram-logo.png" },
   { type: "hub_facebook", label: "Hub Facebook", logo: "hub_facebook-logo.png" },
   { type: "hub_whatsapp_business_account", label: "Hub WBA", logo: "hub_whatsapp-logo.png" },
+  { type: "telegram", label: "Telegram", logo: "telegram-logo.png" },
 ];
+
+// Uma etiqueta segue no `tagId` de sempre (backend antigo entende); 2+ vão em
+// `tagIds` com a regra escolhida.
+function buildTagFilterParams(ids: number[], match: TagMatch): { tagId?: number; tagIds?: number[]; tagMatch?: TagMatch } {
+  if (ids.length === 1) return { tagId: ids[0] };
+  if (ids.length > 1) return { tagIds: ids, tagMatch: match };
+  return {};
+}
+
+// Coluna "Rua" da lista: "Rua, Nº - Complemento", só com as partes preenchidas.
+function formatStreetLine(c: Contact): string {
+  const street = [c.logradouro, c.numeroEndereco].map((v) => (v ?? "").trim()).filter(Boolean).join(", ");
+  return [street, (c.complemento ?? "").trim()].filter(Boolean).join(" - ");
+}
 
 export default function ContatosPage() {
   const allowed = usePageAccess("contatos", { checkRestrictedUser: true, allowIfNotSet: true });
   const t = useTranslations("contacts");
   const tC = useTranslations("contatosPage");
   const tCED = useTranslations("contactEditDialog");
+  const tCommon = useTranslations("common");
   const tUnsaved = useTranslations("flowBuilderNodeForm");
   const tLoadMore = useTranslations("usuariotenantsPage");
-  const contactSchema = makeContactSchema({ nameMin: tC("nameMin"), numberMin: tC("numberMin"), emailInvalid: tC("emailInvalid") });
+  const tAF = useTranslations("addressFilter");
 
   const ALL_COLUMNS: { key: ColumnKey; label: string }[] = [
     { key: "select", label: tC("colSelect") },
@@ -185,6 +222,8 @@ export default function ContatosPage() {
     { key: "bloquearContato", label: tC("colBlocked") },
     { key: "bloquearChatbot", label: tC("colBlockedChatbot") },
     { key: "cep", label: tC("colCep") },
+    { key: "logradouro", label: tC("colLogradouro") },
+    { key: "bairro", label: tC("colBairro") },
     { key: "cidade", label: tC("colCidade") },
     { key: "estado", label: tC("colEstado") },
     { key: "actions", label: tC("colActions") },
@@ -206,15 +245,23 @@ export default function ContatosPage() {
   const [totalContacts, setTotalContacts] = useState<number | null>(null);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editing, setEditing] = useState<Contact | null>(null);
+  // O contato em edicao ja tinha telefone? Decide se o campo segue obrigatorio.
+  const [editingHadNumber, setEditingHadNumber] = useState(false);
   const [deleting, setDeleting] = useState<Contact | null>(null);
   const [deletingContact, setDeletingContact] = useState(false);
   const [visibleColumns, setVisibleColumns] = useState<ColumnKey[]>(DEFAULT_VISIBLE);
-  const [tagFilter, setTagFilter] = useState<string>("all");
+  const [tagFilterIds, setTagFilterIds] = useState<number[]>([]);
+  const [tagFilterMatch, setTagFilterMatch] = useState<TagMatch>("any");
   const [walletFilter, setWalletFilter] = useState<string>("all");
   const [queueFilter, setQueueFilter] = useState<string>("all");
+  const [addressFilter, setAddressFilter] = useState<AddressFilter>(EMPTY_ADDRESS_FILTER);
+  // O filtro por endereço só aparece depois que uma resposta da lista traz `addressFilter: true`:
+  // servidor antigo (ou banco sem as colunas) ignora os parâmetros e devolveria a base inteira.
+  const [addressFilterSupported, setAddressFilterSupported] = useState(false);
   const [tags, setTags] = useState<Tag[]>([]);
   const [users, setUsers] = useState<User[]>([]);
   const [wallets, setWallets] = useState<Wallet[]>([]);
+  const [walletShowAll, setWalletShowAll] = useState(false);
   const [importFile, setImportFile] = useState<File | null>(null);
   const [importTagIds, setImportTagIds] = useState<number[]>([]);
   const [importWalletId, setImportWalletId] = useState<number | null>(null);
@@ -287,11 +334,17 @@ export default function ContatosPage() {
   const [spyOpen, setSpyOpen] = useState(false);
   const [spyContact, setSpyContact] = useState<Contact | null>(null);
 
-  const [cepLoading, setCepLoading] = useState(false);
-
   // Snapshot dos estados fora do RHF (tags/carteira/fila/extraInfo/isLid) na abertura
   // do dialog de criar/editar — usado no dirty-guard de fechamento
   const contactExtrasSnapshotRef = useRef<string>("");
+
+  // Criacao sempre exige telefone; na edicao, so quando o contato carregado ja tinha
+  // (assim ninguem apaga por engano o numero de quem tem).
+  const numberRequired = !editing || editingHadNumber;
+  const contactSchema = makeContactSchema(
+    { nameMin: tC("nameMin"), numberMin: tC("numberMin"), emailInvalid: tC("emailInvalid") },
+    { numberRequired }
+  );
 
   const form = useForm<ContactForm>({
     resolver: zodResolver(contactSchema),
@@ -299,7 +352,7 @@ export default function ContatosPage() {
       name: "", number: "", email: "", cpf: "", birthDate: "",
       firstName: "", lastName: "", businessName: "",
       lid: "", isLid: false, messengerId: "", instagramPK: "", hubWhatsapp: "",
-      cep: "", cidade: "", estado: "",
+      cep: "", logradouro: "", numeroEndereco: "", complemento: "", bairro: "", cidade: "", estado: "",
       telegramId: "", webchatId: "", mercadolivreId: "", linkedinId: "",
       youtubeChannelId: "", tiktokId: "",
       hubMercadolivre: "", hubTiktok: "", hubLikedin: "", hubOlx: "", hubYoutube: "",
@@ -307,24 +360,6 @@ export default function ContatosPage() {
       hubWebchat: "", hubEmail: "",
     },
   });
-
-  const handleCepLookup = async (cep: string) => {
-    const digits = cep.replace(/\D/g, "");
-    if (digits.length !== 8) return;
-    setCepLoading(true);
-    try {
-      const res = await fetch(`https://viacep.com.br/ws/${digits}/json/`);
-      const data = await res.json();
-      if (!data.erro) {
-        form.setValue("cidade", data.localidade || "", { shouldDirty: true });
-        form.setValue("estado", data.uf || "", { shouldDirty: true });
-      }
-    } catch {
-      toast.error(tC("cepFetchError"));
-    } finally {
-      setCepLoading(false);
-    }
-  };
 
   const isColVisible = (key: ColumnKey) => visibleColumns.includes(key);
   const toggleColumn = (key: ColumnKey) => {
@@ -336,11 +371,17 @@ export default function ContatosPage() {
   const load = useCallback(async (pageNum = 1, searchParam = search) => {
     setLoading(true);
     try {
-      const params: Record<string, unknown> = { searchParam, pageNumber: pageNum, smartSearch: true };
-      if (tagFilter && tagFilter !== "all") params.tagId = Number(tagFilter);
+      const params: Record<string, unknown> = { searchParam, pageNumber: pageNum, smartSearch: true, ...buildTagFilterParams(tagFilterIds, tagFilterMatch), ...toAddressQuery(addressFilter) };
       if (walletFilter && walletFilter !== "all") params.walletId = Number(walletFilter);
       if (queueFilter && queueFilter !== "all") params.queueId = Number(queueFilter);
       const { data } = await fetchContacts(params);
+      const addressEcho = hasAddressFilterEcho(data);
+      setAddressFilterSupported(addressEcho);
+      if (!addressEcho && isAddressFilterActive(addressFilter)) {
+        // O servidor deixou de entender o filtro (ignorou os parâmetros): some da tela e é zerado.
+        setAddressFilter(EMPTY_ADDRESS_FILTER);
+        toast.error(tAF("unsupported"));
+      }
       const list = data?.contacts || data || [];
       setContacts((prev) => {
         const merged = pageNum === 1 ? list : [...prev, ...list];
@@ -354,13 +395,13 @@ export default function ContatosPage() {
     } finally {
       setLoading(false);
     }
-  }, [search, tagFilter, walletFilter, queueFilter]);
+  }, [search, tagFilterIds, tagFilterMatch, walletFilter, queueFilter, addressFilter]);
 
   useEffect(() => {
     const timer = setTimeout(() => load(1, search), 400);
     return () => clearTimeout(timer);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [search, tagFilter, walletFilter, queueFilter, load]);
+  }, [search, tagFilterIds, tagFilterMatch, walletFilter, queueFilter, addressFilter, load]);
 
   useEffect(() => {
     fetchTags().then(({ data }) => setTags(data || []));
@@ -384,6 +425,7 @@ export default function ContatosPage() {
       fetchTenantById(user.tenantId).then(({ data }) => {
         const td = Array.isArray(data) ? data[0] : data;
         setContactDeleteAdminOnly(td?.contactDeleteAdminOnly === "enabled");
+        setWalletShowAll(td?.walletShowAll === "enabled");
       }).catch(() => {});
     }
   }, []);
@@ -395,7 +437,7 @@ export default function ContatosPage() {
       name: "", number: "", email: "", cpf: "", birthDate: "",
       firstName: "", lastName: "", businessName: "",
       lid: "", isLid: false, messengerId: "", instagramPK: "", hubWhatsapp: "",
-      cep: "", cidade: "", estado: "",
+      cep: "", logradouro: "", numeroEndereco: "", complemento: "", bairro: "", cidade: "", estado: "",
       telegramId: "", webchatId: "", mercadolivreId: "", linkedinId: "",
       youtubeChannelId: "", tiktokId: "",
       hubMercadolivre: "", hubTiktok: "", hubLikedin: "", hubOlx: "", hubYoutube: "",
@@ -415,6 +457,9 @@ export default function ContatosPage() {
 
   const openEdit = async (c: Contact) => {
     setEditing(c);
+    // Valor da linha da lista enquanto o contato completo nao chega — evita janela
+    // com a obrigatoriedade herdada do contato anterior.
+    setEditingHadNumber(!!c.number);
     setExtrasOpen(false);
     setDialogOpen(true);
     // Fetch full contact to get tags, wallets, extraInfo
@@ -422,12 +467,16 @@ export default function ContatosPage() {
       const { data: full } = await fetchContact(c.id);
       const fc: Contact = full?.contact || full || c;
       setIsLidForm(!!fc.isLid);
+      setEditingHadNumber(!!fc.number);
       form.reset({
         name: fc.name || "",
         number: fc.number || "",
         email: fc.email || "",
         cpf: fc.cpf || "",
-        birthDate: fc.birthDate || fc.birthdayDate || "",
+        // Normaliza pra YYYY-MM-DD: o backend pode devolver ISO com hora ou
+        // Date.toString() em ingles, que o <input type="date"> rejeita e exibe
+        // vazio — e um Salvar seguinte apagaria o aniversario.
+        birthDate: formatBirthdayInput(fc.birthDate || fc.birthdayDate),
         firstName: fc.firstName || "",
         lastName: fc.lastName || "",
         businessName: fc.businessName || "",
@@ -437,6 +486,10 @@ export default function ContatosPage() {
         instagramPK: fc.instagramPK || "",
         hubWhatsapp: fc.hubWhatsapp || "",
         cep: fc.cep || "",
+        logradouro: fc.logradouro || "",
+        numeroEndereco: fc.numeroEndereco || "",
+        complemento: fc.complemento || "",
+        bairro: fc.bairro || "",
         cidade: fc.cidade || "",
         estado: fc.estado || "",
         telegramId: fc.telegramId || "",
@@ -475,13 +528,15 @@ export default function ContatosPage() {
     } catch {
       // fallback to list data
       setIsLidForm(!!c.isLid);
+      setEditingHadNumber(!!c.number);
       form.reset({
         name: c.name || "", number: c.number || "", email: c.email || "", cpf: c.cpf || "",
-        birthDate: c.birthDate || c.birthdayDate || "", firstName: c.firstName || "",
+        birthDate: formatBirthdayInput(c.birthDate || c.birthdayDate), firstName: c.firstName || "",
         lastName: c.lastName || "", businessName: c.businessName || "",
         lid: c.lid || "", isLid: !!c.isLid,
         messengerId: c.messengerId || "", instagramPK: c.instagramPK || "", hubWhatsapp: c.hubWhatsapp || "",
-        cep: c.cep || "", cidade: c.cidade || "", estado: c.estado || "",
+        cep: c.cep || "", logradouro: c.logradouro || "", numeroEndereco: c.numeroEndereco || "",
+        complemento: c.complemento || "", bairro: c.bairro || "", cidade: c.cidade || "", estado: c.estado || "",
         telegramId: c.telegramId || "", webchatId: c.webchatId || "",
         mercadolivreId: c.mercadolivreId || "", linkedinId: c.linkedinId || "",
         youtubeChannelId: c.youtubeChannelId || "", tiktokId: c.tiktokId || "",
@@ -536,9 +591,17 @@ export default function ContatosPage() {
       return;
     }
     try {
-      const payload: ContactPayload & Record<string, unknown> = {
+      // O seletor de pais do campo de telefone devolve so o DDI (ex.: "55") quando
+      // nao ha digitos locais — isso nao e' telefone. Sem numero de verdade o campo
+      // sai do payload: "" grava string vazia e colide no indice unico
+      // (tenantId, number), fundindo os contatos sem telefone. Omitido, o PUT
+      // parcial preserva o que estiver gravado. Na criacao o schema exige o minimo,
+      // entao aqui o valor sempre existe.
+      const typedNumber = (values.number || "").trim();
+      const numberForPayload = typedNumber.replace(/\D/g, "").length >= 8 ? typedNumber : undefined;
+      const payload: Partial<ContactPayload> & Record<string, unknown> = {
         name: values.name,
-        number: values.number,
+        number: numberForPayload,
         email: values.email,
         cpf: values.cpf,
         birthdayDate: values.birthDate,
@@ -550,9 +613,10 @@ export default function ContatosPage() {
         messengerId: values.messengerId,
         instagramPK: values.instagramPK,
         hubWhatsapp: values.hubWhatsapp,
-        cep: values.cep,
-        cidade: values.cidade,
-        estado: values.estado,
+        // Endereço: na criação vai o bloco inteiro; na edição só quando algum campo dele foi
+        // mexido (aí "" apaga). Sem mexer, salvar outra coisa não devolve o endereço que a tela
+        // carregou por cima de uma atualização feita depois por outro caminho (loja, API).
+        ...(!editing || isAddressBlockDirty(form) ? addressPayloadFrom(values) : {}),
         telegramId: values.telegramId,
         webchatId: values.webchatId,
         mercadolivreId: values.mercadolivreId,
@@ -582,7 +646,8 @@ export default function ContatosPage() {
         await updateContactTags(editing.id, selectedTagIds);
         toast.success(tC("contactUpdated"));
       } else {
-        const { data: created } = await createContact(payload);
+        // Criacao: nome e telefone sao obrigatorios pelo schema, o payload esta completo
+        const { data: created } = await createContact(payload as ContactPayload);
         const newId = created?.contact?.id ?? created?.id;
         if (newId && selectedTagIds.length) await updateContactTags(newId, selectedTagIds);
         toast.success(tC("contactCreated"));
@@ -592,8 +657,16 @@ export default function ContatosPage() {
     } catch (err: unknown) {
       const code = (err as { data?: { error?: string }; response?: { data?: { error?: string } } })?.data?.error
         ?? (err as { response?: { data?: { error?: string } } })?.response?.data?.error;
+      // Os codigos do canal vem com sufixo numerico ("ERR_WAPP_INVALID_CONTACT 4"),
+      // por isso o teste e por prefixo. Sem isso o operador so via "Erro ao criar" e
+      // nao tinha como saber que o problema era o numero, nao o cadastro.
+      const wappCode = typeof code === "string" ? code : "";
       if (code === "ERR_DUPLICATED_CONTACT") {
         toast.error(tC("duplicatedContact"));
+      } else if (wappCode.startsWith("ERR_WAPP_INVALID_CONTACT")) {
+        toast.error(tC("numberNotOnWhatsapp"));
+      } else if (wappCode.startsWith("ERR_WAPP_CHECK_CONTACT")) {
+        toast.error(tC("numberCheckFailed"));
       } else {
         toast.error(editing ? tC("errorUpdating") : tC("errorCreating"));
       }
@@ -820,7 +893,7 @@ export default function ContatosPage() {
       if (ticketAtual) {
         setStartTicketOpen(false);
 
-        // Regra (espelha frontend Vue handleSaveTicket / abrirAtendimentoExistente):
+ // Regra (espelha frontend legado handleSaveTicket / abrirAtendimentoExistente):
         // usuário com profile==='user' e tenant com NotViewAssignedTickets==='enabled'
         // não pode acessar ticket aberto em nome de outro atendente.
         // Admin e supervisor (profile==='super') seguem o fluxo normal.
@@ -860,7 +933,7 @@ export default function ContatosPage() {
         }
 
         if (isPending) {
-          // Para tickets pending: exibir dialog de confirmação (como Vue faz em abrirAtendimentoExistente)
+ // Para tickets pending: exibir dialog de confirmação (como front legado faz em abrirAtendimentoExistente)
           setExistingTicket(ticketAtual);
           setExistingTicketContact(startTicketContact);
           setExistingTicketOpen(true);
@@ -1000,29 +1073,44 @@ export default function ContatosPage() {
     }
   };
 
+  // Contagem/exportação sem o eco com filtro de endereço ativo: o servidor ignorou o filtro. Ele
+  // some da tela e é zerado, com aviso — nada sai como "filtrado" sem o filtro de endereço.
+  const dropAddressFilter = () => {
+    setAddressFilterSupported(false);
+    setAddressFilter(EMPTY_ADDRESS_FILTER);
+    toast.error(tAF("unsupported"));
+  };
+
   const openExportDialog = () => {
     setExportCounts(null);
     setExportDialogOpen(true);
-    const params: { searchParam?: string; walletId?: number; tagId?: number; smartSearch?: boolean } = { searchParam: search, smartSearch: true };
-    if (tagFilter && tagFilter !== "all") params.tagId = Number(tagFilter);
+    const params: Parameters<typeof exportContactsCount>[0] = { searchParam: search, smartSearch: true, ...buildTagFilterParams(tagFilterIds, tagFilterMatch), ...toAddressQuery(addressFilter) };
     if (walletFilter && walletFilter !== "all") params.walletId = Number(walletFilter);
+    if (queueFilter && queueFilter !== "all") params.queueId = Number(queueFilter);
+    const addressActive = isAddressFilterActive(addressFilter);
     exportContactsCount(params)
-      .then(({ data }) => setExportCounts(data))
+      .then(({ data }) => {
+        if (addressActive && !hasAddressFilterEcho(data)) dropAddressFilter();
+        setExportCounts(data);
+      })
       .catch(() => setExportCounts(null));
   };
 
   const handleExport = async (mode: "all" | "filtered") => {
     setExportDialogOpen(false);
     try {
-      const params: { mode: "all" | "filtered"; searchParam?: string; walletId?: number; tagId?: number; smartSearch?: boolean } = { mode };
+      let params: NonNullable<Parameters<typeof exportContacts>[0]> = { mode };
       if (mode === "filtered") {
-        params.searchParam = search;
-        params.smartSearch = true;
-        if (tagFilter && tagFilter !== "all") params.tagId = Number(tagFilter);
+        params = { ...params, searchParam: search, smartSearch: true, ...buildTagFilterParams(tagFilterIds, tagFilterMatch), ...toAddressQuery(addressFilter) };
         if (walletFilter && walletFilter !== "all") params.walletId = Number(walletFilter);
+        if (queueFilter && queueFilter !== "all") params.queueId = Number(queueFilter);
       }
       const { data } = await exportContacts(params);
       if (!data?.downloadLink) throw new Error("missing downloadLink");
+      if (mode === "filtered" && isAddressFilterActive(addressFilter) && !hasAddressFilterEcho(data)) {
+        dropAddressFilter();
+        return;
+      }
       const a = document.createElement("a");
       a.href = data.downloadLink;
       a.download = "contatos.xlsx";
@@ -1087,7 +1175,7 @@ export default function ContatosPage() {
 
   const connectedWhatsapps = whatsapps.filter((w) => w.status === "CONNECTED" && !w.isDeleted);
 
-  // Regra Vue: admin ou super com supervisorAdmin=disabled vê todas; demais filtram por whatsappAllowed
+ // Regra do front legado: admin ou super com supervisorAdmin=disabled vê todas; demais filtram por whatsappAllowed
   const canSeeAllSessions = isAdmin || (user?.profile === "super" && supervisorAdmin === "disabled");
   const allowedSessions = canSeeAllSessions
     ? connectedWhatsapps
@@ -1122,6 +1210,11 @@ export default function ContatosPage() {
     if (type === "hub_facebook") {
       return contact.messengerId ? sessions : [];
     }
+    // Bot do Telegram só escreve para quem já falou com ele: o id do chat
+    // (telegramId) é gravado na primeira mensagem do contato.
+    if (type === "telegram") {
+      return contact.telegramId ? sessions : [];
+    }
     return sessions;
   };
 
@@ -1130,7 +1223,22 @@ export default function ContatosPage() {
   // semantica e "admin OU supervisor" (super). Tornar explicito.
   const isAdminOrSuper = isAdmin || user?.profile === "super";
 
+  // Espelha o backend (isAdminLikeForByUser + walletShowAll): quem não vê todas as
+  // carteiras só enxerga contatos da própria ou sem carteira, então filtrar pela
+  // carteira de outro usuário devolveria sempre lista vazia.
+  const customPerms = user?.customProfile?.customPermissions as unknown as { tickets_view_all?: boolean } | undefined;
+  const canFilterAnyWallet =
+    walletShowAll ||
+    user?.profile === "admin" ||
+    user?.profile === "superadmin" ||
+    (user?.profile === "super" && supervisorAdmin !== "enabled") ||
+    (user?.profile === "custom" && customPerms?.tickets_view_all === true);
+  const walletFilterOptions = canFilterAnyWallet
+    ? wallets
+    : wallets.filter((w) => String(w.id) === String(user?.userId));
+
   const { sortKey, sortDir, handleSort, sortedData } = useSortable(contacts, "name");
+  const addressActiveCount = addressFilterActiveCount(addressFilter);
 
   // --- Early return after all hooks ---
   if (!allowed) return <AccessDenied />;
@@ -1145,7 +1253,7 @@ export default function ContatosPage() {
           sections: [
             {
               title: t("helpS0T"),
-              items: [t("helpS0I0"), t("helpS0I1"), t("helpS0I2"), t("helpS0I3")],
+              items: [t("helpS0I0"), t("helpS0I1"), t("helpS0I2"), t("helpS0I3"), t("helpS0I4")],
             },
             {
               title: t("helpS1T"),
@@ -1204,7 +1312,7 @@ export default function ContatosPage() {
               </DropdownMenuItem>
               <DropdownMenuSeparator />
               <DropdownMenuItem onClick={() => {
-                const csv = "nome;numero;email;cpf;dataNascimento;primeiroNome;ultimoNome;Empresa\nExemplo;5511999999999;email@exemplo.com;000.000.000-00;01/01/2000;Primeiro;Último;Empresa Ltda";
+                const csv = "nome;numero;email;cpf;dataNascimento;primeiroNome;ultimoNome;Empresa;cep;rua;numeroEndereco;complemento;bairro;cidade;uf\nExemplo;5511999999999;email@exemplo.com;000.000.000-00;01/01/2000;Primeiro;Último;Empresa Ltda;01310-100;Avenida Paulista;1000;Apto 12;Bela Vista;São Paulo;SP";
                 const blob = new Blob(["\uFEFF" + csv], { type: "text/csv;charset=utf-8" });
                 const a = document.createElement("a"); a.href = window.URL.createObjectURL(blob); a.download = "modelo-contatos.csv"; a.click(); window.URL.revokeObjectURL(a.href);
               }}>
@@ -1223,7 +1331,7 @@ export default function ContatosPage() {
             <FileSpreadsheet className="mr-2 h-4 w-4" /> {tC("smartImportLabel")}
           </Button>
           <Button variant="outline" size="sm" className="hidden sm:flex" onClick={() => {
-            const csv = "nome;numero;email;cpf;dataNascimento;primeiroNome;ultimoNome;Empresa\nExemplo;5511999999999;email@exemplo.com;000.000.000-00;01/01/2000;Primeiro;Último;Empresa Ltda";
+            const csv = "nome;numero;email;cpf;dataNascimento;primeiroNome;ultimoNome;Empresa;cep;rua;numeroEndereco;complemento;bairro;cidade;uf\nExemplo;5511999999999;email@exemplo.com;000.000.000-00;01/01/2000;Primeiro;Último;Empresa Ltda;01310-100;Avenida Paulista;1000;Apto 12;Bela Vista;São Paulo;SP";
             const blob = new Blob(["\uFEFF" + csv], { type: "text/csv;charset=utf-8" });
             const a = document.createElement("a"); a.href = window.URL.createObjectURL(blob); a.download = "modelo-contatos.csv"; a.click(); window.URL.revokeObjectURL(a.href);
           }}>
@@ -1252,21 +1360,16 @@ export default function ContatosPage() {
           <Input value={search} onChange={(e) => setSearch(e.target.value)} placeholder={t("searchPlaceholder")} className="pl-9 w-full" />
         </div>
         <div className="flex items-center gap-2 flex-wrap sm:flex-nowrap shrink-0">
-          <SearchableSelect
-            options={[
-              { value: "all", label: tC("allTags") },
-              ...tags
-                .filter((tag) => tag.isActive !== false)
-                .map((tag) => ({ value: String(tag.id), label: tag.name })),
-            ]}
-            value={tagFilter}
-            onValueChange={setTagFilter}
-            placeholder={tC("filterByTag")}
-            className="w-[160px]"
-            clearable
+          <TagMultiFilter
+            tags={tags}
+            value={tagFilterIds}
+            onValueChange={setTagFilterIds}
+            match={tagFilterMatch}
+            onMatchChange={setTagFilterMatch}
+            className="w-[220px] shrink-0"
           />
           <SearchableSelect
-            options={[{ value: "all", label: tC("allWallets") }, ...wallets.map((w) => ({ value: String(w.id), label: w.name }))]}
+            options={[{ value: "all", label: tC("allWallets") }, ...walletFilterOptions.map((w) => ({ value: String(w.id), label: w.name }))]}
             value={walletFilter}
             onValueChange={setWalletFilter}
             placeholder={tC("filterByWallet")}
@@ -1281,6 +1384,30 @@ export default function ContatosPage() {
             className="w-[160px]"
             clearable
           />
+          {addressFilterSupported && (
+            <Popover modal={false}>
+              <PopoverTrigger asChild>
+                <Button variant="outline" size="sm" className="shrink-0" title={tAF("title")} aria-label={tAF("title")}>
+                  <MapPin className="h-4 w-4" />
+                  <span className="sm:hidden lg:inline">{tAF("title")}</span>
+                  {addressActiveCount > 0 && (
+                    <Badge className="h-4 min-w-4 justify-center rounded-full px-1 text-[10px] leading-none">
+                      {addressActiveCount}
+                    </Badge>
+                  )}
+                </Button>
+              </PopoverTrigger>
+              <PopoverContent align="end" collisionPadding={8} className="w-[min(20rem,calc(100vw-2rem))] p-3">
+                <AddressFilterFields
+                  value={addressFilter}
+                  onChange={setAddressFilter}
+                  mode="live"
+                  layout="stack"
+                  showTitle
+                />
+              </PopoverContent>
+            </Popover>
+          )}
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <Button variant="outline" size="sm" className="shrink-0"><SlidersHorizontal className="mr-2 h-4 w-4" /> {tC("columns")}</Button>
@@ -1337,6 +1464,8 @@ export default function ContatosPage() {
                   {isColVisible("instagramPK") && <TableHead>{tC("colInstagramPK")}</TableHead>}
                   {isColVisible("hubWhatsapp") && <TableHead>{tC("colHubWa")}</TableHead>}
                   {isColVisible("cep") && <TableHead>{tC("colCep")}</TableHead>}
+                  {isColVisible("logradouro") && <TableHead>{tC("colLogradouro")}</TableHead>}
+                  {isColVisible("bairro") && <TableHead>{tC("colBairro")}</TableHead>}
                   {isColVisible("cidade") && <TableHead>{tC("colCidade")}</TableHead>}
                   {isColVisible("estado") && <TableHead>{tC("colEstado")}</TableHead>}
                   {isColVisible("bloquearContato") && <TableHead>{tC("colBlocked")}</TableHead>}
@@ -1361,9 +1490,14 @@ export default function ContatosPage() {
                             src={c.profilePicUrl}
                             className={cn(isLiveMode && "live-blur")}
                             onLoadingStatusChange={(status) => {
+                              // A falha de carregamento da imagem cai no avatar de
+                              // iniciais e PARA POR AI. O POST /contactsRemovePicture que
+                              // vinha aqui apagava a foto do contato no banco, em definitivo
+                              // e sem avisar, a cada falha de rede ou URL expirada do
+                              // WhatsApp. Medido: abrir a lista disparava dois POST sozinho.
+                              // A limpeza abaixo e so do estado local desta tela.
                               if (status === "error" && c.id) {
                                 setContacts((prev) => prev.map((x) => x.id === c.id ? { ...x, profilePicUrl: undefined } : x));
-                                removeContactProfilePicture(c.id).catch(() => {});
                               }
                             }}
                           />
@@ -1371,12 +1505,43 @@ export default function ContatosPage() {
                         </Avatar>
                       </TableCell>
                     )}
-                    {isColVisible("name") && <TableCell className={cn("font-medium", isLiveMode && "live-blur-text")}>{c.name}</TableCell>}
+                    {isColVisible("name") && (
+                      <TableCell className={cn("font-medium", isLiveMode && "live-blur-text")}>
+                        {/* PLANO_CRM_CONTATO F1 (D16): nome abre o perfil do contato (restrito ja e barrado desta pagina pelo usePageAccess) */}
+                        {c.id ? (
+                          <Link href={`/contatos/${c.id}`} className="hover:underline underline-offset-2">{c.name}</Link>
+                        ) : c.name}
+                      </TableCell>
+                    )}
                     {isColVisible("whatsapp") && (
                       <TableCell>
-                        <span className={cn("flex items-center gap-1 text-sm", isLiveMode && "live-blur-text")}>
-                          <Phone className="h-3 w-3 text-muted-foreground" /> {displayContactIdentity(c)}
-                        </span>
+                        {/* Sem telefone, o identificador interno do contato parece um
+                            numero e nao ajuda ninguem: mostra o nome de usuario ou o
+                            rotulo de "sem telefone". Ternario local de proposito — o
+                            displayContactIdentity e' compartilhado com exportacoes e
+                            relatorios, que precisam do identificador. */}
+                        {c.number ? (
+                          <span className={cn("flex items-center gap-1 text-sm", isLiveMode && "live-blur-text")}>
+                            <Phone className="h-3 w-3 text-muted-foreground" /> {displayContactIdentity(c)}
+                          </span>
+                        ) : c.username ? (
+                          <span className={cn("flex items-center gap-1 text-sm", isLiveMode && "live-blur-text")}>
+                            <AtSign className="h-3 w-3 text-muted-foreground" /> @{c.username}
+                          </span>
+                        ) : (
+                          <TooltipProvider>
+                            <Tooltip>
+                              <TooltipTrigger asChild>
+                                <span className="flex cursor-help items-center gap-1 text-sm text-muted-foreground">
+                                  <PhoneOff className="h-3 w-3" /> {tC("noPhoneLabel")}
+                                </span>
+                              </TooltipTrigger>
+                              <TooltipContent side="right" className="max-w-xs text-xs">
+                                {tC("noPhoneTooltip")}
+                              </TooltipContent>
+                            </Tooltip>
+                          </TooltipProvider>
+                        )}
                       </TableCell>
                     )}
                     {isColVisible("email") && (
@@ -1410,6 +1575,8 @@ export default function ContatosPage() {
                     {isColVisible("instagramPK") && <TableCell><span className={cn("text-sm", isLiveMode && "live-blur-text")}>{c.instagramPK || "—"}</span></TableCell>}
                     {isColVisible("hubWhatsapp") && <TableCell><span className={cn("text-sm", isLiveMode && "live-blur-text")}>{c.hubWhatsapp || "—"}</span></TableCell>}
                     {isColVisible("cep") && <TableCell><span className={cn("text-sm", isLiveMode && "live-blur-text")}>{c.cep || "—"}</span></TableCell>}
+                    {isColVisible("logradouro") && <TableCell><span className={cn("text-sm", isLiveMode && "live-blur-text")}>{formatStreetLine(c) || "—"}</span></TableCell>}
+                    {isColVisible("bairro") && <TableCell><span className={cn("text-sm", isLiveMode && "live-blur-text")}>{c.bairro || "—"}</span></TableCell>}
                     {isColVisible("cidade") && <TableCell><span className={cn("text-sm", isLiveMode && "live-blur-text")}>{c.cidade || "—"}</span></TableCell>}
                     {isColVisible("estado") && <TableCell><span className={cn("text-sm", isLiveMode && "live-blur-text")}>{c.estado || "—"}</span></TableCell>}
                     {isColVisible("bloquearContato") && (
@@ -1514,7 +1681,9 @@ export default function ContatosPage() {
                 {form.formState.errors.name && <p className="text-xs text-destructive">{form.formState.errors.name.message}</p>}
               </div>
               <div className="space-y-2">
-                <Label>{tC("numberLabel")}</Label>
+                {/* Sem telefone o campo deixa de ser obrigatorio — o asterisco do
+                    rotulo traduzido sai junto para nao prometer o contrario. */}
+                <Label>{numberRequired ? tC("numberLabel") : tC("numberLabel").replace(/\s*\*\s*$/, "")}</Label>
                 <div className="flex gap-2">
                   <PhoneInput
                     className="flex-1"
@@ -1528,6 +1697,7 @@ export default function ContatosPage() {
                   )}
                 </div>
                 {form.formState.errors.number && <p className="text-xs text-destructive">{form.formState.errors.number.message}</p>}
+                {!numberRequired && <p className="text-xs text-muted-foreground">{tCED("numberOptionalNote")}</p>}
               </div>
               <div className="space-y-2">
                 <Label>{tC("firstNameLabel")}</Label>
@@ -1543,6 +1713,8 @@ export default function ContatosPage() {
                 {form.formState.errors.email && <p className="text-xs text-destructive">{form.formState.errors.email.message}</p>}
               </div>
             </div>
+
+            <ContactAddressFields form={form} />
 
             <Collapsible open={extrasOpen} onOpenChange={setExtrasOpen}>
               <CollapsibleTrigger asChild>
@@ -1564,31 +1736,6 @@ export default function ContatosPage() {
                   <div className="space-y-2">
                     <Label>{tC("businessNameLabel")}</Label>
                     <Input {...form.register("businessName")} placeholder={tC("businessNamePlaceholder")} />
-                  </div>
-                  <div className="space-y-2">
-                    <Label>{tC("cepLabel")}</Label>
-                    <div className="relative">
-                      <Input
-                        {...form.register("cep")}
-                        placeholder={tC("cepPlaceholder")}
-                        maxLength={9}
-                        onChange={(e) => {
-                          form.setValue("cep", e.target.value, { shouldDirty: true });
-                          handleCepLookup(e.target.value);
-                        }}
-                      />
-                      {cepLoading && (
-                        <RefreshCw className="absolute right-2 top-1/2 -translate-y-1/2 h-4 w-4 animate-spin text-muted-foreground" />
-                      )}
-                    </div>
-                  </div>
-                  <div className="space-y-2">
-                    <Label>{tC("cidadeLabel")}</Label>
-                    <Input {...form.register("cidade")} placeholder={tC("cidadeLabel")} />
-                  </div>
-                  <div className="space-y-2">
-                    <Label>{tC("estadoLabel")}</Label>
-                    <Input {...form.register("estado")} placeholder={tC("estadoLabel")} maxLength={2} />
                   </div>
                   <div className="space-y-2">
                     <Label>{tC("messengerIdLabel")}</Label>
@@ -2071,6 +2218,14 @@ export default function ContatosPage() {
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4 py-2">
+            {startTicketChannelType === "telegram" && (
+              <Alert className="py-2 px-3">
+                <Info className="h-4 w-4" />
+                <AlertDescription className="pl-6 text-xs">
+                  {tCommon("telegramStartTicketNote")}
+                </AlertDescription>
+              </Alert>
+            )}
             {startTicketConnections.length > 1 && (
               <div className="space-y-2">
                 <Label>{tC("connectionLabel")}</Label>

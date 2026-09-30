@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect, useCallback, useRef } from "react";
+import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { useRouter } from "next/navigation";
 import {
   Bell, Search, MessageSquare, ClipboardList, Send,
@@ -48,6 +48,7 @@ import { PushNotifications } from "@/components/PushNotifications";
 import { useLocale } from "@/i18n/locale-provider";
 import { locales, localeNames, type Locale } from "@/i18n/config";
 import { usePushNotifications } from "@/hooks/use-push-notifications";
+import { unsubscribePush } from "@/lib/push-subscription";
 import { UpdateNotification } from "@/components/UpdateNotification";
 import { toast } from "sonner";
 import { useTranslations } from "next-intl";
@@ -111,6 +112,11 @@ import { formatDistanceToNow } from "date-fns";
 import { ptBR, enUS, es as esLocale, de as deLocale, fr as frLocale, it as itLocale, ja as jaLocale, zhCN, arSA, hi as hiLocale, id as idLocale, ru as ruLocale, tr as trLocale, type Locale as DateFnsLocale } from "date-fns/locale";
 import { useLiveMode } from "@/hooks/use-live-mode";
 import { canUserSeeTicket, type TicketVisibilityData } from "@/lib/can-user-see-ticket";
+import {
+  pickTicketVisibilityPatch,
+  revokeTicketNotificationOnClick,
+  sweepTicketNotifications,
+} from "@/lib/ticket-notification-visibility";
 import { getTicketLastMessagePreview, getSyntheticBodyLabel } from "@/lib/template-preview";
 import { normalizeBrPhone } from "@/lib/phone-utils";
 import { buildSignedBody } from "@/lib/signature";
@@ -219,7 +225,7 @@ function TasksModal({ open, onOpenChange }: { open: boolean; onOpenChange: (o: b
     try {
       const { data } = await fetchTodos();
       const all = Array.isArray(data) ? data : [];
-      // Vue MainLayout.vue:1281-1285 — filtra por ownerId do usuário e status delayed/pending
+ // Front legado — filtra por ownerId do usuário e status delayed/pending
       const filtered = all.filter((t) =>
         t.ownerId === user?.userId &&
         (t.status === "delayed" || t.status === "pending")
@@ -359,7 +365,7 @@ export function NewConversationDialog({
   const [contactResults, setContactResults] = useState<Contact[]>([]);
   const [contactLoading, setContactLoading] = useState(false);
 
-  // Aviso "ticket aberto em outro operador" antes do envio avulso (espelho do Vue)
+ // Aviso "ticket aberto em outro operador" antes do envio avulso (espelho do front legado)
   const [existingTicket, setExistingTicket] = useState<ExistingOpenTicket | null>(null);
 
   const isAdminOrSuper = user?.profile === "admin" || user?.profile === "super" || user?.profile === "superadmin";
@@ -630,7 +636,7 @@ export function NewConversationDialog({
 
     // Pre-check: ticket aberto/pending no MESMO canal com OUTRO operador.
     // Se houver, abre dialog (Cancelar/Abrir/Assumir) e aborta o envio. Espelha
-    // `abrirAtendimentoExistente` do Vue (MainLayout.vue:2076-2129).
+ // `abrirAtendimentoExistente` do front legado.
     if (inputMode === "phone" && !skipPrecheck) {
       try {
         const found = await findExistingOpenTicket({
@@ -805,7 +811,20 @@ export function NewConversationDialog({
         router.push(`/atendimento?ticketId=${childTicketId}`);
       }
     } catch (err: unknown) {
-      const errCode = String((err as { response?: { data?: { error?: string } } })?.response?.data?.error || "");
+      // Mesmo caso do chargeErrCode abaixo: o interceptor rejeita com a RESPOSTA, entao
+      // o codigo vem em `data.error`. Ler so `response.data.error` deixava fila/canal sem
+      // permissao e numero invalido caindo no toast generico. `message` so quando parece
+      // codigo — no 409 esse campo carrega o ticket serializado.
+      const errMsg = String(
+        (err as { data?: { message?: string } })?.data?.message ||
+        (err as { response?: { data?: { message?: string } } })?.response?.data?.message ||
+        ""
+      );
+      const errCode = String(
+        (err as { data?: { error?: string } })?.data?.error ||
+        (err as { response?: { data?: { error?: string } } })?.response?.data?.error ||
+        (errMsg.startsWith("ERR_") ? errMsg : "")
+      );
       // Cobrança: o interceptor de api.ts rejeita com a RESPOSTA (não com o
       // AxiosError), então o código chega em `data.error`. Lê as duas formas —
       // sem isso o motivo da recusa (CRC, valor, permissão) some no toast genérico.
@@ -820,6 +839,10 @@ export function NewConversationDialog({
         toast.error(t("newConversation.queueNotAllowed"));
       } else if (errCode === "ERR_SESSION_NOT_ALLOWED") {
         toast.error(t("newConversation.sessionNotAllowed"));
+      } else if (errCode.startsWith("ERR_WAPP_INVALID_CONTACT")) {
+        toast.error(t("newConversation.numberNotOnWhatsapp"));
+      } else if (errCode.startsWith("ERR_WAPP_CHECK_CONTACT")) {
+        toast.error(t("newConversation.numberCheckFailed"));
       } else if (chargeErrCode === "ERR_ORDER_DETAILS_NOT_SUPPORTED") {
         toast.error(tOrder("errorNotSupportedHere"));
       } else if (isOrderDetailsSelected && chargeErrCode === "ERR_NO_PERMISSION") {
@@ -1462,10 +1485,17 @@ function UserMenu({ onOpenActivityLog }: { onOpenActivityLog?: () => void }) {
   const [payments, setPayments] = useState<AsaasPayment[]>([]);
   const [availablePlans, setAvailablePlans] = useState<Plan[]>([]);
   const [planModalOpen, setPlanModalOpen] = useState(false);
-  const [trialActive, setTrialActive] = useState(false);
-  const [trialDaysLeft, setTrialDaysLeft] = useState(0);
-  const [trialTotalDays, setTrialTotalDays] = useState(0);
+  const [trialSource, setTrialSource] = useState<{
+    createdAt: Date;
+    /** Instante em que o acesso expira (trial interno OU janela até a 1ª cobrança). */
+    endsAt: Date;
+    /** Janela total, para a barra de progresso. */
+    totalDays: number;
+    /** true = quem governa é a COBRANÇA, não o trialPeriod (mesmo critério do job). */
+    billing: boolean;
+  } | null>(null);
   const [dueDaysLeft, setDueDaysLeft] = useState<number | null>(null);
+  const [billingDueDate, setBillingDueDate] = useState<Date | null>(null);
 
   const loadSubscription = useCallback(async () => {
     if (!user?.tenantId) return;
@@ -1492,8 +1522,13 @@ function UserMenu({ onOpenActivityLog }: { onOpenActivityLog?: () => void }) {
         const due = new Date(nextDue + "T00:00:00");
         const diff = Math.ceil((due.getTime() - today.getTime()) / 86400000);
         setDueDaysLeft(diff);
+        // Vencimento REAL da 1ª cobrança: quando o tenant já está provisionado no
+        // gateway, é ele que define até quando o acesso vai — não a janela fixa de
+        // 30 dias (que só serve de estimativa enquanto nenhuma fatura foi gerada).
+        setBillingDueDate(due);
       } else {
         setDueDaysLeft(null);
+        setBillingDueDate(null);
       }
     } catch { /* sem assinatura */ }
   }, [user?.tenantId]);
@@ -1506,29 +1541,49 @@ function UserMenu({ onOpenActivityLog }: { onOpenActivityLog?: () => void }) {
         const td = d as Record<string, unknown>;
         setTenantLicense((td?.tenantLicense as string) ?? "enabled");
 
-        // Trial info — alinhado à janela de COBRANÇA quando o tenant tem gateway.
-        // Tenant com cobrança provisionada: a janela vai até a 1ª cobrança
-        // (createdAt + 30, espelhando o nextDueDate do /signup), não o trialPeriod.
-        // Trial puro (signup sem gateway): segue o trialPeriod do plano.
+        // Trial info — espelha o que REALMENTE expira, nunca uma janela inventada.
+        // Quem governa o fim do acesso é o backend: `billingProvisioned` usa o mesmo
+        // critério do job que desativa o tenant (token + customerId do gateway), e
+        // `trialEndsAt` é a própria data que o job compara. O cálculo antigo tratava
+        // o interruptor "Asaas habilitado" como cobrança provisionada e trocava a
+        // duração configurada por 30 dias fixos; e, por comparar `createdAt` (com
+        // hora) contra a meia-noite de hoje, somava mais um dia no dia da criação
+        // (5 dias de trial apareciam como "31 dias", com "-1d" na régua da barra).
         if (td?.trial === "enabled" && td?.createdAt) {
           const BILLING_WINDOW_DAYS = 30; // /signup: nextDueDate = createdAt + 30 (cycle MONTHLY)
-          const hasGatewayCharge =
-            td?.asaas === "enabled" ||
-            !!td?.asaasCustomerId ||
-            !!td?.stripeCustomerId ||
-            !!td?.pagarmeCustomerId ||
-            !!td?.mercadopagoCustomerId;
-          const totalDays = hasGatewayCharge
-            ? BILLING_WINDOW_DAYS
-            : Number(td?.trialPeriod ?? 3);
           const created = new Date(td.createdAt as string);
-          const today = new Date(); today.setHours(0, 0, 0, 0);
-          const elapsed = Math.floor((today.getTime() - created.getTime()) / 86400000);
-          const left = Math.max(0, totalDays - elapsed);
-          if (left > 0) {
-            setTrialActive(true);
-            setTrialDaysLeft(left);
-            setTrialTotalDays(totalDays);
+
+          // Backend antigo não manda `billingProvisioned` (rollout aditivo): o
+          // fallback exige o customerId de fato — nunca a flag `asaas` sozinha,
+          // que é justamente o que inflava o prazo.
+          const gw = (td?.paymentGateway as string) || "asaas";
+          const fallbackBilling =
+            gw === "asaas"
+              ? td?.asaas === "enabled" && !!td?.asaasCustomerId
+              : !!td?.[`${gw}CustomerId`];
+          const billing =
+            typeof td?.billingProvisioned === "boolean"
+              ? (td.billingProvisioned as boolean)
+              : fallbackBilling;
+
+          if (billing) {
+            // Cobrança provisionada: o job NÃO bloqueia mais pelo trialPeriod — o
+            // acesso segue até a 1ª cobrança. A data real vem das faturas
+            // (loadSubscription); até chegar, estima createdAt + 30.
+            const endsAt = new Date(created);
+            endsAt.setDate(endsAt.getDate() + BILLING_WINDOW_DAYS);
+            setTrialSource({ createdAt: created, endsAt, totalDays: BILLING_WINDOW_DAYS, billing: true });
+          } else {
+            const periodDays = Number(td?.trialPeriodEffective ?? td?.trialPeriod);
+            const totalDays = Number.isFinite(periodDays) && periodDays > 0 ? periodDays : 3;
+            const endsAt = td?.trialEndsAt
+              ? new Date(td.trialEndsAt as string)
+              : (() => {
+                  const e = new Date(created);
+                  e.setDate(e.getDate() + totalDays);
+                  return e;
+                })();
+            setTrialSource({ createdAt: created, endsAt, totalDays, billing: false });
           }
         }
 
@@ -1547,6 +1602,31 @@ function UserMenu({ onOpenActivityLog }: { onOpenActivityLog?: () => void }) {
       })
       .catch(() => {});
   }, [user?.tenantId, loadSubscription, showPayments]);
+
+  /**
+   * Contagem exibida no menu. `daysLeft` é o tempo que AINDA falta arredondado para
+   * cima (mesma leitura do job, que compara o instante exato de expiração): duração
+   * de 5 dias mostra "5" no dia da criação e "1" no último dia. A régua da barra é
+   * derivada daqui e fica sempre dentro de [0, total] — o "-1d" do cálculo antigo
+   * era o mesmo off-by-one que inflava o contador.
+   */
+  const trialView = useMemo(() => {
+    if (!trialSource) return null;
+    const endsAt = trialSource.billing && billingDueDate ? billingDueDate : trialSource.endsAt;
+    const msLeft = endsAt.getTime() - Date.now();
+    if (msLeft <= 0) return null;
+    const daysLeft = Math.max(1, Math.ceil(msLeft / 86400000));
+    const spanDays = Math.ceil((endsAt.getTime() - trialSource.createdAt.getTime()) / 86400000);
+    const totalDays = Math.max(daysLeft, trialSource.billing && billingDueDate ? spanDays : trialSource.totalDays);
+    const elapsedDays = Math.min(totalDays, Math.max(0, totalDays - daysLeft));
+    return {
+      daysLeft,
+      totalDays,
+      elapsedDays,
+      billing: trialSource.billing,
+      endsAtLabel: endsAt.toLocaleDateString(undefined, { day: "2-digit", month: "2-digit", year: "numeric" }),
+    };
+  }, [trialSource, billingDueDate]);
 
   const latestPayment = payments?.[0] ?? null;
 
@@ -1710,6 +1790,9 @@ function UserMenu({ onOpenActivityLog }: { onOpenActivityLog?: () => void }) {
         localStorage.removeItem(FCM_TOKEN_STORAGE_KEY);
       }
     } catch { /* ignora */ }
+    // Web Push (PWA): desfaz a assinatura deste aparelho para quem saiu parar de
+    // receber avisos aqui. Best-effort com teto de 3s — sair nunca trava.
+    await unsubscribePush();
     setLogoutDialogOpen(false);
     setLoggingOut(false);
     clearAuth();
@@ -1769,24 +1852,30 @@ function UserMenu({ onOpenActivityLog }: { onOpenActivityLog?: () => void }) {
                 </div>
               )}
               {/* Trial ativo */}
-              {trialActive && (
+              {trialView && (
                 <div className="mt-1 space-y-1">
                   <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
                     <Clock className="h-3 w-3 shrink-0 text-info" />
                     <span className="font-medium text-blue-600 dark:text-blue-400">
-                      {t("userMenu.trialDaysLeft", { days: trialDaysLeft })}
+                      {trialView.billing
+                        ? t("userMenu.firstChargeDaysLeft", { days: trialView.daysLeft })
+                        : t("userMenu.trialDaysLeft", { days: trialView.daysLeft })}
                     </span>
+                  </div>
+                  <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
+                    <Calendar className="h-3 w-3 shrink-0" />
+                    <span>{t("userMenu.trialExpiresOn", { date: trialView.endsAtLabel })}</span>
                   </div>
                   <div className="w-full">
                     <div className="h-1.5 w-full rounded-full bg-muted overflow-hidden">
                       <div
                         className="h-full rounded-full bg-info transition-all duration-300"
-                        style={{ width: `${Math.max(5, ((trialTotalDays - trialDaysLeft) / trialTotalDays) * 100)}%` }}
+                        style={{ width: `${Math.min(100, Math.max(5, (trialView.elapsedDays / trialView.totalDays) * 100))}%` }}
                       />
                     </div>
                     <div className="flex justify-between mt-0.5 text-[9px] text-muted-foreground">
-                      <span>{trialTotalDays - trialDaysLeft}d</span>
-                      <span>{trialTotalDays}d</span>
+                      <span>{trialView.elapsedDays}d</span>
+                      <span>{trialView.totalDays}d</span>
                     </div>
                   </div>
                 </div>
@@ -2104,6 +2193,11 @@ function HealthDot({ connected }: { connected: boolean }) {
 // tour o deixa inacessível atrás do overlay, e cliques no tour (overlay custom,
 // fora das layers Radix) contam como "fora" do dialog e o fechariam.
 const isTourPendingOrActive = (): boolean => {
+  // Marca por usuário no servidor (User.configs.tourDone): tour já dispensado em
+  // outro aparelho não é "pendente" mesmo com localStorage limpo.
+  if (useAuthStore.getState().user?.configs?.tourDone) {
+    return useUIStore.getState().tourActive;
+  }
   try {
     if (localStorage.getItem(TOUR_KEY) !== "done") return true;
   } catch { /* empty */ }
@@ -2116,6 +2210,8 @@ export function Header() {
   const tCommon = useTranslations("common");
   // Chaves de preview de mídia vivem no namespace do atendimento
   const tAtd = useTranslations("atendimentoChatExtra");
+  // "Você não tem acesso a este atendimento" — mesma mensagem do guard de acesso da tela
+  const tAtdChat = useTranslations("atendimentoChat");
   const router = useRouter();
   const { user, supervisorAdmin, getConfigValue, tenantConfigsLoaded } = useAuthStore();
   // Seletor escopado (ação = referência estável): evita re-render do header inteiro
@@ -2146,7 +2242,7 @@ export function Header() {
   const supportUsers = useSupportChatStore((s) => s.supportUsers);
   const setActiveConversation = useSupportChatStore((s) => s.setActiveConversation);
 
-  // Regras de negócio — controles de visibilidade por perfil/tenant (espelho do Vue)
+ // Regras de negócio — controles de visibilidade por perfil/tenant (espelho do front legado)
   const isAdmin = user?.profile === "admin";
   // supervisorViewDept é config POR USUÁRIO (string 'enabled') e só vale para o perfil 'super':
   // supervisor restrito enxerga apenas os tickets das próprias filas. A /atendimento já manda
@@ -2155,7 +2251,7 @@ export function Header() {
   const supervisorViewDept = user?.profile === "super" && user?.configs?.supervisorViewDept === "enabled";
   const isRestrictedUser = user?.restrictedUser === true || user?.restrictedUser === "enabled";
   const blockWavoip = user?.blockWavoip === true;
-  // SIP: igual ao Vue: userProfile !== 'superadmin' && usuario.sipEnabled
+ // SIP: igual ao front legado: userProfile !== 'superadmin' && usuario.sipEnabled
   const sipEnabled = !!user?.sipEnabled;
   // Gate único do WaVoIP (plano + interruptor do tenant). Curto-circuita também o
   // fetchWhatsapps abaixo: com o recurso desligado não há motivo para varrer as
@@ -2178,10 +2274,10 @@ export function Header() {
   // WaVoIP: só mostra se o tenant tem o recurso ligado, ao menos um canal tiver
   // wavoipToken E o usuário não estiver bloqueado
   const showWavoipBtn = wavoipEnabled && !isSuperAdmin && hasWavoipToken && (isAdmin || !blockWavoip);
-  // SIP: igual ao Vue: userProfile !== 'superadmin' && usuario.sipEnabled
+ // SIP: igual ao front legado: userProfile !== 'superadmin' && usuario.sipEnabled
   const showSipBtn = !isSuperAdmin && sipEnabled;
 
-  // Toggle do widget nativo WaVoIP (igual ao Vue: toggleWavoipWidget)
+ // Toggle do widget nativo WaVoIP (igual ao front legado: toggleWavoipWidget)
   const toggleWavoipWidget = () => {
     const current = localStorage.getItem("wavoipWidgetVisible") !== "false";
     const next = !current;
@@ -2231,6 +2327,8 @@ export function Header() {
     if (tourActive) return; // tour na tela — aguarda fechar
     let tourPending = false;
     try { tourPending = localStorage.getItem(TOUR_KEY) !== "done"; } catch { /* empty */ }
+    // Marca do servidor vale como "visto" mesmo com localStorage limpo (aparelho novo).
+    if (useAuthStore.getState().user?.configs?.tourDone) tourPending = false;
     if (!tourPending) {
       // Tour concluído/pulado — abrir agora.
       setSystemDetailItem(pendingSystemNotif);
@@ -2255,14 +2353,14 @@ export function Header() {
   const [isOnline, setIsOnline] = useState(true);
 
   const { activities, addActivity } = useActivityStore();
-  // Convites: tickets compartilhados com o usuário (Vue MainLayout.vue:1292-1300 / carregarConvitesTickets)
+ // Convites: tickets compartilhados com o usuário (Front legado / carregarConvitesTickets)
   const [convitesCount, setConvitesCount] = useState(0);
   const [convitesOpen, setConvitesOpen] = useState(false);
   const [convitesList, setConvitesList] = useState<{ id: number; ticketId?: number; ticket?: { id?: number; contact?: { name?: string } }; contact?: { name?: string } }[]>([]);
   const [loadingConvites, setLoadingConvites] = useState(false);
-  // Tutoriais: só exibe o botão se houver tutoriais ativos (Vue MainLayout.vue:236)
+ // Tutoriais: só exibe o botão se houver tutoriais ativos
   const [hasActiveTutorials, setHasActiveTutorials] = useState(false);
-  // Flag de sessão: auto-open do modal de mensagens internas só uma vez (Vue: modalMensagensAutoAberto)
+ // Flag de sessão: auto-open do modal de mensagens internas só uma vez (front legado: modalMensagensAutoAberto)
   const autoOpenedSystemNotifRef = useRef(false);
 
   // Online/offline status tracking
@@ -2302,7 +2400,7 @@ export function Header() {
   // Superadmin não tem sino (gate !isSuperAdmin no popover) → força 0.
   useTabNotificationBadge(totalBadge, isSuperAdmin);
 
-  // Carregar notificações internas (API) e tickets (atendimentos) ao montar — igual ao Vue
+ // Carregar notificações internas (API) e tickets (atendimentos) ao montar — igual ao front legado
   useEffect(() => {
     if (!user?.userId) return;
 
@@ -2310,7 +2408,7 @@ export function Header() {
       .then((res) => {
         const data = res.data as InternalNotification[] | { notifications?: InternalNotification[] };
         const all = Array.isArray(data) ? data : (data as { notifications?: InternalNotification[] })?.notifications ?? [];
-        // Filter to only this user's notifications (matching Vue behavior)
+ // Filter to only this user's notifications (matching legacy behavior)
         const list = all.filter((n) => !n.userId || n.userId === user.userId);
         const mapped = list.map((n) => ({
           id: n.id,
@@ -2325,7 +2423,7 @@ export function Header() {
         setInternalNotifications(mapped);
 
         // Auto-open da notificação interna não-lida mais recente, uma única vez por mount.
-        // Espelha o comportamento do Vue MainLayout.vue: hasUnreadMessages && !modalMensagensAutoAberto
+ // Espelha o comportamento do front legado (MainLayout): hasUnreadMessages && !modalMensagensAutoAberto
         // && userProfile !== 'superadmin'. Filtra notificações sem ticketId/internalContactId/groupId,
         // que são as "mensagens internas de sistema" exibidas no sino.
         if (!autoOpenedSystemNotifRef.current && user?.profile !== "superadmin") {
@@ -2344,7 +2442,7 @@ export function Header() {
       })
       .catch(() => {});
 
-    // Contagem de mensagens não lidas no chat interno (igual Vue: Number(data?.count) + Number(data?.count?.count))
+ // Contagem de mensagens não lidas no chat interno (igual front legado: Number(data?.count) + Number(data?.count?.count))
     Promise.all([fetchUnreadCounts(), fetchUnreadGroupCounts()])
       .then(([privateRes, groupRes]) => {
         const privateCount = Number((privateRes.data as { count?: number })?.count) || 0;
@@ -2354,7 +2452,7 @@ export function Header() {
       })
       .catch(() => {});
 
-    // Convites: tickets compartilhados com o usuário (Vue MainLayout.vue:1292-1298 / carregarConvitesTickets)
+ // Convites: tickets compartilhados com o usuário (Front legado / carregarConvitesTickets)
     fetchTicketSharedByUser()
       .then((res) => {
         const list = Array.isArray(res.data) ? res.data : [];
@@ -2373,7 +2471,7 @@ export function Header() {
       })
       .catch(() => {});
 
-    // Tutoriais: verifica se há tutoriais ativos para exibir o botão (Vue MainLayout.vue:236 / buscarTutoriaisAtivos)
+ // Tutoriais: verifica se há tutoriais ativos para exibir o botão (Front legado / buscarTutoriaisAtivos)
     if (user.profile !== "superadmin") {
       fetchTutorials({ pageNumber: 1, pageSize: 999 })
         .then(({ data }) => {
@@ -2450,6 +2548,9 @@ export function Header() {
           createdAt: tk.updatedAt ?? new Date().toISOString(),
           ticketId: tk.id,
           ticketIsGroup: !!tk.isGroup,
+          // Retrato de visibilidade: deixa a entrada ser revogada quando o atendimento muda de
+          // dono/fila depois (ver lib/ticket-notification-visibility.ts).
+          visibility: pickTicketVisibilityPatch(tk),
         }));
 
         // MERGE em vez de substituição: este effect pode rodar mais de uma vez (deps
@@ -2482,6 +2583,17 @@ export function Header() {
       })
       .catch(() => {});
   }, [user?.userId, user?.profile, tenantConfigsLoaded, supervisorAdmin, supervisorViewDept, setNotifications]);
+
+  // Revalida as entradas de atendimento do sino com a MESMA regra que as criou: ao abrir o sino e
+  // sempre que muda o que decide a visibilidade (filas/canais do usuário — renovados a cada 30 s —
+  // e a opção de não ver atendimentos de outros). O evento de socket já revoga na hora; isto cobre
+  // o evento perdido em queda de conexão e a opção ligada com a aba aberta. Só mexe no store
+  // quando alguma entrada de fato sai.
+  const notViewAssignedForSweep = getConfigValue("NotViewAssignedTickets");
+  useEffect(() => {
+    if (!user?.userId || !tenantConfigsLoaded) return;
+    sweepTicketNotifications();
+  }, [notificationsOpen, user?.userId, user?.queues, user?.whatsappAllowed, tenantConfigsLoaded, notViewAssignedForSweep]);
 
   const refreshChatUnreadCount = useCallback(() => {
     Promise.all([fetchUnreadCounts(), fetchUnreadGroupCounts()])
@@ -2564,6 +2676,7 @@ export function Header() {
           createdAt: tk.updatedAt ?? new Date().toISOString(),
           ticketId: tk.id,
           ticketIsGroup: !!tk.isGroup,
+          visibility: pickTicketVisibilityPatch(tk),
         }));
       if (newOnes.length > 0) setNotifications([...notifications, ...newOnes]);
       setMessagesPage(nextPage);
@@ -2581,6 +2694,15 @@ export function Header() {
     internalIsGroup?: boolean;
     internalGroupId?: number;
   }) => {
+    if (n.ticketId) {
+      // Revalida no clique: entrada de atendimento que o usuário deixou de poder ver (aceito ou
+      // transferido para outro atendente depois do aviso) sai do sino e não navega. Sem dado
+      // local para decidir o clique segue — o guard do backend responde "sem acesso" ao abrir.
+      if (revokeTicketNotificationOnClick(n.ticketId)) {
+        toast.error(tAtdChat("noTicketAccess"));
+        return;
+      }
+    }
     if (!n.read) markAsRead(n.id);
     if (n.ticketId) {
       const tab = n.ticketIsGroup ? "groups" : "private";
@@ -3242,6 +3364,16 @@ export function Header() {
                                               {t("internalMessages.viaChatbot")}
                                             </span>
                                           )}
+                                          {n.source === "ai_credits" && (
+                                            <span className="inline-flex items-center rounded bg-amber-500/15 px-1 py-px text-[9px] font-semibold uppercase tracking-wide text-amber-600 dark:text-amber-400">
+                                              {t("internalMessages.viaAiCredits")}
+                                            </span>
+                                          )}
+                                          {n.source === "ai_platform" && (
+                                            <span className="inline-flex items-center rounded bg-sky-500/15 px-1 py-px text-[9px] font-semibold uppercase tracking-wide text-sky-600 dark:text-sky-400">
+                                              {t("internalMessages.viaAiPlatform")}
+                                            </span>
+                                          )}
                                           {n.createdAt && (
                                             <span className="text-[10px] text-muted-foreground">
                                               {new Date(n.createdAt).toLocaleString("pt-BR")}
@@ -3745,6 +3877,16 @@ export function Header() {
               {systemDetailItem?.source === "chatflow" && (
                 <span className="inline-flex items-center rounded bg-violet-500/15 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-violet-500">
                   {t("internalMessages.viaChatbot")}
+                </span>
+              )}
+              {systemDetailItem?.source === "ai_credits" && (
+                <span className="inline-flex items-center rounded bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-600 dark:text-amber-400">
+                  {t("internalMessages.viaAiCredits")}
+                </span>
+              )}
+              {systemDetailItem?.source === "ai_platform" && (
+                <span className="inline-flex items-center rounded bg-sky-500/15 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-sky-600 dark:text-sky-400">
+                  {t("internalMessages.viaAiPlatform")}
                 </span>
               )}
             </DialogTitle>

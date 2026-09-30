@@ -34,7 +34,7 @@ import { cn, getInitials } from "@/lib/utils";
 import { linkifyParts } from "@/lib/linkify";
 import { ProfilePicPreviewDialog, type ProfilePicPreview } from "@/components/shared/profile-pic-preview-dialog";
 import { useAuthStore } from "@/stores/auth-store";
-import { useChatStore, type PrivateMessage, type ChatUser, type ChatGroup } from "@/stores/chat-store";
+import { useChatStore, getPrivateMessageTime, type PrivateMessage, type ChatUser, type ChatGroup } from "@/stores/chat-store";
 import {
   fetchPrivateMessages, sendPrivateMessage, markAsRead,
   deletePrivateMessage, editPrivateMessage, addReaction,
@@ -922,9 +922,8 @@ export default function ChatPrivadoPage() {
     : [];
 
   const formatTime = (msg: PrivateMessage) => {
-    let ts = msg.timestamp || (msg.createdAt ? new Date(msg.createdAt).getTime() : 0);
+    const ts = getPrivateMessageTime(msg);
     if (!ts) return "";
-    if (typeof ts === "string") { const p = Number(ts); ts = isNaN(p) ? new Date(ts).getTime() : p; }
     const d = new Date(ts);
     if (isNaN(d.getTime())) return "";
     const timeStr = formatTimeIntl(d, { hour: "2-digit", minute: "2-digit" });

@@ -6,13 +6,23 @@ import { useTranslations } from "next-intl";
 import { Card, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import {
   Users, Tag, MapPin, LayoutGrid, Briefcase, FileText, UserCheck, PauseCircle,
-  CalendarClock,
+  CalendarClock, Handshake, ListChecks, TrendingUp, Target, type LucideIcon,
 } from "lucide-react";
 import { usePageAccess } from "@/hooks/use-page-access";
 import { AccessDenied } from "@/components/layout/access-denied";
 import { PageHeader } from "@/components/layout/page-header";
+import { useAuthStore } from "@/stores/auth-store";
 
-const reportItems = [
+interface ReportItem {
+  titleKey: string;
+  descriptionKey: string;
+  href: string;
+  icon: LucideIcon;
+  /** Recursos do plano exigidos (todos). Sem a lista, o item aparece sempre. */
+  features?: string[];
+}
+
+const reportItems: ReportItem[] = [
   {
     titleKey: "reportContatos",
     descriptionKey: "reportContatosDesc",
@@ -67,11 +77,41 @@ const reportItems = [
     href: "/relatorios/produtividade-diaria",
     icon: CalendarClock,
   },
+  {
+    titleKey: "reportRelacionamentoTipo",
+    descriptionKey: "reportRelacionamentoTipoDesc",
+    href: "/relatorios/relacionamento-por-tipo",
+    icon: Handshake,
+    features: ["relationship"],
+  },
+  {
+    titleKey: "reportTarefasAtendente",
+    descriptionKey: "reportTarefasAtendenteDesc",
+    href: "/relatorios/tarefas-por-atendente",
+    icon: ListChecks,
+    features: ["tasks"],
+  },
+  {
+    titleKey: "reportFunilAtendente",
+    descriptionKey: "reportFunilAtendenteDesc",
+    href: "/relatorios/funil-por-atendente",
+    icon: TrendingUp,
+    features: ["funnelKanban"],
+  },
+  {
+    titleKey: "reportAcoesAteVenda",
+    descriptionKey: "reportAcoesAteVendaDesc",
+    href: "/relatorios/acoes-ate-venda",
+    icon: Target,
+    features: ["relationship", "funnelKanban"],
+  },
 ];
 
 export default function RelatoriosPage() {
   const t = useTranslations("relatoriosPage");
   const allowed = usePageAccess("relatorios", { adminSuperOnly: true });
+  // Assinatura do store inteiro: a grade reage quando o plano chega depois do boot.
+  const { hasFeature } = useAuthStore();
   if (!allowed) return <AccessDenied />;
   return (
     <div className="space-y-6">
@@ -83,7 +123,8 @@ export default function RelatoriosPage() {
       ],
     }} />
     <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-      {[...reportItems]
+      {reportItems
+        .filter((report) => !report.features || report.features.every((f) => hasFeature(f)))
         .sort((a, b) => t(a.titleKey).localeCompare(t(b.titleKey), undefined, { sensitivity: "base" }))
         .map((report) => {
         const Icon = report.icon;

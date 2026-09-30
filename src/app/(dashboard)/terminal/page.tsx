@@ -35,9 +35,15 @@ export default function TerminalPage() {
       const res = await api.post("/command", { command: cmd });
       setHistory((h) => [...h, { command: cmd, output: res.data.output ?? res.data.message ?? "" }]);
     } catch (err: unknown) {
+      const failure = err as {
+        data?: { error?: string };
+        response?: { data?: { error?: string } };
+      };
+      const code = failure?.data?.error ?? failure?.response?.data?.error;
       const msg =
-        (err as { response?: { data?: { error?: string } } })?.response?.data?.error ??
-        "Erro ao executar comando.";
+        code === "ERR_TERMINAL_DISABLED"
+          ? t("disabledByServer")
+          : code ?? "Erro ao executar comando.";
       setHistory((h) => [...h, { command: cmd, output: msg, error: true }]);
     } finally {
       setLoading(false);

@@ -1,9 +1,9 @@
 "use client";
 
 /**
- * WaVoIPInitializer — espelho do webphone_novo.js (Vue frontend).
+ * WaVoIPInitializer — espelho do webphone_novo.js (front legado).
  *
- * Regras de visibilidade (igual ao Vue):
+ * Regras de visibilidade (igual ao front legado):
  *  - superadmin → nunca inicializa
  *  - admin      → sempre inicializa (ignora blockWavoip)
  *  - user/super → inicializa somente se !usuario.blockWavoip
@@ -108,7 +108,7 @@ export function WaVoIPInitializer() {
   const initializedRef = useRef(false);
 
   useEffect(() => {
-    // superadmin nunca usa WaVoIP (igual ao Vue)
+ // superadmin nunca usa WaVoIP (igual ao front legado)
     if (user?.profile === "superadmin") return;
 
     // Gate do tenant (plano + Tenant.wavoipEnabled) — antes de qualquer outra coisa,
@@ -121,7 +121,7 @@ export function WaVoIPInitializer() {
 
     if (initializedRef.current) return;
 
-    // Busca sessões do WhatsApp para obter tokens WaVoIP (igual ao Vue: watchEffect sobre inboxes)
+ // Busca sessões do WhatsApp para obter tokens WaVoIP (igual ao front legado: watchEffect sobre inboxes)
     const initWithSessions = async () => {
       if (initializedRef.current) return;
 
@@ -150,7 +150,7 @@ export function WaVoIPInitializer() {
       const tokenMap: Record<string, string> = {};
       sessionTokens.forEach((t) => { tokenMap[t.token] = t.inboxName; });
 
-      // Renderiza widget nativo com botão flutuante (igual ao Vue: startWavoip)
+ // Renderiza widget nativo com botão flutuante (igual ao front legado: startWavoip)
       const wavoipapi = await window.wavoipWebphone?.render({
         buttonPosition: { x: window.innerWidth - 80, y: window.innerHeight - 120 },
       });
@@ -159,7 +159,7 @@ export function WaVoIPInitializer() {
         return;
       }
 
-      // Restaura visibilidade salva do botão flutuante (igual Vue: webphone_novo.js getWidgetButtonState)
+ // Restaura visibilidade salva do botão flutuante (igual front legado: webphone_novo.js getWidgetButtonState)
       const savedVisible = localStorage.getItem("wavoipWidgetVisible");
       const isVisible = savedVisible !== null ? savedVisible === "true" : true; // default: visível
       window.wavoip?.settings?.setShowWidgetButton(isVisible);
