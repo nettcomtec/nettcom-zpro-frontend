@@ -21,7 +21,7 @@ jobs:
       # Repositório no Docker Hub. Por padrão usa <seu-usuario>/zpro-frontend.
       IMAGE_NAME: nettcomdockerhub/nettcom-zpro-frontend
       # Tag "de versão" — atrele ao upstream + sufixo do seu fork.
-      VERSION_TAG: 4.0.4.4-nfc
+      VERSION_TAG: 4.0.6.0-nfc
     steps:
       - name: Checkout
         uses: actions/checkout@v4

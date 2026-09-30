@@ -5,7 +5,9 @@ WORKDIR /app
 
 # Copiar dependências
 COPY package.json package-lock.json* ./
-RUN npm install --force
+# Atualiza o npm (o 10.9.x da imagem tem bug 'edgesOut' ao resolver deps) e
+# instala sem depender de package-lock (evita lock ausente/dessincronizado).
+RUN npm install -g npm@11 && npm install --no-package-lock --force
 
 # Variáveis NEXT_PUBLIC_* precisam estar disponíveis no BUILD (baked into bundle).
 # Defaults __ZPRO_API_URL__ e __ZPRO_INTERACTIVE_BAILEYS__ são placeholders — o
