@@ -465,6 +465,12 @@ export function ConnectionCard({ settings, onSaved }: AiPlatformCardProps) {
                 <AlertDescription>{t("byokWarning")}</AlertDescription>
               </Alert>
             )}
+            {outcome.ok && outcome.usageMissing === true && (
+              <Alert variant="warning-soft">
+                <AlertTriangle className="h-4 w-4" />
+                <AlertDescription>{t("usageMissingWarning")}</AlertDescription>
+              </Alert>
+            )}
           </div>
         )}
 

@@ -11,7 +11,10 @@ import { Header } from "@/components/layout/header";
 import { NoProfileBanner } from "@/components/layout/no-profile-banner";
 import { useSocketUserPermissions } from "@/hooks/use-socket-user-permissions";
 import { useSocketSettings } from "@/hooks/use-socket-settings";
+import { useSocketPanelApps } from "@/hooks/use-socket-panel-apps";
 import { useOfflineOnClose } from "@/hooks/use-offline-on-close";
+import { usePanelAppsStore, getVisiblePanelAppsSnapshot } from "@/stores/panel-apps-store";
+import { PANEL_APP_VIEW_ROUTE, USER_ACTIVITY_EVENT, isSafePanelAppUrl } from "@/lib/panel-apps";
 import { ErrorBoundary } from "@/components/layout/error-boundary";
 import { useUIStore } from "@/stores/ui-store";
 import { useAuthStore } from "@/stores/auth-store";
@@ -35,6 +38,11 @@ import { PrivateCallActiveModal } from "@/components/private-call/private-call-a
 import dynamic from "next/dynamic";
 import { BillingAlertBanner } from "@/components/layout/billing-alert-banner";
 import { AiCreditsBanner } from "@/components/layout/ai-credits-banner";
+import {
+  notificationSoundMuteClock,
+  shouldKeepLocalNotificationSoundMute,
+} from "@/lib/notification-sound-mute";
+import { pinnedTicketsClock, shouldKeepLocalPinnedTickets } from "@/lib/pinned-tickets";
 import { MetaRestrictionBanner } from "@/components/layout/meta-restriction-banner";
 import { MetaBannedBanner } from "@/components/layout/meta-banned-banner";
 import { MetaSendHealthBanner } from "@/components/layout/meta-send-health-banner";
@@ -45,7 +53,8 @@ import { fetchUser } from "@/services/users";
 import { getFaviconUrl } from "@/lib/branding-urls";
 import { fetchSettings, fetchPublicColors, fetchPublicColorsDark, fetchTerms } from "@/services/settings";
 import { applyBrandColors } from "@/lib/brand-colors";
-import { fetchTenantById, fetchTenantByAsaas, fetchTenantBranding, fetchTenantsAcceptTermsList } from "@/services/tenants";
+import { fetchTenantById, fetchTenantByAsaas, fetchTenantBranding, fetchTenantsAcceptTermsList, fetchPaymentsV2 } from "@/services/tenants";
+import { isTenantBillingProvisioned, isZeroValuePayment, normalizePaymentStatus } from "@/lib/tenant-billing";
 import { fetchPublicBranding, fetchSocketModelNovo } from "@/services/superadmin";
 import { useBrandingStore, type SoundTimestamps, type TenantBranding } from "@/stores/branding-store";
 import { loadAppFont, applyAvatarShape, type FontSource, type AvatarShape } from "@/lib/load-app-font";
@@ -59,12 +68,29 @@ import { safeJsonParse } from "@/lib/safe-json-parse";
 import { unlockAudioContext } from "@/lib/notification-audio";
 import { setBaseTitle } from "@/lib/tab-title";
 import { setBaseFavicon } from "@/lib/favicon-badge";
+import { regionStateFromTenant } from "@/lib/region";
+import { ensureRegionTexts } from "@/hooks/use-region";
+import { clearLanguageAuto, consumeAutoReloadGuard, hasExplicitLanguage, setLanguageAuto } from "@/lib/ui-locale";
+import { syncAuthRouteCookieWithToken } from "@/lib/auth-session";
 
 // Paleta de comandos fora do bundle inicial do layout (só carrega no client).
 const CommandPalette = dynamic(
   () => import("@/components/layout/command-palette").then((m) => m.CommandPalette),
   { ssr: false }
 );
+
+// Painel lateral da app aberta pelo contato/atendimento (aplicativos personalizados, fase 2
+// §5.7): o código só é baixado quando uma app é aberta — quem não usa não paga nada (Ag1-9).
+const PanelAppSheet = dynamic(
+  () => import("@/components/panel-apps/panel-app-sheet").then((m) => m.PanelAppSheet),
+  { ssr: false }
+);
+
+/** Monta o painel lateral só enquanto há app aberta (o layout não re-renderiza por ele). */
+function PanelAppSheetMount() {
+  const open = usePanelAppsStore((s) => s.sheet !== null);
+  return open ? <PanelAppSheet /> : null;
+}
 
 let brandingLoaded = false;
 
@@ -91,12 +117,12 @@ function applyTypographyFromPayload(p: { fontFamily?: string; fontWeights?: stri
   if (p.avatarShape) applyAvatarShape(p.avatarShape);
 }
 
-function trackRecentPage(pathname: string, pathLabels: Record<string, string>, userId: number | string) {
+function trackRecentPage(pathname: string, pathLabels: Record<string, string>, userId: number | string, labelOverride?: string) {
   if (pathname === "/" || pathname === "/home") return;
   // Perfil do contato (/contatos/<id>) não entra em "Páginas recentes": sem rótulo traduzido
   // e cada contato ocuparia uma das vagas.
   if (/^\/contatos\/[^/]+$/.test(pathname)) return;
-  const label = pathLabels[pathname] || pathname.replace(/^\//, "").replace(/-/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+  const label = labelOverride || pathLabels[pathname] || pathname.replace(/^\//, "").replace(/-/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
   const entry = { name: label, path: pathname, label };
   try {
     const key = `recentPages:${userId}`;
@@ -107,6 +133,52 @@ function trackRecentPage(pathname: string, pathLabels: Record<string, string>, u
   } catch { /* ignore */ }
 }
 
+interface BillingAlertInvoice {
+  overdue: boolean;
+  /** Dias até o vencimento (negativo = vencida), contados na data local. */
+  diffDays: number;
+  bankSlipUrl?: string;
+}
+
+// Fatura que decide o aviso do topo para a cobrança fora do Asaas legado, a partir das
+// faturas de GET /tenantsPaymentsV2: a mais atrasada (OVERDUE, ou PENDING com vencimento
+// antes de hoje — a Stripe nunca devolve OVERDUE); sem atraso, a próxima a vencer. Fatura
+// de valor zero (teste grátis) e sem vencimento ficam de fora.
+// Mercado Pago/Pagar.me (PLANO_COBRANCA_MERCADOPAGO_PAGARME D8): recusada e paga a menos
+// contam como uma pendente (atraso só com o vencimento antes de hoje); estorno e assinatura
+// cancelada no gateway contam como atraso sempre. O aviso aparece antes do bloqueio.
+const ALWAYS_OVERDUE_STATUSES = new Set(["CHARGEBACK", "SUBSCRIPTION_CANCELED"]);
+const PENDING_LIKE_STATUSES = new Set(["PENDING", "FAILED", "UNDERPAID"]);
+
+function pickBillingAlertInvoice(payments: unknown): BillingAlertInvoice | null {
+  if (!Array.isArray(payments)) return null;
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const open: BillingAlertInvoice[] = [];
+  for (const raw of payments) {
+    if (!raw || typeof raw !== "object") continue;
+    const p = raw as { status?: unknown; dueDate?: unknown; value?: number | string | null; paymentUrl?: unknown };
+    const status = normalizePaymentStatus(p.status);
+    const alwaysOverdue = status === "OVERDUE" || ALWAYS_OVERDUE_STATUSES.has(status);
+    if (!alwaysOverdue && !PENDING_LIKE_STATUSES.has(status)) continue;
+    if (isZeroValuePayment({ value: p.value })) continue;
+    if (typeof p.dueDate !== "string" || !/^\d{4}-\d{2}-\d{2}/.test(p.dueDate)) continue;
+    const due = new Date(`${p.dueDate.slice(0, 10)}T00:00:00`);
+    if (Number.isNaN(due.getTime())) continue;
+    const diffDays = Math.round((due.getTime() - today.getTime()) / 86400000);
+    // O link vai num <a href>: só http(s).
+    const bankSlipUrl =
+      typeof p.paymentUrl === "string" && /^https?:\/\//i.test(p.paymentUrl) ? p.paymentUrl : undefined;
+    open.push({ overdue: alwaysOverdue || diffDays < 0, diffDays, bankSlipUrl });
+  }
+  const byDue = (a: BillingAlertInvoice, b: BillingAlertInvoice) => a.diffDays - b.diffDays;
+  return (
+    open.filter((i) => i.overdue).sort(byDue)[0] ??
+    open.filter((i) => !i.overdue).sort(byDue)[0] ??
+    null
+  );
+}
+
 const IDLE_TIMEOUT_SECONDS = 7200; // 2 hours → reload
 const USER_REFRESH_MS = 30000;     // 30s user refresh
 const IDLE_CHECK_MS = 30000;       // check idle every 30s
@@ -115,7 +187,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   const t = useTranslations("dashboardLayout");
   const { isAuthenticated } = useAuthGuard();
   const { sidebarCollapsed } = useUIStore();
-  const { user, setConfiguracoes, injectTenantSettings, setSupervisorAdmin, setMenuVisibility, setTenantMenuVisibility, setTenantConfigsLoaded, patchUser, setPaymentOverdue, setBillingState, setBillingDaysInfo, setPlanFeatures } = useAuthStore();
+  const { user, setConfiguracoes, injectTenantSettings, setSupervisorAdmin, setMenuVisibility, setTenantMenuVisibility, setTenantConfigsLoaded, patchUser, setPaymentOverdue, setBillingState, setBillingDaysInfo, setPlanFeatures, setRegion } = useAuthStore();
   const { resolvedTheme } = useTheme();
   const pathname = usePathname();
   const { setAppName, setLogoTimestamp, setSoundTimestamps, setSocketModelOptimized, setTenantBranding, setTypography } = useBrandingStore();
@@ -125,8 +197,56 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   useSocketSupportChat();
   useSocketUserPermissions();
   useSocketSettings();
+  // Aplicativos personalizados: avisos de mudança (empresa, globais e permissões).
+  useSocketPanelApps();
   // Espelha o "ficar offline" do diálogo de logout ao fechar a última aba/janela
   useOfflineOnClose(isAuthenticated);
+
+  // ── Aplicativos personalizados: 1ª carga do menu (PLANO_APLICATIVOS_PERSONALIZADOS §5.4) ──
+  // Uma busca por sessão/dono (o store descarta resposta de outro dono). Nada no refresh
+  // de 30 s nem ao voltar a aba: o que muda depois chega pelo aviso de socket.
+  // Com a navegação bloqueada (troca de senha, termos pendentes, inadimplência) não busca:
+  // o menu está vazio e o servidor recusaria. Inadimplência ainda limpa o store para
+  // parar as novas tentativas de uma busca que tomou 402 no boot.
+  const panelAppsTenantId = user?.tenantId;
+  const panelAppsUserId = user?.userId;
+  const panelAppsProfile = user?.profile;
+  const panelAppsMustChangePassword = !!user?.mustChangePassword;
+  const panelAppsTermsPending = !!user?.resellerTermsPending && user?.profile === "admin";
+  const panelAppsPaymentBlocked = useAuthStore(
+    (s) => (s.paymentOverdue || s.billingState === "blocked") && s.user?.profile !== "superadmin"
+  );
+  const panelAppsLastProfileRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!isAuthenticated || !panelAppsTenantId || !panelAppsUserId) return;
+    if (panelAppsPaymentBlocked) {
+      usePanelAppsStore.getState().clear();
+      panelAppsLastProfileRef.current = null;
+      return;
+    }
+    if (panelAppsMustChangePassword || panelAppsTermsPending) return;
+    const ownerProfileKey = `${panelAppsTenantId}:${panelAppsUserId}:${panelAppsProfile || ""}`;
+    const previous = panelAppsLastProfileRef.current;
+    // Mesmo dono com outro perfil (promovido/rebaixado): a lista muda, refaz na hora.
+    const profileChanged =
+      !!previous &&
+      previous !== ownerProfileKey &&
+      previous.startsWith(`${panelAppsTenantId}:${panelAppsUserId}:`);
+    panelAppsLastProfileRef.current = ownerProfileKey;
+    void usePanelAppsStore.getState().fetch(profileChanged ? { force: true } : undefined);
+  }, [isAuthenticated, panelAppsTenantId, panelAppsUserId, panelAppsProfile, panelAppsMustChangePassword, panelAppsTermsPending, panelAppsPaymentBlocked]);
+
+  // Cookie que o middleware confere ao abrir telas: alinhado à emissão do token na
+  // abertura do painel (a sessão aberta antes desta versão tinha cookie de 24 h).
+  useEffect(() => {
+    if (!isAuthenticated) return;
+    try {
+      const raw = localStorage.getItem("token");
+      syncAuthRouteCookieWithToken(raw ? (JSON.parse(raw) as string) : null);
+    } catch {
+      /* token ilegível: o cookie fica como está */
+    }
+  }, [isAuthenticated]);
 
   const [showAcceptTermsModal, setShowAcceptTermsModal] = useState(false);
 
@@ -145,12 +265,34 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
     "/campanhas": t("paths.campanhas"),
     "/chatbots": t("paths.chatbots"),
     "/integracoes": t("paths.integracoes"),
+    "/aplicativos": t("paths.aplicativos"),
+    "/aplicativos-globais": t("paths.aplicativosGlobais"),
+    "/formularios": t("paths.formularios"),
   }), [t]);
+  // App embutida (/ferramentas/<id>) entra nos Recentes com o NOME da app (D20). Antes
+  // da lista carregar não grava (senão ficaria "Ferramentas/12"); grava quando o status
+  // vira "ready" (Ag2-B4). App que o usuário não vê (ou "nova aba") não entra.
+  // Seletor só "acorda" o layout em /ferramentas/<id> (nas demais rotas devolve sempre null).
+  const isPanelAppPath = !!pathname && PANEL_APP_VIEW_ROUTE.test(pathname);
+  const panelAppsRecentTrigger = usePanelAppsStore((s) => (isPanelAppPath ? s.status : null));
   useEffect(() => {
     if (isAuthenticated && pathname && user?.userId) {
+      if (PANEL_APP_VIEW_ROUTE.test(pathname)) {
+        const { apps, status } = getVisiblePanelAppsSnapshot();
+        if (status !== "ready") return;
+        const appId = Number(pathname.slice(pathname.lastIndexOf("/") + 1));
+        const app = apps.find(
+          (a) => a.id === appId && a.openMode === "embed" && isSafePanelAppUrl(a.url, a.openMode)
+        );
+        const appName = typeof app?.name === "string" ? app.name.trim() : "";
+        if (!appName) return;
+        trackRecentPage(pathname, pathLabels, user.userId, appName);
+        return;
+      }
       trackRecentPage(pathname, pathLabels, user.userId);
     }
-  }, [pathname, isAuthenticated, pathLabels]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pathname, isAuthenticated, pathLabels, panelAppsRecentTrigger]);
 
   // Re-aplica o nome customizado do tenant após cada navegação client-side.
   // O Next.js App Router reaplica o título do generateMetadata (global) em cada troca de rota,
@@ -162,6 +304,10 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   }, [pathname]);
 
   const idleSecondsRef = useRef(0);
+  // Empresa cujas faturas já foram consultadas para o aviso de vencimento/atraso dos
+  // gateways fora do Asaas legado: uma consulta por boot do painel, mesmo que o efeito
+  // do tenant rode de novo.
+  const billingAlertFetchedForRef = useRef<number | null>(null);
   const idleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const userTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Guarda as cores carregadas para reaplicar quando o tema mudar
@@ -491,6 +637,9 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
           crossChannelTicketCheck: (tenantData?.crossChannelTicketCheck as string) || "disabled",
           // Notificar so atendimento humano: suprime som/popup enquanto o ticket esta no chatbot
           notifyOnlyHumanTickets: (tenantData?.notifyOnlyHumanTickets as string) || "disabled",
+          // Escala da pesquisa de satisfação (0..N): os hooks de socket reconhecem a nota
+          // do cliente num atendimento fechado e não a notificam (lib/evaluation-score).
+          ratingMaxScore: String(tenantData?.ratingMaxScore ?? 5),
           // Reabrir toma posse: define para quem vai o ticket ao reabrir um fechado.
           // Lido no aviso de confirmacao da reabertura (lib/reopen-notices).
           reopenTicketAssignsToActor: (tenantData?.reopenTicketAssignsToActor as string) || "disabled",
@@ -522,6 +671,37 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
             tenantData?.aiCreditsLowBalanceCents != null ? String(tenantData.aiCreditsLowBalanceCents) : "",
         });
         setTenantConfigsLoaded(true);
+
+        // Região da empresa (país, moeda, idioma dos textos ao cliente), já calculada
+        // no GET /tenants/:id — nenhum request novo no boot. Backend antigo (sem
+        // regionEffective) = null e o use-region cai em BR/BRL/pt. Opcional: falha
+        // aqui nunca derruba o resto do boot.
+        try {
+          const region = regionStateFromTenant(tenantData);
+          setRegion(region);
+          if (region?.languageConfigured) {
+            // Textos ao cliente montados na tela: segundo plano, fora do caminho crítico.
+            void ensureRegionTexts();
+            // P3: sem escolha explícita, a tela segue o idioma da empresa (1 recarga por aba).
+            if (
+              !hasExplicitLanguage() &&
+              setLanguageAuto(region.language) &&
+              consumeAutoReloadGuard(`panel:${region.language}`)
+            ) {
+              window.location.reload();
+            }
+          } else if (
+            region?.supported &&
+            !hasExplicitLanguage() &&
+            clearLanguageAuto() &&
+            consumeAutoReloadGuard("panel:pt")
+          ) {
+            // Empresa sem idioma: a dica deixada por outra conta neste navegador não vale.
+            window.location.reload();
+          }
+        } catch {
+          /* segue sem Região */
+        }
 
  // Front legado/1784 — ticketsRain, forceReason, postmanLink no localStorage
         localStorage.setItem("ticketsRain", JSON.stringify(tenantData?.ticketsRain ?? null));
@@ -569,7 +749,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
 
         // Enriquecimento visual (daysOverdue / daysUntilBlock / boleto) — usa dados
         // do gateway ativo. Para Asaas usamos o endpoint legado fetchTenantByAsaas;
-        // para os demais gateways confiamos apenas em backendPaymentStatus acima.
+        // os demais gateways passam pelo bloco seguinte (faturas da rota V2).
         if (tenantData?.asaas === "enabled" && user?.tenantId && (tenantData?.paymentGateway ?? "asaas") === "asaas") {
           try {
             const asaasRes = await fetchTenantByAsaas(user.tenantId);
@@ -617,9 +797,74 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
             }
           } catch { /* silenciar */ }
         }
+
+        // Demais casos de cobrança (Stripe, Pagar.me, Mercado Pago, ou Asaas fora do modo
+        // legado acima): os mesmos estados do aviso, a partir das faturas da rota V2 (que
+        // já resolve o gateway efetivo). Consulta só para quem vê pagamentos, em empresa com
+        // cobrança provisionada e com aviso prévio configurado ou já em atraso — uma vez por
+        // boot do painel. Mesma máquina de estados do ramo do Asaas.
+        const isAsaasLegacyBilling =
+          tenantData?.asaas === "enabled" && (tenantData?.paymentGateway ?? "asaas") === "asaas";
+        const tenantAlertDaysBefore = Number(tenantData?.billingAlertDaysBefore ?? 0);
+        if (
+          !isAsaasLegacyBilling &&
+          user?.tenantId &&
+          billingAlertFetchedForRef.current !== user.tenantId &&
+          isTenantBillingProvisioned(tenantData) &&
+          // Lido do store já com as configs da empresa injetadas acima (hidePaymentsFromUsers).
+          useAuthStore.getState().canViewPayments() &&
+          (tenantAlertDaysBefore > 0 || backendPaymentStatus === "overdue")
+        ) {
+          billingAlertFetchedForRef.current = user.tenantId;
+          try {
+            const { data: paymentsRes } = await fetchPaymentsV2();
+            const body = (paymentsRes && typeof paymentsRes === "object" ? paymentsRes : {}) as {
+              payments?: unknown;
+              billingAlertDaysBefore?: unknown;
+              billingBlockDaysAfter?: unknown;
+            };
+            const alertDaysBefore = Number(body.billingAlertDaysBefore ?? tenantData?.billingAlertDaysBefore ?? 0) || 0;
+            const blockDaysAfter = Number(body.billingBlockDaysAfter ?? tenantData?.billingBlockDaysAfter ?? 0) || 0;
+            const invoice = pickBillingAlertInvoice(body.payments);
+
+            if (invoice) {
+              const { diffDays, bankSlipUrl } = invoice;
+
+              // Bloqueada com fatura ainda não vencida (gate do 1º pagamento): expõe o link.
+              if (backendPaymentStatus === "blocked" && !invoice.overdue) {
+                setBillingDaysInfo({ daysOverdue: 0, bankSlipUrl });
+              }
+
+              if (invoice.overdue) {
+                const daysOverdue = Math.max(0, -diffDays);
+                if (backendPaymentStatus === "blocked") {
+                  setBillingDaysInfo({ daysOverdue, bankSlipUrl });
+                } else if (daysOverdue === 0) {
+                  setBillingState('due_today');
+                  setBillingDaysInfo({ daysOverdue: 0, bankSlipUrl });
+                } else {
+                  const daysUntilBlock = blockDaysAfter > 0 ? Math.max(0, blockDaysAfter - daysOverdue) : undefined;
+                  setBillingState('overdue_warning');
+                  setBillingDaysInfo({ daysOverdue, daysUntilBlock, bankSlipUrl });
+                }
+              } else if (backendPaymentStatus !== "blocked") {
+                if (diffDays === 0 && (alertDaysBefore > 0 || backendPaymentStatus === "overdue")) {
+                  // O servidor já conta a fatura do dia como atrasada a partir da meia-noite
+                  // UTC: com a empresa "em atraso", a fatura que vence hoje aparece mesmo sem
+                  // aviso prévio configurado.
+                  setBillingState('due_today');
+                  setBillingDaysInfo({ daysBeforeDue: 0, bankSlipUrl });
+                } else if (alertDaysBefore > 0 && diffDays > 0 && diffDays <= alertDaysBefore) {
+                  setBillingState('approaching');
+                  setBillingDaysInfo({ daysBeforeDue: diffDays, bankSlipUrl });
+                }
+              }
+            }
+          } catch { /* silenciar: o aviso é só visual; o bloqueio vem do servidor */ }
+        }
       })
       .catch(() => {});
-  }, [isAuthenticated, user?.tenantId, user?.profile, setSupervisorAdmin, setMenuVisibility, setTenantMenuVisibility, injectTenantSettings, setTenantConfigsLoaded, setPaymentOverdue, setBillingState, setBillingDaysInfo, setPlanFeatures]);
+  }, [isAuthenticated, user?.tenantId, user?.profile, setSupervisorAdmin, setMenuVisibility, setTenantMenuVisibility, injectTenantSettings, setTenantConfigsLoaded, setPaymentOverdue, setBillingState, setBillingDaysInfo, setPlanFeatures, setRegion]);
 
   // ── LGPD terms check ───────────────────────────────────────────────────
   // Superadmin: abre modal se QUALQUER tenant ainda nao aceitou (gate de plataforma).
@@ -668,6 +913,9 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
     if (!currentUser?.userId) return;
     const profile = currentUser.profile;
     try {
+      // Início da leitura: gravação do som terminada depois dele pode não estar nesta resposta.
+      const soundMuteReadStartedAt = notificationSoundMuteClock();
+      const pinnedReadStartedAt = pinnedTicketsClock();
       const { data } = await fetchUser(currentUser.userId);
       if (data && typeof data === "object") {
         const userData = data as Record<string, unknown>;
@@ -701,6 +949,12 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
         const sipPassword = userData.sipPassword as string | undefined;
         const sipPort = userData.sipPort as number | undefined;
         const sipTransport = userData.sipTransport as "ws" | "wss" | undefined;
+        // Ausente (backend antigo, coluna sem migration ou leitura que falhou) = mantém o
+        // valor que já estava; sem nenhum, o WebPhone usa o padrão.
+        const sipKeepAliveInterval =
+          "sipKeepAliveInterval" in userData
+            ? ((userData.sipKeepAliveInterval as number | null | undefined) ?? null)
+            : (currentUser.sipConfig?.keepAliveInterval ?? null);
         const sipConfig =
           sipEnabled && sipServer && sipUsername && sipPassword
             ? {
@@ -710,6 +964,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
                 username: sipUsername,
                 password: sipPassword,
                 transport: sipTransport ?? "wss",
+                keepAliveInterval: sipKeepAliveInterval,
               }
             : currentUser.sipConfig;
         const phone = userData.phone as string | undefined;
@@ -762,21 +1017,36 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
             : undefined; // resposta parcial/null não apaga o que já existe
         const localConfigs = currentUser.configs;
         // patchUser faz merge RASO: passar `configs` substitui o objeto inteiro.
-        // `pinnedTickets` e `dashboardLayout` entram no store de forma OTIMISTA
-        // (setPinnedTickets/setDashboardLayout ANTES do PUT /users/:id/configs
-        // responder), então um refresh caindo nessa janela desfaria o clique do
-        // usuário — para esses dois o valor local vence. `filtrosAtendimento` nunca é
-        // escrito no store (o /atendimento lê do localStorage) e `isDark` não tem
+        // `dashboardLayout` entra no store de forma OTIMISTA (setDashboardLayout ANTES
+        // do PUT /users/:id/configs responder), então um refresh caindo nessa janela
+        // desfaria o clique do usuário — para ele o valor local vence. `filtrosAtendimento`
+        // nunca é escrito no store (o /atendimento lê do localStorage) e `isDark` não tem
         // escritor no front Next: neles o valor do servidor é o melhor disponível.
         const mergedConfigs = freshConfigs
           ? {
               ...freshConfigs,
-              ...(localConfigs?.pinnedTickets !== undefined
-                ? { pinnedTickets: localConfigs.pinnedTickets }
-                : {}),
+              // Fixados: o valor local (lido AGORA do store) só vence quando esta leitura
+              // pode ser anterior a uma gravação (lib/pinned-tickets.ts). Fora disso vale o
+              // do servidor, para o que foi fixado em outro aparelho chegar aqui em até 30 s.
+              ...(() => {
+                const currentPinned = useAuthStore.getState().user?.configs?.pinnedTickets;
+                return shouldKeepLocalPinnedTickets(pinnedReadStartedAt) && currentPinned !== undefined
+                  ? { pinnedTickets: currentPinned }
+                  : {};
+              })(),
               ...(localConfigs?.dashboardLayout !== undefined
                 ? { dashboardLayout: localConfigs.dashboardLayout }
                 : {}),
+              // Som das notificações: o valor local (lido AGORA do store; `localConfigs` é de
+              // antes do GET) só vence quando esta leitura pode ser anterior a uma gravação
+              // (lib/notification-sound-mute.ts). Fora disso vale o do servidor, para a
+              // escolha feita em outro aparelho chegar aqui em até 30 s.
+              ...(() => {
+                const currentMute = useAuthStore.getState().user?.configs?.notificationSoundMute;
+                return shouldKeepLocalNotificationSoundMute(soundMuteReadStartedAt) && currentMute !== undefined
+                  ? { notificationSoundMute: currentMute }
+                  : {};
+              })(),
             }
           : undefined;
         // Mesmo cuidado do whatsappAllowed/queues acima: patch SOMENTE quando muda.
@@ -788,7 +1058,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
             ? mergedConfigs
             : undefined;
         patchUser({
-          sipEnabled, sipServer, sipDomain, sipUsername, sipPassword, sipPort, sipTransport, sipConfig, phone,
+          sipEnabled, sipServer, sipDomain, sipUsername, sipPassword, sipPort, sipTransport, sipKeepAliveInterval, sipConfig, phone,
           ...(nextMenuPermissions ? { menuPermissions: nextMenuPermissions } : {}),
           ...(nextWhatsappAllowed ? { whatsappAllowed: nextWhatsappAllowed } : {}),
           ...(nextQueues ? { queues: nextQueues } : {}),
@@ -802,7 +1072,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
         try {
           const local = safeJsonParse(localStorage.getItem("usuario"), {} as Record<string, unknown>);
           localStorage.setItem("usuario", JSON.stringify({
-            ...local, sipEnabled, sipServer, sipDomain, sipUsername, sipPassword, sipPort, sipTransport, sipConfig,
+            ...local, sipEnabled, sipServer, sipDomain, sipUsername, sipPassword, sipPort, sipTransport, sipKeepAliveInterval, sipConfig,
             ...(nextWhatsappAllowed ? { whatsappAllowed: nextWhatsappAllowed } : {}),
             ...(nextQueues ? { queues: nextQueues } : {}),
           }));
@@ -876,6 +1146,9 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
     document.addEventListener("click", resetIdle);
     document.addEventListener("mousemove", resetIdle);
     document.addEventListener("keypress", resetIdle);
+    // D16: uso dentro de app embutida (iframe de outro site) não sobe click/teclado;
+    // o visualizador avisa por este evento enquanto a aba está visível e o foco no iframe.
+    document.addEventListener(USER_ACTIVITY_EVENT, resetIdle);
 
     idleTimerRef.current = setTimeout(checkIdle, IDLE_CHECK_MS);
 
@@ -883,6 +1156,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
       document.removeEventListener("click", resetIdle);
       document.removeEventListener("mousemove", resetIdle);
       document.removeEventListener("keypress", resetIdle);
+      document.removeEventListener(USER_ACTIVITY_EVENT, resetIdle);
       if (idleTimerRef.current) clearTimeout(idleTimerRef.current);
     };
   }, [isAuthenticated]);
@@ -943,6 +1217,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
       <PrivateCallIncomingModal />
       <PrivateCallActiveModal />
       <CommandPalette />
+      <PanelAppSheetMount />
       <AppTour />
       <PersistentAudioPlayer />
       {showAcceptTermsModal && user?.tenantId && (

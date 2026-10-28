@@ -85,12 +85,19 @@ export interface AiPlatformTestResponse {
   model: string | null;
   latencyMs: number;
   voiceOk?: boolean;
+  // Resposta sem tokens nem custo: modelo com preço digitado à mão sairia sem cobrança.
+  // Backend antigo não manda o campo.
+  usageMissing?: boolean;
   error?: string;
 }
+
+export type AiPlatformPriceTier = "context" | "schedule";
 
 export interface AiPlatformSyncedModel extends AiPlatformCatalogModel {
   activatable: boolean;
   reason?: "router" | "alias" | "free" | "no_price" | "variable_price";
+  // Preço em faixas que pode ser vendido (só na lista ao vivo; backend antigo não manda).
+  priceTiers?: AiPlatformPriceTier[];
 }
 
 export interface AiPlatformSyncResponse {

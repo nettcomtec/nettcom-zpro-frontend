@@ -35,7 +35,7 @@ import { EmptyState } from "@/components/layout/empty-state";
 import {
   Search, Plus, Pencil, Trash2, Upload, Download, Users, Phone, PhoneOff, AtSign, Mail,
   MessageSquare, SlidersHorizontal, X, FileDown,
-  RefreshCw, Eye, Bot, FileSpreadsheet, Info, Loader2, ChevronDown, MapPin,
+  RefreshCw, Eye, Bot, FileSpreadsheet, Info, Loader2, ChevronDown, MapPin, Send, AlertTriangle,
 } from "lucide-react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
@@ -46,12 +46,16 @@ import { ProfilePicPreviewDialog, type ProfilePicPreview } from "@/components/sh
 import {
   fetchContacts, fetchContact, createContact, updateContact, deleteContact, forceDeleteContact,
   importContacts, exportContacts, exportContactsCount, syncContacts, syncContactGroups,
+  extractSyncChannelsFailure,
   removeDuplicateContacts, groupContactLid, checkNinthDigit,
   updateContactBlock, updateContactTags,
   updateContactName, updateContactNumber, updateContactLidFromContactId,
-  type Contact, type ContactPayload, type DuplicateCleanupResult,
+  type Contact, type ContactPayload, type DuplicateCleanupResult, type SyncChannelFailure, type SyncChannelPending,
 } from "@/services/contacts";
 import { ImportWizardDialog } from "@/components/contatos/ImportWizardDialog";
+import { TelegramInviteDialog } from "@/components/contatos/telegram-invite-dialog";
+import { WebchatLinksRow } from "@/components/contatos/webchat-links-row";
+import { filterWhatsappsByUserAccess } from "@/lib/whatsapp-user-access";
 import { TagMultiFilter, type TagMatch } from "@/components/contatos/tag-multi-filter";
 import { ContactAddressFields, addressPayloadFrom, isAddressBlockDirty } from "@/components/contatos/contact-address-fields";
 import { AddressFilterFields } from "@/components/contatos/address-filter-fields";
@@ -65,6 +69,7 @@ import { fetchAllUsers, type User } from "@/services/users";
 import type { Wallet } from "@/services/wallets";
 import { createTicket, updateTicket } from "@/services/tickets";
 import { findExistingOpenTicket, type ExistingOpenTicket } from "@/lib/check-existing-open-ticket";
+import { isNotViewAssignedRestricted } from "@/lib/not-view-assigned-scope";
 import { ExistingTicketDialog } from "@/components/atendimento/existing-ticket-dialog";
 import { fetchWhatsapps } from "@/services/whatsapp";
 import { findUazapiChat } from "@/services/uazapi-interactive";
@@ -77,6 +82,8 @@ import {
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import { useAuthStore } from "@/stores/auth-store";
 import { useWhatsappStore } from "@/stores/whatsapp-store";
+import { useContextPanelApps } from "@/stores/panel-apps-store";
+import { PanelAppOpenButton } from "@/components/panel-apps/panel-app-open-menu";
 import { SpyContactMessagesDialog } from "@/components/atendimento/spy-contact-messages-dialog";
 import { usePageAccess } from "@/hooks/use-page-access";
 import { useLiveMode } from "@/hooks/use-live-mode";
@@ -85,6 +92,19 @@ import { useSortable } from "@/hooks/use-sortable";
 import { SortableTableHead } from "@/components/ui/sortable-table-head";
 import { PhoneInput } from "@/components/ui/phone-input";
 import { formatBirthdayDisplay, formatBirthdayInput } from "@/lib/birthday-format";
+import { isTagNotFound, parseContactFieldError } from "@/lib/backend-error-code";
+import { getBrPhoneVariants } from "@/lib/phone-utils";
+
+// Contato com vinculo ao WhatsApp oficial (identificador/@usuario) guardado num
+// numero que e telefone de verdade: so ai gravar outro numero apaga o vinculo no
+// servidor (LID ou os digitos do proprio identificador no `number` nao contam).
+function hasWabaIdentityOnPhone(c: Partial<Contact> | null | undefined): boolean {
+  if (!c || !(c.bsuid || c.parentBsuid || c.username) || c.isLid) return false;
+  const digits = String(c.number ?? "").replace(/\D/g, "");
+  if (!digits) return false;
+  const sameDigits = (v: unknown) => v != null && String(v).replace(/\D/g, "") === digits;
+  return !sameDigits(c.lid) && !sameDigits(c.bsuid) && !sameDigits(c.parentBsuid);
+}
 
 // `numberRequired` false so na EDICAO de contato que ja chegou sem telefone (canal
 // que nao entrega numero: WhatsApp oficial com nome de usuario, Instagram, Messenger,
@@ -138,6 +158,17 @@ function makeContactSchema(
 }
 
 type ContactForm = z.infer<ReturnType<typeof makeContactSchema>>;
+
+// Ids de canal, `lid` e `isLid` do formulário. Na EDIÇÃO só vão no PUT os que o atendente
+// mudou em relação ao valor carregado: o backend grava `""` como apagar, e um formulário
+// aberto antes de o contato ganhar um id (convite do Telegram aceito, mensagem de outro canal,
+// LID atualizado pelo botão) apagava esse id ao salvar qualquer outra coisa.
+const CONTACT_FORM_CHANNEL_FIELDS: readonly (keyof ContactForm)[] = [
+  "lid", "isLid", "messengerId", "instagramPK", "hubWhatsapp",
+  "telegramId", "webchatId", "mercadolivreId", "linkedinId", "youtubeChannelId", "tiktokId",
+  "hubMercadolivre", "hubTiktok", "hubLikedin", "hubOlx", "hubYoutube", "hubIfood", "hubTwitter",
+  "hubSms", "hubTelegram", "hubWidget", "hubWebchat", "hubEmail",
+];
 
 type ColumnKey =
   | "select" | "id" | "avatar" | "name" | "whatsapp" | "email" | "cpf" | "empresa"
@@ -197,6 +228,7 @@ export default function ContatosPage() {
   const tUnsaved = useTranslations("flowBuilderNodeForm");
   const tLoadMore = useTranslations("usuariotenantsPage");
   const tAF = useTranslations("addressFilter");
+  const tTI = useTranslations("telegramInvite");
 
   const ALL_COLUMNS: { key: ColumnKey; label: string }[] = [
     { key: "select", label: tC("colSelect") },
@@ -235,6 +267,9 @@ export default function ContatosPage() {
   const whatsapps = useWhatsappStore((s) => s.whatsapps);
   const setWhatsapps = useWhatsappStore((s) => s.setWhatsapps);
   const { isLiveMode } = useLiveMode();
+  // "Abrir em..." (apps da empresa marcadas para o contato): uma assinatura na página, a
+  // lista vai pronta para cada linha. Vazia = o botão não aparece.
+  const contactPanelApps = useContextPanelApps("contact").apps;
 
   const [contacts, setContacts] = useState<Contact[]>([]);
   const [loading, setLoading] = useState(true);
@@ -247,6 +282,9 @@ export default function ContatosPage() {
   const [editing, setEditing] = useState<Contact | null>(null);
   // O contato em edicao ja tinha telefone? Decide se o campo segue obrigatorio.
   const [editingHadNumber, setEditingHadNumber] = useState(false);
+  // Vinculo com o WhatsApp oficial (identificador/@usuario) do contato em edicao e os
+  // digitos do numero carregado: gravar outro numero apaga o vinculo no servidor.
+  const [editingWabaIdentity, setEditingWabaIdentity] = useState({ has: false, digits: "" });
   const [deleting, setDeleting] = useState<Contact | null>(null);
   const [deletingContact, setDeletingContact] = useState(false);
   const [visibleColumns, setVisibleColumns] = useState<ColumnKey[]>(DEFAULT_VISIBLE);
@@ -333,6 +371,11 @@ export default function ContatosPage() {
   // Spy messages modal (paginado — componente compartilhado)
   const [spyOpen, setSpyOpen] = useState(false);
   const [spyContact, setSpyContact] = useState<Contact | null>(null);
+
+  // Convite do Telegram (ação da linha). O contato fica guardado depois de fechar para a
+  // animação de saída do diálogo.
+  const [telegramInviteOpen, setTelegramInviteOpen] = useState(false);
+  const [telegramInviteContact, setTelegramInviteContact] = useState<Contact | null>(null);
 
   // Snapshot dos estados fora do RHF (tags/carteira/fila/extraInfo/isLid) na abertura
   // do dialog de criar/editar — usado no dirty-guard de fechamento
@@ -460,6 +503,10 @@ export default function ContatosPage() {
     // Valor da linha da lista enquanto o contato completo nao chega — evita janela
     // com a obrigatoriedade herdada do contato anterior.
     setEditingHadNumber(!!c.number);
+    setEditingWabaIdentity({
+      has: hasWabaIdentityOnPhone(c),
+      digits: String(c.number ?? "").replace(/\D/g, ""),
+    });
     setExtrasOpen(false);
     setDialogOpen(true);
     // Fetch full contact to get tags, wallets, extraInfo
@@ -468,6 +515,10 @@ export default function ContatosPage() {
       const fc: Contact = full?.contact || full || c;
       setIsLidForm(!!fc.isLid);
       setEditingHadNumber(!!fc.number);
+      setEditingWabaIdentity({
+        has: hasWabaIdentityOnPhone(fc),
+        digits: String(fc.number ?? "").replace(/\D/g, ""),
+      });
       form.reset({
         name: fc.name || "",
         number: fc.number || "",
@@ -599,6 +650,12 @@ export default function ContatosPage() {
       // entao aqui o valor sempre existe.
       const typedNumber = (values.number || "").trim();
       const numberForPayload = typedNumber.replace(/\D/g, "").length >= 8 ? typedNumber : undefined;
+      // Ids de canal, `lid` e `isLid`: na criação vão todos; na edição só os que mudaram em
+      // relação ao valor carregado (aí "" apaga, de propósito). Mesmo molde do endereço.
+      const channelPayload: Record<string, unknown> = {};
+      for (const field of CONTACT_FORM_CHANNEL_FIELDS) {
+        if (!editing || form.getFieldState(field).isDirty) channelPayload[field] = values[field];
+      }
       const payload: Partial<ContactPayload> & Record<string, unknown> = {
         name: values.name,
         number: numberForPayload,
@@ -608,33 +665,11 @@ export default function ContatosPage() {
         firstName: values.firstName,
         lastName: values.lastName,
         businessName: values.businessName,
-        lid: values.lid,
-        isLid: values.isLid,
-        messengerId: values.messengerId,
-        instagramPK: values.instagramPK,
-        hubWhatsapp: values.hubWhatsapp,
         // Endereço: na criação vai o bloco inteiro; na edição só quando algum campo dele foi
         // mexido (aí "" apaga). Sem mexer, salvar outra coisa não devolve o endereço que a tela
         // carregou por cima de uma atualização feita depois por outro caminho (loja, API).
         ...(!editing || isAddressBlockDirty(form) ? addressPayloadFrom(values) : {}),
-        telegramId: values.telegramId,
-        webchatId: values.webchatId,
-        mercadolivreId: values.mercadolivreId,
-        linkedinId: values.linkedinId,
-        youtubeChannelId: values.youtubeChannelId,
-        tiktokId: values.tiktokId,
-        hubMercadolivre: values.hubMercadolivre,
-        hubTiktok: values.hubTiktok,
-        hubLikedin: values.hubLikedin,
-        hubOlx: values.hubOlx,
-        hubYoutube: values.hubYoutube,
-        hubIfood: values.hubIfood,
-        hubTwitter: values.hubTwitter,
-        hubSms: values.hubSms,
-        hubTelegram: values.hubTelegram,
-        hubWidget: values.hubWidget,
-        hubWebchat: values.hubWebchat,
-        hubEmail: values.hubEmail,
+        ...channelPayload,
       };
       // Always send wallets and extraInfo so backend removes them when empty
       payload.wallets = selectedWalletId != null ? [selectedWalletId] : [];
@@ -661,12 +696,18 @@ export default function ContatosPage() {
       // por isso o teste e por prefixo. Sem isso o operador so via "Erro ao criar" e
       // nao tinha como saber que o problema era o numero, nao o cadastro.
       const wappCode = typeof code === "string" ? code : "";
-      if (code === "ERR_DUPLICATED_CONTACT") {
+      const fieldError = parseContactFieldError(err);
+      if (fieldError) {
+        const field = fieldError.labelKey ? tC(fieldError.labelKey) : fieldError.field;
+        toast.error(fieldError.kind === "tooLong" ? tC("fieldTooLong", { field }) : tC("fieldInvalid", { field }));
+      } else if (code === "ERR_DUPLICATED_CONTACT") {
         toast.error(tC("duplicatedContact"));
       } else if (wappCode.startsWith("ERR_WAPP_INVALID_CONTACT")) {
         toast.error(tC("numberNotOnWhatsapp"));
       } else if (wappCode.startsWith("ERR_WAPP_CHECK_CONTACT")) {
         toast.error(tC("numberCheckFailed"));
+      } else if (isTagNotFound(err)) {
+        toast.error(tCommon("tagNotFoundReload"));
       } else {
         toast.error(editing ? tC("errorUpdating") : tC("errorCreating"));
       }
@@ -894,10 +935,11 @@ export default function ContatosPage() {
         setStartTicketOpen(false);
 
  // Regra (espelha frontend legado handleSaveTicket / abrirAtendimentoExistente):
-        // usuário com profile==='user' e tenant com NotViewAssignedTickets==='enabled'
-        // não pode acessar ticket aberto em nome de outro atendente.
-        // Admin e supervisor (profile==='super') seguem o fluxo normal.
-        const isPlainUser = user?.profile === "user";
+        // com NotViewAssignedTickets==='enabled' o atendente comum, o supervisor com
+        // "Remover privilégios" e o personalizado sem "ver todos" não acessam ticket aberto
+        // em nome de outro atendente (lib/not-view-assigned-scope, espelho do servidor).
+        // Admin e supervisor com privilégio seguem o fluxo normal.
+        const isPlainUser = isNotViewAssignedRestricted(user, useAuthStore.getState().supervisorAdmin);
         if (notViewAssignedTickets && isPlainUser) {
           const assignedToSelf =
             typeof ticketAtual.userId === "number" && ticketAtual.userId === user?.userId;
@@ -955,6 +997,27 @@ export default function ContatosPage() {
     setSpyOpen(true);
   };
 
+  const openTelegramInvite = (contact: Contact) => {
+    setTelegramInviteContact(contact);
+    setTelegramInviteOpen(true);
+  };
+
+  // A lista não é tempo real: ao fechar o convite relê só esta linha (sem voltar à página 1).
+  // Se a pessoa já abriu o link (QR lido na hora), o Telegram aparece e o botão de convite some.
+  const handleTelegramInviteOpenChange = (open: boolean) => {
+    setTelegramInviteOpen(open);
+    const invitedId = telegramInviteContact?.id;
+    if (open || !invitedId) return;
+    fetchContact(invitedId)
+      .then(({ data }) => {
+        const fc: Contact | undefined = data?.contact || data;
+        const telegramId = fc?.telegramId ? String(fc.telegramId) : "";
+        if (!telegramId) return;
+        setContacts((prev) => prev.map((x) => (x.id === invitedId ? { ...x, telegramId } : x)));
+      })
+      .catch(() => { /* a linha fica como estava */ });
+  };
+
   const handleRefreshLid = async (contactId: number) => {
     try {
       await updateContactLidFromContactId(contactId);
@@ -990,7 +1053,13 @@ export default function ContatosPage() {
       return;
     }
     try {
-      await updateContactNumber(editing.id, value);
+      const { data: savedNumberContact } = await updateContactNumber(editing.id, value);
+      // O servidor pode ter apagado o vinculo com o WhatsApp oficial: a nota segue o gravado.
+      const saved = (savedNumberContact ?? {}) as Partial<Contact>;
+      setEditingWabaIdentity({
+        has: hasWabaIdentityOnPhone(saved),
+        digits: String(saved.number ?? value).replace(/\D/g, ""),
+      });
       toast.success(tCED("success.numberUpdated"));
       load(1);
     } catch (err: unknown) {
@@ -1138,13 +1207,69 @@ export default function ContatosPage() {
     }
   };
 
-  const handleSyncContacts = async () => {
-    try { await syncContacts(); toast.success(tC("syncStarted")); } catch { toast.error(tC("errorSyncing")); }
+  // Canais que passaram de 20 s e seguem sincronizando em segundo plano (até 5 nomes + "e mais N").
+  const renderSyncPending = (pending: SyncChannelPending[]) => {
+    const shown = pending.slice(0, 5).map((p) => (p.name ? `${p.name} (#${p.id})` : `#${p.id}`)).join(", ");
+    const more = pending.length > 5 ? ` ${tC("syncFailMore", { count: pending.length - 5 })}` : "";
+    return tC("syncStillRunning", { channels: `${shown}${more}` });
   };
 
-  const handleSyncGroups = async () => {
-    try { await syncContactGroups(); toast.success(tC("groupsSynced")); } catch { toast.error(tC("errorSyncingGroups")); }
+  // Canais que não sincronizaram, com o motivo (no máximo 5 linhas + "e mais N").
+  const renderSyncFailures = (failed: SyncChannelFailure[], scope: "contacts" | "groups", pending: SyncChannelPending[] = []) => {
+    const reasonText = (reason: string) => {
+      if (reason === "empty") return tC(scope === "contacts" ? "syncFailReason.emptyContacts" : "syncFailReason.emptyGroups");
+      if (["not_running", "auth_failed", "fetch_failed", "unavailable"].includes(reason)) {
+        return tC(`syncFailReason.${reason}`);
+      }
+      return tC("syncFailReason.unknown");
+    };
+    const shown = failed.slice(0, 5);
+    return (
+      <div className="space-y-1">
+        {shown.map((f) => (
+          <div key={f.id}>
+            <span className="font-medium">{f.name ? `${f.name} (#${f.id})` : `#${f.id}`}</span>: {reasonText(f.reason)}
+          </div>
+        ))}
+        {failed.length > shown.length && <div>{tC("syncFailMore", { count: failed.length - shown.length })}</div>}
+        {pending.length > 0 && <div className="pt-1">{renderSyncPending(pending)}</div>}
+      </div>
+    );
   };
+
+  const runChannelsSync = async (scope: "contacts" | "groups") => {
+    const isContacts = scope === "contacts";
+    try {
+      const { failedChannels, pendingChannels } = isContacts ? await syncContacts() : await syncContactGroups();
+      if (failedChannels.length === 0 && pendingChannels.length === 0) {
+        toast.success(tC(isContacts ? "syncStarted" : "groupsSynced"));
+      } else if (failedChannels.length === 0) {
+        toast.success(tC(isContacts ? "syncStarted" : "groupsSyncStarted"), {
+          description: renderSyncPending(pendingChannels),
+          duration: 10000,
+        });
+      } else {
+        toast.warning(tC(isContacts ? "syncPartial" : "groupsSyncPartial"), {
+          description: renderSyncFailures(failedChannels, scope, pendingChannels),
+          duration: 15000,
+        });
+      }
+    } catch (err) {
+      const allFailed = extractSyncChannelsFailure(err);
+      if (allFailed && allFailed.failedChannels.length > 0) {
+        toast.error(tC(isContacts ? "syncAllFailed" : "groupsSyncAllFailed"), {
+          description: renderSyncFailures(allFailed.failedChannels, scope),
+          duration: 15000,
+        });
+      } else {
+        toast.error(tC(isContacts ? "errorSyncing" : "errorSyncingGroups"));
+      }
+    }
+  };
+
+  const handleSyncContacts = () => runChannelsSync("contacts");
+
+  const handleSyncGroups = () => runChannelsSync("groups");
 
   const handleRemoveDuplicates = async () => {
     try {
@@ -1182,6 +1307,17 @@ export default function ContatosPage() {
     : connectedWhatsapps.filter((w) =>
         (user?.whatsappAllowed as { id: number }[] | undefined)?.some((wa) => wa.id === w.id) ?? true
       );
+
+  // Convite do Telegram: bot Telegram conectado visível ao usuário (regra canônica de
+  // whatsappAllowed, a mesma do diálogo) e permissão de editar contato — `hasPermission`
+  // só restringe o perfil custom, e o backend exige `contacts_edit` na rota. Restrito já não
+  // entra nesta página.
+  const telegramInviteBots = filterWhatsappsByUserAccess(
+    connectedWhatsapps.filter((w) => (w.type || w.channel) === "telegram"),
+    user,
+    supervisorAdmin
+  );
+  const canInviteTelegram = telegramInviteBots.length > 0 && hasPermission("contacts_edit");
 
   const getChannelWhatsapps = (type: string) => allowedSessions.filter((w) => {
     const wType = w.type || w.channel;
@@ -1232,7 +1368,7 @@ export default function ContatosPage() {
     user?.profile === "admin" ||
     user?.profile === "superadmin" ||
     (user?.profile === "super" && supervisorAdmin !== "enabled") ||
-    (user?.profile === "custom" && customPerms?.tickets_view_all === true);
+    (user?.profile === "custom" && user?.customProfileEnabled === true && customPerms?.tickets_view_all === true);
   const walletFilterOptions = canFilterAnyWallet
     ? wallets
     : wallets.filter((w) => String(w.id) === String(user?.userId));
@@ -1280,8 +1416,8 @@ export default function ContatosPage() {
                 </Button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end">
-                <DropdownMenuItem onClick={handleSyncContacts}>{tC("syncContacts")}</DropdownMenuItem>
-                <DropdownMenuItem onClick={handleSyncGroups}>{tC("syncGroups")}</DropdownMenuItem>
+                <DropdownMenuItem onClick={handleSyncContacts} title={tC("syncContactsHint")}>{tC("syncContacts")}</DropdownMenuItem>
+                <DropdownMenuItem onClick={handleSyncGroups} title={tC("syncGroupsHint")}>{tC("syncGroups")}</DropdownMenuItem>
                 <DropdownMenuSeparator />
                 <DropdownMenuItem onClick={handleRemoveDuplicates}>{tC("removeDuplicates")}</DropdownMenuItem>
                 <DropdownMenuItem onClick={handleGroupLid}>{tC("groupLid")}</DropdownMenuItem>
@@ -1469,8 +1605,29 @@ export default function ContatosPage() {
                   {isColVisible("cidade") && <TableHead>{tC("colCidade")}</TableHead>}
                   {isColVisible("estado") && <TableHead>{tC("colEstado")}</TableHead>}
                   {isColVisible("bloquearContato") && <TableHead>{tC("colBlocked")}</TableHead>}
-                  {isColVisible("bloquearChatbot") && <TableHead>{tC("colBlockedChatbot")}</TableHead>}
-                  {isColVisible("actions") && <TableHead className="w-48">{tC("colActions")}</TableHead>}
+                  {isColVisible("bloquearChatbot") && (
+                    <TableHead>
+                      <span className="inline-flex items-center gap-1">
+                        {tC("colBlockedChatbot")}
+                        {/* Explicação abre no toque (Popover): bloquear também desliga o agente de IA. */}
+                        <Popover modal={false}>
+                          <PopoverTrigger asChild>
+                            <button
+                              type="button"
+                              className="inline-flex h-5 w-5 items-center justify-center rounded text-muted-foreground hover:text-foreground"
+                              aria-label={tC("colBlockedChatbot")}
+                            >
+                              <Info className="h-3.5 w-3.5" />
+                            </button>
+                          </PopoverTrigger>
+                          <PopoverContent align="start" collisionPadding={8} className="w-[min(18rem,calc(100vw-2rem))] p-3 text-xs leading-snug font-normal">
+                            {tC("blockChatbotHelp")}
+                          </PopoverContent>
+                        </Popover>
+                      </span>
+                    </TableHead>
+                  )}
+                  {isColVisible("actions") && <TableHead className={contactPanelApps.length > 0 ? "w-52" : "w-48"}>{tC("colActions")}</TableHead>}
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -1616,6 +1773,23 @@ export default function ContatosPage() {
                               </DropdownMenuContent>
                             </DropdownMenu>
                           )}
+                          {/* Convite do Telegram: só para quem ainda não tem Telegram (D3) e nunca grupo */}
+                          {canInviteTelegram && !c.telegramId && !c.isGroup && (
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="h-7 w-7"
+                              title={tTI("actionLabel")}
+                              aria-label={tTI("actionLabel")}
+                              onClick={() => openTelegramInvite(c)}
+                            >
+                              <Send className="h-3 w-3" />
+                            </Button>
+                          )}
+                          {/* "Abrir em...": apps da empresa marcadas para o contato (só o id vai ao servidor) */}
+                          {contactPanelApps.length > 0 && (
+                            <PanelAppOpenButton placement="contact" contactId={c.id} apps={contactPanelApps} />
+                          )}
                           {/* Spy button (admin only; também gated por controlFeatures p/ user comum) */}
                           {isAdminOrSuper && !spyBlockedByFeatureControl && (
                             <Button variant="ghost" size="icon" className="h-7 w-7" title={tC("spyTooltip")} onClick={() => handleSpy(c)}>
@@ -1698,6 +1872,25 @@ export default function ContatosPage() {
                 </div>
                 {form.formState.errors.number && <p className="text-xs text-destructive">{form.formState.errors.number.message}</p>}
                 {!numberRequired && <p className="text-xs text-muted-foreground">{tCED("numberOptionalNote")}</p>}
+                {(() => {
+                  // Mesma regra do servidor: variante do 9o digito mantem o vinculo.
+                  const typedDigits = String(form.watch("number") ?? "").replace(/\D/g, "");
+                  const loadedDigits = editingWabaIdentity.digits;
+                  const samePhone =
+                    !!loadedDigits &&
+                    (typedDigits === loadedDigits ||
+                      getBrPhoneVariants(typedDigits).includes(loadedDigits) ||
+                      getBrPhoneVariants(loadedDigits).includes(typedDigits));
+                  const show =
+                    !!editing && editingHadNumber && editingWabaIdentity.has &&
+                    !!typedDigits && !samePhone;
+                  return show ? (
+                    <p className="flex items-start gap-1 text-xs text-amber-600 dark:text-amber-400" role="status">
+                      <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" aria-hidden />
+                      <span>{tCED("numberChangeClearsWabaIdentity")}</span>
+                    </p>
+                  ) : null;
+                })()}
               </div>
               <div className="space-y-2">
                 <Label>{tC("firstNameLabel")}</Label>
@@ -1846,6 +2039,16 @@ export default function ContatosPage() {
                 </div>
               </CollapsibleContent>
             </Collapsible>
+
+            {/* Navegadores do WebChat ligados pelo link de convite (PLANO_WEBCHAT_LINK_CONVITE D16):
+                só aparece com algum ligado; "Desligar" com as travas do convite do Telegram. */}
+            {editing?.id && (
+              <WebchatLinksRow
+                contactId={editing.id}
+                canUnlink={!isRestrictedUser() && hasPermission("contacts_edit")}
+                className="rounded-md border px-3"
+              />
+            )}
 
             <div className="space-y-2">
               <Label>{tC("tagsLabel")}</Label>
@@ -2416,6 +2619,20 @@ export default function ContatosPage() {
         queues={queues}
         onImported={() => load(1)}
       />
+
+      {telegramInviteContact && (
+        <TelegramInviteDialog
+          open={telegramInviteOpen}
+          onOpenChange={handleTelegramInviteOpenChange}
+          contact={{
+            id: telegramInviteContact.id,
+            name: telegramInviteContact.name,
+            number: telegramInviteContact.number || null,
+            email: telegramInviteContact.email || null,
+          }}
+          mode="contacts"
+        />
+      )}
     </div>
   );
 }

@@ -37,6 +37,8 @@ const ACTION_COLORS: Record<string, string> = {
   TEST:   "bg-yellow-100 text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-300",
   MIGRATE:"bg-orange-100 text-orange-800 dark:bg-orange-900/30 dark:text-orange-300",
   REPAIR: "bg-cyan-100 text-cyan-800 dark:bg-cyan-900/30 dark:text-cyan-300",
+  // Abertura de aplicativo personalizado pelo contato/atendimento (fase 2, D11/D14)
+  OPEN:   "bg-teal-50 text-teal-700 dark:bg-teal-900/20 dark:text-teal-300",
 };
 
 const METHOD_COLORS: Record<string, string> = {
@@ -59,7 +61,7 @@ function formatDate(iso: string): string {
   return formatDateTime(d, { dateStyle: "short", timeStyle: "medium" });
 }
 
-const ACTIONS = ["CREATE", "UPDATE", "DELETE", "LOGIN", "LOGOUT", "TEST", "MIGRATE", "REPAIR"];
+const ACTIONS = ["CREATE", "UPDATE", "DELETE", "LOGIN", "LOGOUT", "TEST", "MIGRATE", "REPAIR", "OPEN"];
 const PAGE_SIZES = [25, 50, 100];
 
 interface TenantOption { id: number; name: string; }
@@ -69,6 +71,19 @@ export default function AuditLogPage() {
   const t = useTranslations("auditLogPage");
   const tErrors = useTranslations("errors");
   const tCommon = useTranslations("common");
+  // Ação com ponto (registro de permissão: `permission.profile`, `permission.customProfile.created`)
+  // vira chave plana com `_` (o ponto abriria outro nível no catálogo); ação sem tradução mostra
+  // o próprio código, sem erro no console.
+  const actionLabel = (action: string): string => {
+    const raw = String(action ?? "");
+    const key = `actions.${raw.replace(/\./g, "_")}`;
+    return t.has(key as any) ? t(key as any) : raw;
+  };
+  const actionColor = (action: string): string =>
+    ACTION_COLORS[action] ||
+    (String(action ?? "").startsWith("permission.")
+      ? "bg-violet-100 text-violet-800 dark:bg-violet-900/30 dark:text-violet-300"
+      : "bg-gray-100 text-gray-700");
   const { user } = useAuthStore();
   const isSuperAdmin = user?.profile === "superadmin";
 
@@ -147,7 +162,7 @@ export default function AuditLogPage() {
     try {
       const res = await fetchAuditLogs({ ...filters, page: 1, limit: 10000 });
       const rows = res.data.logs;
-      const headers = ["Data/Hora", "Usuário", "Email", "Tenant", "Ação", "Entidade", "ID Entidade", "Método", "Caminho", "Status", "IP"];
+      const headers = [t("table.datetime"), t("table.user"), t("table.email"), t("table.tenant"), t("table.action"), t("table.entity"), t("table.entityId"), t("table.method"), t("table.path"), t("table.status"), t("table.ip")];
       const escape = (v: string | number | null | undefined) => {
         const s = v == null ? "" : String(v);
         return s.includes(",") || s.includes('"') || s.includes("\n")
@@ -424,8 +439,8 @@ export default function AuditLogPage() {
                         )}
                       </TableCell>
                       <TableCell>
-                        <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold ${ACTION_COLORS[log.action] || "bg-gray-100 text-gray-700"}`}>
-                          {t(`actions.${log.action}` as any, { defaultMessage: log.action })}
+                        <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold ${actionColor(log.action)}`}>
+                          {actionLabel(log.action)}
                         </span>
                       </TableCell>
                       <TableCell>

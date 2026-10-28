@@ -18,6 +18,7 @@ import {
 import { Plus, ArrowRight, Pencil, Trash2, RefreshCw, X, GripVertical } from "lucide-react";
 import { toast } from "sonner";
 import { useTranslations } from "next-intl";
+import { useRouter } from "next/navigation";
 import {
   DndContext,
   closestCenter,
@@ -64,6 +65,24 @@ interface Pipeline {
 // do axios, daí o segundo salto.
 const readApiError = (err: any): { error?: string; code?: string; details?: unknown } | null =>
   err?.data ?? err?.response?.data ?? null;
+
+// Códigos de "não existe mais" do funil/etapa (funil, responsável ou fila apagados depois
+// de a tela carregar): viram texto traduzido; outro código cru cai no genérico.
+const REFERENCE_GONE_CODES = new Set(["ERR_PIPELINE_NOT_FOUND", "ERR_STAGE_NOT_FOUND", "ERR_USER_NOT_FOUND", "ERR_QUEUE_NOT_FOUND"]);
+const apiReasonKind = (raw: unknown): "gone" | "code" | "text" | "none" => {
+  if (typeof raw !== "string" || !raw.trim()) return "none";
+  if (REFERENCE_GONE_CODES.has(raw.trim())) return "gone";
+  return /^ERR_[A-Z0-9_]+$/.test(raw.trim()) ? "code" : "text";
+};
+
+// Ações "ao marcar como Ganha" não têm etapa e, desativadas, ficam fora da limpeza que
+// a tela faz antes de excluir o funil — o backend recusa a exclusão. `wonActionsCount`
+// é aditivo (na raiz do corpo ou em `details`); sem ele, o comportamento de sempre.
+const readWonActionsCount = (err: unknown): number => {
+  const data = readApiError(err) as { wonActionsCount?: unknown; details?: { wonActionsCount?: unknown } | null } | null;
+  const count = Number(data?.wonActionsCount ?? data?.details?.wonActionsCount);
+  return Number.isFinite(count) && count > 0 ? count : 0;
+};
 
 interface Stage {
   id?: number;
@@ -227,6 +246,14 @@ export default function FunilPipelinesPage() {
 
 function FunilPipelinesPageContent() {
   const t = useTranslations("funilPipelinesPage");
+  const router = useRouter();
+  // Motivo vindo do servidor dentro das frases "não foi salva/excluída: {reason}".
+  const apiReasonText = (raw: unknown): string => {
+    const kind = apiReasonKind(raw);
+    if (kind === "gone") return t("referenceGone");
+    if (kind === "text") return String(raw);
+    return t("genericFailure");
+  };
   const [loading, setLoading] = useState(true);
   const [pipelines, setPipelines] = useState<Pipeline[]>([]);
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -392,7 +419,7 @@ function FunilPipelinesPageContent() {
       if (parts.length > 0) return t("blockedActions", { stage, detail: parts.join(", ") });
     }
 
-    return t("blockedStageGeneric", { stage, reason: data?.error || t("genericFailure") });
+    return t("blockedStageGeneric", { stage, reason: apiReasonText(data?.error) });
   };
 
   // Apaga as ações do funil vinculadas à etapa. Segue engolindo erro de propósito:
@@ -476,7 +503,7 @@ function FunilPipelinesPageContent() {
           blocked.push(
             t("stageSaveFailed", {
               stage: stageLabel(stage.name),
-              reason: readApiError(err)?.error || t("genericFailure"),
+              reason: apiReasonText(readApiError(err)?.error),
             })
           );
         }
@@ -511,6 +538,7 @@ function FunilPipelinesPageContent() {
 
   const handleDelete = async () => {
     if (!deleting) return;
+    const deletingPipelineId = deleting.id;
     try {
       // Delete all pipeline actions (covers pipeline-level and stage-level)
       try {
@@ -543,8 +571,22 @@ function FunilPipelinesPageContent() {
       setDeleting(null);
       loadData();
     } catch (err: any) {
-      const msg = err?.response?.data?.error ?? t("errorDelete");
-      toast.error(msg);
+      const wonActionsCount = readWonActionsCount(err);
+      if (wonActionsCount > 0) {
+        toast.error(t("deleteBlockedWonActions", { count: wonActionsCount }), {
+          duration: 12000,
+          // A limpeza acima já apagou as ativas: as que travam são as inativas deste funil.
+          action: {
+            label: t("openPipelineActions"),
+            onClick: () => router.push(`/funil/acao?pipelineId=${deletingPipelineId}&active=false`),
+          },
+        });
+        return;
+      }
+      // O corpo vem em `err.data` (o interceptor rejeita com o response).
+      const raw = readApiError(err)?.error;
+      const kind = apiReasonKind(raw);
+      toast.error(kind === "gone" ? t("referenceGoneReload") : kind === "text" ? String(raw) : t("errorDelete"));
     }
   };
 

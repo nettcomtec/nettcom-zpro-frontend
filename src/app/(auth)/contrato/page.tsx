@@ -5,6 +5,7 @@ import { NextIntlClientProvider, useTranslations } from "next-intl";
 import { FileText, Loader2 } from "lucide-react";
 import { defaultLocale, locales, type Locale } from "@/i18n/config";
 import { getMessages } from "@/i18n/get-messages";
+import { getUiLocale, hasExplicitLanguage } from "@/lib/ui-locale";
 import { TermsDocRenderer } from "@/components/terms/terms-doc-renderer";
 import {
   fetchPublicResellerTerms,
@@ -35,8 +36,10 @@ function resolveContractLang(): Locale {
     if (fromQuery) return fromQuery;
   } catch { /* ignore */ }
   try {
-    const stored = localStorage.getItem("language");
-    if (stored && (locales as readonly string[]).includes(stored)) return stored as Locale;
+    // Idioma da tela pelo leitor único (escolha explícita → dica da Região). Sem
+    // nenhum dos dois, quem decide é o navegador, logo abaixo.
+    const ui = getUiLocale();
+    if (hasExplicitLanguage() || ui !== defaultLocale) return ui;
   } catch { /* ignore */ }
   try {
     const candidates = [

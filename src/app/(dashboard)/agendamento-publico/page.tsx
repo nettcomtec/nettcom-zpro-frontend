@@ -35,7 +35,7 @@ import {
   fetchBookingEventType, createBookingEventType, updateBookingEventType, deleteBookingEventType,
   setBookingAvailability, setBookingFormFields,
   createBookingDateOverride, deleteBookingDateOverride,
-  type BookingPage, type BookingEventType, type BookingAvailability,
+  type BookingPage, type BookingPageUpdatePayload, type BookingEventType, type BookingAvailability,
   type BookingFormField, type BookingDateOverride, type BookingLocationType, type BookingFieldType,
   fetchBookingProfessionals, type BookingProfessional,
 } from "@/services/booking";
@@ -45,7 +45,7 @@ import { GalleryPickerWithUploadDialog } from "@/components/gallery/gallery-pick
 import { ProfessionalsManager } from "@/components/agendamento-publico/professionals-manager";
 import { BookingTemplatePicker } from "@/components/agendamento-publico/booking-template-picker";
 
-const WA_CHANNEL_TYPES = ["waba", "waba_oauth", "whatsapp", "baileys", "zapo", "evo", "evogo", "zapi", "uazapi", "wuzapi", "gupshup", "dialog360"];
+const WA_CHANNEL_TYPES = ["waba", "waba_oauth", "whatsapp", "baileys", "zapo", "evo", "evogo", "zapi", "uazapi", "meow", "gupshup", "dialog360"];
 const WEEKDAY_KEYS = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
 const LOCATION_TYPES: BookingLocationType[] = ["in_person", "online", "phone", "custom"];
 const FIELD_TYPES: BookingFieldType[] = ["text", "textarea", "select", "email", "phone"];
@@ -74,6 +74,8 @@ const emptyPageForm = {
   whatsappId: undefined as number | undefined, isActive: true,
   logoUrl: "", primaryColor: "", welcomeMessage: "", confirmationHeader: "",
   checkInMinutesBefore: 0, checkInMessage: "",
+  // Template do lembrete em canal oficial (JSON do picker; "" = sem template).
+  checkInTemplate: "",
   // Agenda Google desta pagina (undefined = usa a agenda padrao do sistema) e
   // qual calendario dentro da conta (undefined = calendario principal).
   googleCalendarConfigId: undefined as number | undefined,
@@ -107,6 +109,17 @@ const emptyEventForm: EventTypeForm = {
   capacityScope: "per_professional",
   confirmationTemplate: "",
 };
+
+// Variável do template sem valor vira parâmetro vazio, e a Meta recusa o envio inteiro.
+function hasEmptyTemplateVar(json: string): boolean {
+  try {
+    const parsed = JSON.parse(json);
+    const vars = Array.isArray(parsed?.templateVars) ? parsed.templateVars : [];
+    return vars.some((v: { value?: unknown }) => !String(v?.value ?? "").trim());
+  } catch {
+    return false;
+  }
+}
 
 function InfoTip({ text }: { text: string }) {
   return (
@@ -147,6 +160,13 @@ export default function AgendamentoPublicoPage() {
   const slugTimer = React.useRef<ReturnType<typeof setTimeout> | null>(null);
   const [deletePageOpen, setDeletePageOpen] = useState(false);
   const [galleryOpen, setGalleryOpen] = useState(false);
+  const [savingPage, setSavingPage] = useState(false);
+  // Troca para canal oficial recusada por serviço ativo sem template: a lista volta do
+  // backend e o salvamento é refeito com a pausa confirmada.
+  const [pauseConfirm, setPauseConfirm] = useState<{
+    services: Array<{ id: number; name: string }>;
+    payload: BookingPageUpdatePayload;
+  } | null>(null);
 
   // event type dialog
   const [eventDialogOpen, setEventDialogOpen] = useState(false);
@@ -169,6 +189,17 @@ export default function AgendamentoPublicoPage() {
 
   const pageChannel = channels.find((c) => c.id === selectedPage?.whatsappId) || null;
   const isBspPage = !!pageChannel && BSP_CHANNEL_TYPES.includes(pageChannel.type);
+
+  // Canal escolhido no formulário da página (ainda não salvo) e o salvo antes da edição.
+  const formChannel = channels.find((c) => c.id === pageForm.whatsappId) || null;
+  const isBspForm = !!formChannel && BSP_CHANNEL_TYPES.includes(formChannel.type);
+  const editingPageChannel = channels.find((c) => c.id === editingPage?.whatsappId) || null;
+  const editingPageIsBsp = !!editingPageChannel && BSP_CHANNEL_TYPES.includes(editingPageChannel.type);
+  // `hasConfirmationTemplate === false` (não `!`): backend antigo não manda o campo.
+  const servicesMissingTemplateInForm = isBspForm && editingPage
+    ? (editingPage.eventTypes ?? []).filter((et) => et.isActive && et.hasConfirmationTemplate === false)
+    : [];
+  const switchingBetweenOfficial = !!editingPage && editingPageIsBsp && isBspForm && editingPage.whatsappId !== pageForm.whatsappId;
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -242,6 +273,7 @@ export default function AgendamentoPublicoPage() {
       logoUrl: p.logoUrl ?? "", primaryColor: p.primaryColor ?? "",
       welcomeMessage: p.welcomeMessage ?? "", confirmationHeader: p.confirmationHeader ?? "",
       checkInMinutesBefore: p.checkInMinutesBefore ?? 0, checkInMessage: p.checkInMessage ?? "",
+      checkInTemplate: p.checkInTemplate ?? "",
       googleCalendarConfigId: p.googleCalendarConfigId ?? undefined,
       googleCalendarId: p.googleCalendarId ?? undefined,
     });
@@ -254,37 +286,74 @@ export default function AgendamentoPublicoPage() {
     if (!pageForm.slug.trim()) { toast.error(t("validationSlug")); return; }
     if (slugState === "taken") { toast.error(t("slugTaken")); return; }
     if (pageForm.logoUrl && !isValidHttpUrl(pageForm.logoUrl)) { toast.error(t("validationLogoUrl")); return; }
+    // Template do lembrete: só em canal oficial. Com a lista de canais sem carregar não
+    // dá para saber o tipo — o campo não vai (o backend mantém o que estava).
+    const checkInTemplate = !pageForm.whatsappId
+      ? null
+      : !formChannel
+        ? undefined
+        : isBspForm ? (pageForm.checkInTemplate || null) : null;
+    if (checkInTemplate && hasEmptyTemplateVar(checkInTemplate)) { toast.error(t("templateVarsRequired")); return; }
+    const payload: BookingPageUpdatePayload = {
+      slug: pageForm.slug.trim(),
+      title: pageForm.title.trim(),
+      description: pageForm.description.trim() || null,
+      timezone: pageForm.timezone,
+      whatsappId: pageForm.whatsappId ?? null,
+      isActive: pageForm.isActive,
+      logoUrl: pageForm.logoUrl.trim() || null,
+      primaryColor: pageForm.primaryColor.trim() || null,
+      welcomeMessage: pageForm.welcomeMessage.trim() || null,
+      confirmationHeader: pageForm.confirmationHeader.trim() || null,
+      checkInMinutesBefore: pageForm.checkInMinutesBefore || 0,
+      checkInMessage: pageForm.checkInMessage.trim() || null,
+      googleCalendarConfigId: pageForm.googleCalendarConfigId ?? null,
+      googleCalendarId: pageForm.googleCalendarId ?? null,
+      checkInTemplate,
+    };
+    await submitPage(payload);
+  };
+
+  const submitPage = async (payload: BookingPageUpdatePayload) => {
+    setSavingPage(true);
     try {
-      const payload: Partial<BookingPage> = {
-        slug: pageForm.slug.trim(),
-        title: pageForm.title.trim(),
-        description: pageForm.description.trim() || null,
-        timezone: pageForm.timezone,
-        whatsappId: pageForm.whatsappId ?? null,
-        isActive: pageForm.isActive,
-        logoUrl: pageForm.logoUrl.trim() || null,
-        primaryColor: pageForm.primaryColor.trim() || null,
-        welcomeMessage: pageForm.welcomeMessage.trim() || null,
-        confirmationHeader: pageForm.confirmationHeader.trim() || null,
-        checkInMinutesBefore: pageForm.checkInMinutesBefore || 0,
-        checkInMessage: pageForm.checkInMessage.trim() || null,
-        googleCalendarConfigId: pageForm.googleCalendarConfigId ?? null,
-        googleCalendarId: pageForm.googleCalendarId ?? null,
+      // Backend sem o template do check-in ignora o campo e responde sem ele: avisa em vez
+      // de dar a entender que o template foi gravado.
+      const warnIfTemplateIgnored = (result: object) => {
+        if (payload.checkInTemplate && !("checkInTemplate" in result)) toast.warning(t("checkInTemplateUnavailable"));
       };
       if (editingPage) {
         const updated = await updateBookingPage(editingPage.id, payload);
         toast.success(t("saved"));
+        if (updated.pausedServices?.length) {
+          toast.info(t("servicesPaused", { count: updated.pausedServices.length }));
+        }
+        warnIfTemplateIgnored(updated);
         setSelectedId(updated.id);
       } else {
         const created = await createBookingPage(payload);
         toast.success(t("created"));
+        warnIfTemplateIgnored(created);
         setSelectedId(created.id);
       }
+      setPauseConfirm(null);
       setPageDialogOpen(false);
       load();
     } catch (e: any) {
-      if (e?.response?.status === 409) toast.error(t("slugTaken"));
+      // lib/api rejeita com o `response` do axios: status/data na raiz.
+      const status = e?.status ?? e?.response?.status;
+      const data = e?.data ?? e?.response?.data;
+      const code = typeof data?.error === "string" ? data.error : "";
+      if (code === "ERR_BOOKING_BSP_TEMPLATE_REQUIRED" && editingPage && Array.isArray(data?.services) && data.services.length > 0) {
+        setPauseConfirm({ services: data.services, payload });
+        return;
+      }
+      setPauseConfirm(null);
+      if (code === "ERR_BOOKING_CHECKIN_TEMPLATE_UNAVAILABLE") toast.error(t("checkInTemplateUnavailable"));
+      else if (status === 409) toast.error(t("slugTaken"));
       else toast.error(t("errorSave"));
+    } finally {
+      setSavingPage(false);
     }
   };
 
@@ -349,6 +418,9 @@ export default function AgendamentoPublicoPage() {
     const pageCh = channels.find((c) => c.id === selectedPage.whatsappId);
     if (eventForm.isActive && pageCh && BSP_CHANNEL_TYPES.includes(pageCh.type) && !eventForm.confirmationTemplate.trim()) {
       toast.error(t("validationTemplateRequired")); return;
+    }
+    if (eventForm.confirmationTemplate.trim() && hasEmptyTemplateVar(eventForm.confirmationTemplate)) {
+      toast.error(t("templateVarsRequired")); return;
     }
     // C1 — turma única (shared) usa a disponibilidade DO SERVIÇO (não os horários dos
     // profissionais); sem faixas, o portal não mostraria horário nenhum.
@@ -477,7 +549,7 @@ export default function AgendamentoPublicoPage() {
         help={{
           description: t("helpDesc"),
           sections: [
-            { title: t("helpS0T"), items: [t("helpS0I0"), t("helpS0I1"), t("helpS0I2")] },
+            { title: t("helpS0T"), items: [t("helpS0I0"), t("helpS0I1"), t("helpS0I2"), t("helpS0I3")] },
           ],
         }}
       />
@@ -586,6 +658,20 @@ export default function AgendamentoPublicoPage() {
                             <span className="text-xs text-muted-foreground ml-2">{et.durationMinutes} {t("minAbbr")}</span>
                           </div>
                           <div className="flex items-center gap-2 shrink-0">
+                            {isBspPage && et.hasConfirmationTemplate === false && (
+                              <TooltipProvider delayDuration={150}>
+                                <Tooltip>
+                                  <TooltipTrigger asChild>
+                                    <span className="inline-flex">
+                                      <Badge variant="outline" className="text-xs border-amber-500 text-amber-600 dark:text-amber-400">
+                                        {t("serviceNoTemplateBadge")}
+                                      </Badge>
+                                    </span>
+                                  </TooltipTrigger>
+                                  <TooltipContent className="max-w-[16rem] text-xs leading-snug">{t("serviceNoTemplateTip")}</TooltipContent>
+                                </Tooltip>
+                              </TooltipProvider>
+                            )}
                             {!et.isActive && <Badge variant="secondary" className="text-xs">{t("inactive")}</Badge>}
                             <Pencil className="h-4 w-4 text-muted-foreground" />
                           </div>
@@ -644,7 +730,16 @@ export default function AgendamentoPublicoPage() {
                 <Label>{t("channelLabel")}</Label>
                 <Select
                   value={pageForm.whatsappId ? String(pageForm.whatsappId) : "none"}
-                  onValueChange={(v) => setPageForm((f) => ({ ...f, whatsappId: v === "none" ? undefined : Number(v) }))}
+                  onValueChange={(v) => setPageForm((f) => {
+                    const next = v === "none" ? undefined : Number(v);
+                    if (next === f.whatsappId) return f;
+                    // O template do check-in é do canal: trocar de canal pede escolher de novo,
+                    // e voltar ao canal salvo devolve o template que estava salvo.
+                    const savedTemplate = editingPage && next === (editingPage.whatsappId ?? undefined)
+                      ? (editingPage.checkInTemplate ?? "")
+                      : "";
+                    return { ...f, whatsappId: next, checkInTemplate: savedTemplate };
+                  })}
                 >
                   <SelectTrigger className="min-w-0"><SelectValue placeholder={t("channelNone")} className="truncate" /></SelectTrigger>
                   <SelectContent>
@@ -654,6 +749,22 @@ export default function AgendamentoPublicoPage() {
                 </Select>
               </div>
             </div>
+            {isBspForm && (
+              <div className="flex gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-xs">
+                <Info className="h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400" />
+                <div className="grid gap-1.5 min-w-0">
+                  <p>{t("bspChannelNote")}</p>
+                  {servicesMissingTemplateInForm.length > 0 && (
+                    <p className="font-medium break-words">
+                      {t(editingPageIsBsp && editingPage?.whatsappId === pageForm.whatsappId ? "bspServicesMissingTemplate" : "bspServicesWillPause", {
+                        names: servicesMissingTemplateInForm.map((s) => s.name).join(", "),
+                      })}
+                    </p>
+                  )}
+                  {switchingBetweenOfficial && <p>{t("bspChannelSwitchNote")}</p>}
+                </div>
+              </div>
+            )}
             {calendarConfigs.length > 0 && (
               <GoogleCalendarTargetPicker
                 label={t("googleCalendarPageLabel")}
@@ -727,6 +838,16 @@ export default function AgendamentoPublicoPage() {
                   />
                 </div>
               )}
+              {pageForm.checkInMinutesBefore > 0 && isBspForm && formChannel && (
+                <BookingTemplatePicker
+                  channel={formChannel}
+                  value={pageForm.checkInTemplate}
+                  onChange={(json) => setPageForm((f) => ({ ...f, checkInTemplate: json || "" }))}
+                  label={t("checkInTemplateLabel")}
+                  hint={t("checkInTemplateHint")}
+                  allowCharge={false}
+                />
+              )}
             </div>
             <div className="flex items-center gap-2">
               <Switch checked={pageForm.isActive} onCheckedChange={(v) => setPageForm((f) => ({ ...f, isActive: v }))} />
@@ -735,7 +856,36 @@ export default function AgendamentoPublicoPage() {
           </div>
           <DialogFooter className="shrink-0 pt-2">
             <Button variant="outline" onClick={() => setPageDialogOpen(false)}>{t("cancel")}</Button>
-            <Button onClick={handleSavePage}>{editingPage ? t("save") : t("create")}</Button>
+            <Button onClick={handleSavePage} disabled={savingPage}>
+              {savingPage && <Loader2 className="mr-1 h-4 w-4 animate-spin" />}
+              {editingPage ? t("save") : t("create")}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* ---- PAUSE SERVICES WITHOUT TEMPLATE (troca para canal oficial) ---- */}
+      <Dialog open={!!pauseConfirm} onOpenChange={(open) => { if (!open && !savingPage) setPauseConfirm(null); }}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>{t("pauseDialogTitle")}</DialogTitle>
+            <DialogDescription>{t("pauseDialogDesc")}</DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-2 text-sm">
+            <p>{t("pauseDialogList")}</p>
+            <ul className="list-disc pl-5 space-y-0.5 max-h-48 overflow-y-auto break-words">
+              {(pauseConfirm?.services ?? []).map((s) => <li key={s.id}>{s.name}</li>)}
+            </ul>
+          </div>
+          <DialogFooter className="gap-2 sm:gap-0">
+            <Button variant="outline" disabled={savingPage} onClick={() => setPauseConfirm(null)}>{t("cancel")}</Button>
+            <Button
+              disabled={savingPage}
+              onClick={() => { if (pauseConfirm) submitPage({ ...pauseConfirm.payload, pauseServicesWithoutTemplate: true }); }}
+            >
+              {savingPage && <Loader2 className="mr-1 h-4 w-4 animate-spin" />}
+              {t("pauseDialogConfirm")}
+            </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

@@ -2,7 +2,8 @@
 
 import { useEffect, useState } from "react";
 import { useTranslations } from "next-intl";
-import { Loader2, BadgeCheck, BadgeAlert, BadgeX, Badge as BadgeIcon, Smartphone, CloudCog, Ban, ShieldAlert, CreditCard } from "lucide-react";
+import { Loader2, BadgeCheck, BadgeAlert, BadgeX, Badge as BadgeIcon, Smartphone, CloudCog, Ban, ShieldAlert, CreditCard, PauseCircle } from "lucide-react";
+import { formatMetaPauseTime } from "@/lib/backend-error-code";
 import { Badge } from "@/components/ui/badge";
 import {
   fetchWabaPhoneQualityRating,
@@ -63,6 +64,7 @@ export function WabaConnectionQualityBadge({
 }: Props) {
   const tStatus = useTranslations("metaHealth");
   const tSend = useTranslations("metaSendHealth");
+  const tCommon = useTranslations("common");
   // Alerta de envio (pagamento/bloqueio) vem do cache compartilhado, sem request
   // próprio; casa só pelo phone_number_id do canal (tokenAPI), nunca pelo número exibido.
   const sendHealthRows = useMetaSendHealth(!hideSendHealth);
@@ -71,6 +73,8 @@ export function WabaConnectionQualityBadge({
   const [platform, setPlatform] = useState<{ platformType?: string; isOnBizApp?: boolean } | null>(null);
   const [loading, setLoading] = useState(false);
   const [errored, setErrored] = useState(false);
+  // Consultas da WABA pausadas pelo limite da Meta (80008) até esta data.
+  const [rateLimitedUntil, setRateLimitedUntil] = useState<Date | null>(null);
 
   const hasToken = !!resolveWabaGraphAccessToken({ bmToken, tokenAPI });
   const hasWaba = !!(wabaId && wabaId.trim());
@@ -80,10 +84,12 @@ export function WabaConnectionQualityBadge({
     if (!hasToken || !hasWaba) {
       setRating(null);
       setErrored(false);
+      setRateLimitedUntil(null);
       return;
     }
     setLoading(true);
     setErrored(false);
+    setRateLimitedUntil(null);
     fetchWabaPhoneQualityRating({
       bmToken,
       tokenAPI,
@@ -98,6 +104,8 @@ export function WabaConnectionQualityBadge({
           setRating(null);
           setPhoneStatus(null);
           setPlatform(null);
+          const until = res.rateLimitedUntil ? new Date(res.rateLimitedUntil) : null;
+          setRateLimitedUntil(until && !Number.isNaN(until.getTime()) ? until : null);
         } else {
           setRating(res.quality_rating ?? null);
           setPhoneStatus(res.status ?? null);
@@ -289,9 +297,47 @@ export function WabaConnectionQualityBadge({
     );
   })();
 
+  // Aviso de consultas pausadas pela Meta (erro 80008): sem ele o selo só sumia e o
+  // operador clicava em Conectar/Diagnosticar, o que prolonga o bloqueio.
+  const pauseNode = (() => {
+    if (!rateLimitedUntil) return null;
+    const label = tCommon("metaRateLimitedBadge");
+    const tip = tCommon("metaRateLimitedTooltip", { time: formatMetaPauseTime(rateLimitedUntil) });
+    if (asIcon) {
+      return (
+        <TooltipProvider delayDuration={200}>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <PauseCircle role="status" aria-label={label} className={cn("w-4 h-4 flex-shrink-0 text-amber-500 dark:text-amber-400", className)} />
+            </TooltipTrigger>
+            <TooltipContent className="max-w-xs">
+              <p className="font-medium">{label}</p>
+              <p className="text-xs">{tip}</p>
+            </TooltipContent>
+          </Tooltip>
+        </TooltipProvider>
+      );
+    }
+    return (
+      <TooltipProvider delayDuration={200}>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Badge role="status" className={cn("bg-amber-500 hover:bg-amber-500/90 text-white border-transparent gap-1 whitespace-nowrap", className)}>
+              <PauseCircle className="w-3 h-3" />
+              {label}
+            </Badge>
+          </TooltipTrigger>
+          <TooltipContent className="max-w-xs">
+            <p className="text-xs">{tip}</p>
+          </TooltipContent>
+        </Tooltip>
+      </TooltipProvider>
+    );
+  })();
+
   if (errored || !rating) {
-    if (!statusNode && !sendHealthNode && !platformNode) return null;
-    return <>{statusNode}{sendHealthNode}{platformNode}</>;
+    if (!statusNode && !sendHealthNode && !platformNode && !pauseNode) return null;
+    return <>{pauseNode}{statusNode}{sendHealthNode}{platformNode}</>;
   }
 
   if (asIcon) {

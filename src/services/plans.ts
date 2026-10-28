@@ -19,8 +19,16 @@ export interface Plan {
   highlight?: boolean;
 }
 
+/**
+ * Lista de GESTÃO (tela /planos, só superadmin). Com `scope=admin` o backend exige login de
+ * verdade e devolve a lista completa (planos ocultos e `features.limits`); token vencido
+ * vira 401, que o interceptor renova e repete. Sem o marcador a rota é a pública da vitrine
+ * e, com o token vencido, devolveria calada só os planos públicos sem os limites — e o
+ * salvar gravaria o plano sem eles. Backend anterior ignora o parâmetro e devolve a lista
+ * completa, como sempre. Vitrine e cadastro chamam `/plan/` direto, sem o marcador.
+ */
 export async function fetchPlans() {
-  return api.get("/plan/");
+  return api.get("/plan/", { params: { scope: "admin" } });
 }
 
 export async function createPlan(data: Partial<Plan>) {

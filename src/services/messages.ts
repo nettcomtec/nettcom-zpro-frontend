@@ -1,5 +1,15 @@
 import api from "@/lib/api";
 import type { AxiosProgressEvent } from "axios";
+import { flushPendingWabaText } from "@/lib/waba-agent-grouping";
+
+// WABA: o texto do atendente que esperava para juntar (lib/waba-agent-grouping) sai
+// antes de outro envio do MESMO atendimento — pelo ticketId que a função já recebe.
+// Sem grupo pendente resolve na hora; nunca lança e espera no máximo 8 s.
+function ticketIdOf(data: FormData | Record<string, unknown> | null | undefined): unknown {
+  if (!data) return undefined;
+  if (typeof FormData !== "undefined" && data instanceof FormData) return data.get("ticketId");
+  return (data as Record<string, unknown>).ticketId;
+}
 
 /** Retorna o endpoint de envio de mensagem conforme o canal (como no front legado InputMensagem). */
 function getMessageSendPath(channel: string | undefined, ticketId: number): string {
@@ -32,6 +42,7 @@ export async function sendMessage(
   data: FormData | Record<string, unknown>,
   options?: { channel?: string; onUploadProgress?: (e: AxiosProgressEvent) => void }
 ) {
+  await flushPendingWabaText(ticketId);
   const path = getMessageSendPath(options?.channel, ticketId);
   const isFormData = data instanceof FormData;
   return api.post(path, data, isFormData ? {
@@ -56,6 +67,7 @@ export async function sendNoRedis(
 
 /** WABA: texto via API Meta (não usa /messages). Payload deve incluir from, tokenApi, ticketId. */
 export async function sendTextWaba(data: Record<string, unknown>) {
+  await flushPendingWabaText(ticketIdOf(data));
   return api.post("/wabametaText", data);
 }
 
@@ -84,6 +96,7 @@ export async function sendMediaWaba(
   formData: FormData,
   options?: { onUploadProgress?: (e: AxiosProgressEvent) => void }
 ) {
+  await flushPendingWabaText(ticketIdOf(formData));
   return api.post("/wabametaFile/", formData, {
     headers: { "Content-Type": "multipart/form-data" },
     timeout: 300000,
@@ -93,6 +106,7 @@ export async function sendMediaWaba(
 
 /** WABA: figurinha (image/webp) via endpoint dedicado /wabametaSticker. */
 export async function sendStickerWaba(formData: FormData) {
+  await flushPendingWabaText(ticketIdOf(formData));
   return api.post("/wabametaSticker/", formData, {
     headers: { "Content-Type": "multipart/form-data" },
     timeout: 300000,
@@ -118,6 +132,8 @@ export async function sendEmailWebmail(whatsappId: number, payload: {
   inReplyTo?: string;
   references?: string[];
   allowOptOutOverride?: boolean;
+  /** Pede ao servidor a troca das variáveis ({{name}}, {{user}}...) no texto/HTML. Backend antigo ignora. */
+  applyVariables?: boolean;
 }) {
   try {
     return await api.post(`/wbot-email/send/${whatsappId}`, payload);
@@ -193,10 +209,12 @@ export async function forwardToOtherChannel(data: { messages: Record<string, unk
 }
 
 export async function sendVcard(ticketId: number, data: { fullName: string; phoneNumber: string; wuid: string }) {
+  await flushPendingWabaText(ticketId);
   return api.post(`/messages/${ticketId}/vcard`, { contact: data });
 }
 
 export async function sendLocation(ticketId: number, data: { latitude: number; longitude: number; name?: string; address?: string }) {
+  await flushPendingWabaText(ticketId);
   return api.post(`/messages/${ticketId}/location`, { location: data });
 }
 
@@ -207,6 +225,7 @@ export async function sendReaction(data: { messageId: string; ticketId: number; 
 
 /** WABA reaction */
 export async function sendReactionWaba(data: Record<string, unknown>) {
+  await flushPendingWabaText(ticketIdOf(data));
   return api.post("/wabametaReaction", data);
 }
 
@@ -406,26 +425,32 @@ export async function sendInteractiveCtaCall(data: Record<string, unknown>) {
 // ── WABA Meta-specific endpoints ──────────────────────────────────────────
 
 export async function sendWabaButtons(data: Record<string, unknown>) {
+  await flushPendingWabaText(ticketIdOf(data));
   return api.post("/wabametaButton", data);
 }
 
 export async function sendWabaList(data: Record<string, unknown>) {
+  await flushPendingWabaText(ticketIdOf(data));
   return api.post("/wabametaList", data);
 }
 
 export async function sendWabaCTAURL(data: Record<string, unknown>) {
+  await flushPendingWabaText(ticketIdOf(data));
   return api.post("/wabametaCTAURL/", data);
 }
 
 export async function sendWabaReplyButtons(data: Record<string, unknown>) {
+  await flushPendingWabaText(ticketIdOf(data));
   return api.post("/wabametaReplyButtons/", data);
 }
 
 export async function sendWabaAddress(data: Record<string, unknown>) {
+  await flushPendingWabaText(ticketIdOf(data));
   return api.post("/wabametaAddress/", data);
 }
 
 export async function sendWabaLocationRequest(data: Record<string, unknown>) {
+  await flushPendingWabaText(ticketIdOf(data));
   return api.post("/wabametaLocationRequest/", data);
 }
 
@@ -433,14 +458,17 @@ export async function sendWabaLocationRequest(data: Record<string, unknown>) {
 // de usuario do WhatsApp). Rota nova: servidor antigo responde 404 e a tela esconde
 // a acao. Body: { tokenApi, from, ticketId, bodyText }.
 export async function sendWabaRequestContactInfo(data: Record<string, unknown>) {
+  await flushPendingWabaText(ticketIdOf(data));
   return api.post("/wabametaRequestContactInfo/", data);
 }
 
 export async function sendWabaLocationMsg(data: Record<string, unknown>) {
+  await flushPendingWabaText(ticketIdOf(data));
   return api.post("/wabametaLocation/", data);
 }
 
 export async function sendWabaFlow(data: Record<string, unknown>) {
+  await flushPendingWabaText(ticketIdOf(data));
   return api.post("/wabametaFlow/", data);
 }
 
@@ -453,16 +481,19 @@ export async function getWabaTemplates(tokenApi: string) {
 
 /** Envia template WABA para um ticket individual (simples, sem variáveis) */
 export async function sendWabaTemplateMsg(data: Record<string, unknown>) {
+  await flushPendingWabaText(ticketIdOf(data));
   return api.post("/wabametaTemplate/", data);
 }
 
 /** Envia template WABA com componentes (variáveis, header, botões) */
 export async function sendWabaTemplateComponents(data: Record<string, unknown>) {
+  await flushPendingWabaText(ticketIdOf(data));
   return api.post("/wabametaTemplateComponents", data);
 }
 
 /** Envia template WABA marketing com componentes */
 export async function sendWabaTemplateMarketingComponents(data: Record<string, unknown>) {
+  await flushPendingWabaText(ticketIdOf(data));
   return api.post("/wabametaMarketingTemplateComponents", data);
 }
 
@@ -502,24 +533,29 @@ export interface WabaTemplate {
 // ── WABA Meta: Product & Catalog ─────────────────────────────────────────────
 
 export async function sendWabaSingleProduct(data: Record<string, unknown>) {
+  await flushPendingWabaText(ticketIdOf(data));
   return api.post("/wabametaSingleProduct/", data);
 }
 
 export async function sendWabaMultiProduct(data: Record<string, unknown>) {
+  await flushPendingWabaText(ticketIdOf(data));
   return api.post("/wabametaMultiProduct/", data);
 }
 
 export async function sendWabaCatalog(data: Record<string, unknown>) {
+  await flushPendingWabaText(ticketIdOf(data));
   return api.post("/wabametaCatalog/", data);
 }
 
 // ── WABA Meta: Template Auth & Carousel ──────────────────────────────────────
 
 export async function sendWabaTemplateAuth(data: Record<string, unknown>) {
+  await flushPendingWabaText(ticketIdOf(data));
   return api.post("/wabametaTemplateAuth/", data);
 }
 
 export async function sendWabaTemplateCarousel(data: Record<string, unknown>) {
+  await flushPendingWabaText(ticketIdOf(data));
   return api.post("/wabametaTemplateCarousel/", data);
 }
 
@@ -540,6 +576,15 @@ export async function sendInstagramHumanAgentText(data: Record<string, unknown>)
 
 export async function sendInstagramPrivateReply(data: Record<string, unknown>) {
   return api.post("/instagramMetaPrivateReply/", data);
+}
+
+// Responder, pelo atendimento, o comentário do Instagram da bolha (público ou Direct).
+// O servidor relê o comentário pelo id da mensagem e o canal pelo atendimento.
+export async function replyInstagramCommentFromTicket(
+  ticketId: number | string,
+  data: { commentMessageId: string; kind: "public" | "private"; body: string }
+) {
+  return api.post<{ id: string; messageId: string }>(`/instagramMetaTicketCommentReply/${ticketId}`, data);
 }
 
 export async function sendInstagramSenderAction(data: Record<string, unknown>) {

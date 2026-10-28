@@ -71,6 +71,7 @@ import {
   fetchPaymentGatewayGlobalConfig,
   updatePaymentGatewayGlobalConfig,
   fetchTenantLicensePolicy,
+  type PaymentGatewayGlobalConfig,
 } from "@/services/tenants";
 import { getLogoUrl, getLogoDarkUrl, getFaviconUrl } from "@/lib/branding-urls";
 import { planAllowsRoute, type PlanFeatures } from "@/lib/plan-capabilities";
@@ -109,6 +110,12 @@ interface Tenant {
   pagarmeCustomerId?: string;
   mercadopagoToken?: string;
   mercadopagoCustomerId?: string;
+  /**
+   * Só leitura (lista de GET /tenants, empresas no Mercado Pago/Pagar.me): id da assinatura
+   * no gateway, sem assinatura ativa (`missing`) ou cobrança pausada pelo revendedor
+   * (`paused`). Ausente = backend antigo ou outro gateway: nada aparece.
+   */
+  gatewaySubscription?: { id?: string | null; missing?: boolean; paused?: boolean } | null;
   planFeatures?: PlanFeatures | null;
   menuVisibility?: Record<string, boolean>[];
   allowedChannels?: string[];
@@ -207,6 +214,7 @@ const MENU_GROUPS: { catKey: string; items: { key: string; labelKey: string }[] 
     { key: "catalogo", labelKey: "item.catalogo" },
     { key: "cobrancas", labelKey: "item.cobrancas" },
     { key: "agendamento-publico", labelKey: "item.agendamentoPublico" },
+    { key: "formularios", labelKey: "item.formularios" },
     { key: "avaliacoes", labelKey: "item.avaliacoes" },
     { key: "logligacao", labelKey: "item.logLigacoes" },
     { key: "painel-atendimentos", labelKey: "item.painelAtendimentos" },
@@ -216,6 +224,9 @@ const MENU_GROUPS: { catKey: string; items: { key: string; labelKey: string }[] 
   ] },
   { catKey: "cat.configuracao", items: [
     { key: "api-service", labelKey: "item.api" },
+    // Desligado: some a tela /aplicativos e as apps da própria empresa (menu, busca,
+    // recentes e link direto); as apps globais do provedor continuam (D30).
+    { key: "aplicativos", labelKey: "item.aplicativos" },
     { key: "audit-log", labelKey: "item.auditLog" },
     { key: "configuracoes", labelKey: "item.configuracoes" },
     { key: "integracoes-meta", labelKey: "item.integracoesMeta" },
@@ -230,6 +241,20 @@ const DEFAULT_MENU: Record<string, boolean> = Object.fromEntries(
 );
 
 const DEFAULT_CHANNELS = CHANNELS.map((c) => c.value);
+
+// Códigos da exclusão de empresa → texto. O TRANSACTION_ABORTED é como o backend
+// antigo devolvia a mesma trava de vínculo. Código fora da lista segue cru.
+const TENANT_DELETE_ERROR_KEYS: Record<string, string> = {
+  ERR_DELETE_TENANT_FOREIGN_KEY_CONSTRAINT: "tenantDeleteErrBlocked",
+  ERR_DELETE_TENANT_TRANSACTION_ABORTED: "tenantDeleteErrBlocked",
+  ERR_DELETE_TENANT_TIMEOUT: "tenantDeleteErrTimeout",
+  ERR_DELETE_TENANT_CONNECTION_ERROR: "tenantDeleteErrConnection",
+  ERR_DATABASE_CONNECTION: "tenantDeleteErrConnection",
+  ERR_DELETE_TENANT_LOCK_ERROR: "tenantDeleteErrLock",
+  ERR_TENANT_DELETE_IN_PROGRESS: "tenantDeleteErrInProgress",
+  ERR_NO_TENANT_FOUND: "tenantDeleteErrNotFound",
+  ERR_DELETE_TENANT_FAILED: "tenantDeleteErrFailed",
+};
 
 const EMPTY: Partial<Tenant> = {
   name: "", status: "active", maxUsers: 5, maxConnections: 3, identity: "",
@@ -331,7 +356,18 @@ export default function TenantsPage() {
   // Cobrança no cadastro — config GLOBAL (payment-config.json), não por-tenant.
   const [globalFirstChargeDueDays, setGlobalFirstChargeDueDays] = useState<number>(30);
   const [globalRequirePaymentBeforeAccess, setGlobalRequirePaymentBeforeAccess] = useState(false);
+  // Tolerância e aviso padrão das empresas do cadastro público (0 = como antes).
+  const [globalSignupBlockDays, setGlobalSignupBlockDays] = useState<number>(0);
+  const [globalSignupAlertDays, setGlobalSignupAlertDays] = useState<number>(0);
   const [savingBillingGlobal, setSavingBillingGlobal] = useState(false);
+  // Salvar só depois de o GET da config global dar certo: antes, uma falha de carga
+  // deixava 30/false nos campos e o Salvar gravava isso por cima da config real.
+  const [billingGlobalLoadState, setBillingGlobalLoadState] = useState<"idle" | "loading" | "loaded" | "error">("idle");
+  // Backend antigo não devolve os 2 campos novos: ficam travados (salvá-los não teria efeito).
+  const [billingGlobalHasSignupDefaults, setBillingGlobalHasSignupDefaults] = useState(false);
+  const billingGlobalLoadingRef = React.useRef(false);
+  const billingGlobalLoadedRef = React.useRef(false);
+  const billingGlobalRetryBlockedRef = React.useRef(false);
   // Licença de empresa única: bloqueia a criação de novas empresas (só a
   // principal loga). Começa em false — enquanto não houver confirmação do
   // servidor, a tela funciona como sempre funcionou.
@@ -408,23 +444,72 @@ export default function TenantsPage() {
 
   useEffect(() => { loadAiCreditsBalances(); }, [loadAiCreditsBalances]);
 
-  // Carrega a config GLOBAL de cobrança no cadastro (payment-config.json).
-  useEffect(() => {
+  // Carrega a config GLOBAL de cobrança no cadastro. Rota só de superadmin (os demais
+  // recebiam 403). Sem resposta válida o card fica travado com aviso; nova tentativa ao
+  // abrir o cadastro de uma empresa (onde o card mora), nunca em laço.
+  const loadBillingGlobal = useCallback(() => {
+    if (user?.profile !== "superadmin") return;
+    if (billingGlobalLoadedRef.current || billingGlobalLoadingRef.current || billingGlobalRetryBlockedRef.current) return;
+    billingGlobalLoadingRef.current = true;
+    setBillingGlobalLoadState("loading");
     fetchPaymentGatewayGlobalConfig()
       .then((res) => {
-        const cfg = (res.data || {}) as { firstChargeDueDays?: number; requirePaymentBeforeAccess?: boolean };
+        const raw: unknown = res?.data;
+        // 200 sem o objeto (corpo vazio, HTML de proxy) conta como falha.
+        if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("invalid global config payload");
+        const cfg = raw as PaymentGatewayGlobalConfig;
         setGlobalFirstChargeDueDays(typeof cfg.firstChargeDueDays === "number" ? cfg.firstChargeDueDays : 30);
         setGlobalRequirePaymentBeforeAccess(cfg.requirePaymentBeforeAccess === true);
+        const hasSignupDefaults =
+          typeof cfg.signupBillingBlockDaysAfter === "number" && typeof cfg.signupBillingAlertDaysBefore === "number";
+        setBillingGlobalHasSignupDefaults(hasSignupDefaults);
+        if (hasSignupDefaults) {
+          setGlobalSignupBlockDays(cfg.signupBillingBlockDaysAfter as number);
+          setGlobalSignupAlertDays(cfg.signupBillingAlertDaysBefore as number);
+        }
+        billingGlobalLoadedRef.current = true;
+        setBillingGlobalLoadState("loaded");
       })
-      .catch(() => { /* mantém defaults */ });
-  }, []);
+      .catch((err: unknown) => {
+        // Recusa definitiva (4xx fora 408/429): tentar de novo não muda a resposta e cada
+        // 403 dispara o aviso global de "sem permissão". O catch recebe o RESPONSE.
+        const e = err as { status?: number; response?: { status?: number } } | null;
+        const status = e?.status ?? e?.response?.status;
+        if (typeof status === "number" && status >= 400 && status < 500 && status !== 408 && status !== 429) {
+          billingGlobalRetryBlockedRef.current = true;
+        }
+        setBillingGlobalLoadState("error");
+      })
+      .finally(() => { billingGlobalLoadingRef.current = false; });
+  }, [user?.profile]);
+
+  useEffect(() => { loadBillingGlobal(); }, [loadBillingGlobal]);
+
+  useEffect(() => {
+    if (dialogOpen) loadBillingGlobal();
+  }, [dialogOpen, loadBillingGlobal]);
+
+  const billingGlobalLoaded = billingGlobalLoadState === "loaded";
+  const clampBillingDays = (v: string) => Math.min(365, Math.max(0, Math.floor(Number(v) || 0)));
 
   async function handleSaveBillingGlobal() {
+    // Mesma trava do botão: desabilitado na tela não garante que o handler não rode.
+    if (!billingGlobalLoaded) {
+      toast.error(t("billingGlobalLoadError"));
+      return;
+    }
     setSavingBillingGlobal(true);
     try {
+      // PUT PARCIAL: só os campos deste card. Nunca reenvia chaves de gateway.
       await updatePaymentGatewayGlobalConfig({
         firstChargeDueDays: globalFirstChargeDueDays,
         requirePaymentBeforeAccess: globalRequirePaymentBeforeAccess,
+        ...(billingGlobalHasSignupDefaults
+          ? {
+              signupBillingBlockDaysAfter: globalSignupBlockDays,
+              signupBillingAlertDaysBefore: globalSignupAlertDays,
+            }
+          : {}),
       });
       toast.success(t("billingGlobalSaved"));
     } catch {
@@ -611,6 +696,8 @@ export default function TenantsPage() {
       if (!editing.id && payload.paymentGateway === "") {
         delete payload.paymentGateway;
       }
+      // Só leitura (vem da lista): nunca volta ao servidor.
+      delete payload.gatewaySubscription;
       if (editing.id) {
         await updateTenant(editing.id as number, payload as Record<string, unknown>);
         toast.success(t("tenantUpdated"));
@@ -709,10 +796,33 @@ export default function TenantsPage() {
         toast.success(t("tenantDeleted", { id: tenant.id }));
       } catch (error) {
         const errData =
-          (error as { response?: { data?: { error?: string } } })?.response?.data ??
-          (error as { data?: { error?: string } })?.data;
-        const errMsg = (errData?.error ?? "").toString();
-        toast.error(errMsg ? t("tenantDeleteErrorWithMessage", { error: errMsg }) : t("tenantDeleteError"));
+          (error as { response?: { data?: { error?: string; message?: string } } })?.response?.data ??
+          (error as { data?: { error?: string; message?: string } })?.data;
+        // O 409 (exclusão em andamento) chega em `message`; os demais em `error`.
+        const errMsg = (errData?.error || errData?.message || "").toString();
+        const knownKey = TENANT_DELETE_ERROR_KEYS[errMsg];
+        // Resposta que não chegou — proxy que corta a espera (504/524; o 524 do
+        // Cloudflare vem sem CORS e chega como erro de rede) ou tempo esgotado: a
+        // exclusão pode seguir no servidor.
+        const errStatus =
+          (error as { status?: number })?.status ??
+          (error as { response?: { status?: number } })?.response?.status;
+        const errCode = (error as { code?: string })?.code;
+        const stillRunning =
+          !knownKey &&
+          (errStatus === 504 ||
+            errStatus === 524 ||
+            errCode === "ECONNABORTED" ||
+            (errCode === "ERR_NETWORK" && !errStatus));
+        toast.error(
+          knownKey
+            ? t(knownKey)
+            : stillRunning
+              ? t("tenantDeleteErrStillRunning")
+              : errMsg
+                ? t("tenantDeleteErrorWithMessage", { error: errMsg })
+                : t("tenantDeleteError")
+        );
       } finally {
         setActionTenantId(null);
       }
@@ -854,6 +964,95 @@ export default function TenantsPage() {
     return <Badge variant="warning-soft">{t("resellerTermsPendingNotRequired")}</Badge>;
   }
 
+  // Trial gravado fora do par enabled/disabled (ex.: o "true" das empresas autocadastradas
+  // entre maio e setembro de 2026): nenhum leitor reconhece esse texto e o prazo nunca
+  // vence. Sem migration — nada muda sozinho —, o selo só aponta quem está assim. Vazio ou
+  // nulo é o default da coluna (trial desligado), não entra.
+  function renderTrialNonStandardBadge(trial: unknown) {
+    if (user?.profile !== "superadmin") return null;
+    if (typeof trial !== "string" || trial.trim() === "" || trial === "enabled" || trial === "disabled") return null;
+    return (
+      <TooltipProvider>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <span className="inline-flex cursor-help">
+              <Badge variant="warning-soft" className="whitespace-nowrap">{t("trialNonStandardBadge")}</Badge>
+            </span>
+          </TooltipTrigger>
+          <TooltipContent side="top">
+            <p className="max-w-[280px] break-words text-xs">{t("trialNonStandardTip", { value: trial })}</p>
+          </TooltipContent>
+        </Tooltip>
+      </TooltipProvider>
+    );
+  }
+
+  // Assinatura no Mercado Pago/Pagar.me (PLANO_COBRANCA_MERCADOPAGO_PAGARME D7/D12.4/D16):
+  // o servidor manda, na lista, o id da assinatura e os sinais "sem assinatura ativa" e
+  // "cobrança pausada". Backend antigo não manda e nada aparece.
+  function gatewaySubscriptionFlags(tenant: Partial<Tenant> | undefined) {
+    const gs = tenant?.gatewaySubscription;
+    if (!gs || typeof gs !== "object") return null;
+    const id = typeof gs.id === "string" && gs.id.trim() ? gs.id.trim() : null;
+    return { id, missing: gs.missing === true, paused: gs.paused === true };
+  }
+
+  function renderGatewaySubscriptionBadge(tenant: Tenant) {
+    if (tenant.paymentGateway !== "mercadopago" && tenant.paymentGateway !== "pagarme") return null;
+    const flags = gatewaySubscriptionFlags(tenant);
+    if (!flags || (!flags.paused && !flags.missing)) return null;
+    // Pausada vence: a assinatura existe, só não cobra.
+    const label = flags.paused ? t("gatewaySubscriptionPaused") : t("gatewaySubscriptionMissing");
+    const tip = flags.paused ? t("gatewaySubscriptionPausedHint") : t("gatewaySubscriptionMissingHint");
+    return (
+      <TooltipProvider>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <span className="inline-flex cursor-help">
+              <Badge variant="warning-soft" className="whitespace-nowrap">{label}</Badge>
+            </span>
+          </TooltipTrigger>
+          <TooltipContent side="top">
+            <p className="max-w-[280px] break-words text-xs">{tip}</p>
+          </TooltipContent>
+        </Tooltip>
+      </TooltipProvider>
+    );
+  }
+
+  // Linha só-leitura no modal, abaixo do Customer ID. Vale só para o gateway e o cliente
+  // SALVOS: trocar um dos dois no formulário faz o servidor esquecer a assinatura ao salvar.
+  function renderGatewaySubscriptionLine(gw: "mercadopago" | "pagarme") {
+    if (!editing.id) return null;
+    const saved = data.find((row) => row.id === editing.id);
+    if (!saved || saved.paymentGateway !== gw) return null;
+    const customerKey = gw === "mercadopago" ? "mercadopagoCustomerId" : "pagarmeCustomerId";
+    if ((saved[customerKey] || "") !== (editing[customerKey] || "")) return null;
+    const flags = gatewaySubscriptionFlags(saved);
+    if (!flags || (!flags.id && !flags.missing && !flags.paused)) return null;
+    return (
+      <div className="space-y-1.5">
+        <Label className="text-xs">{t("gatewaySubscriptionLabel")}</Label>
+        {flags.id && (
+          <Input readOnly value={flags.id} className="h-8 font-mono text-xs bg-muted/40" />
+        )}
+        {(flags.paused || flags.missing) && (
+          <div className="flex items-start gap-1.5 rounded-md border border-warning/30 bg-warning/5 p-2 text-[11px] leading-relaxed">
+            <AlertTriangle className="h-3.5 w-3.5 shrink-0 mt-0.5 text-warning" />
+            <div className="min-w-0 space-y-0.5">
+              <p className="font-semibold">
+                {flags.paused ? t("gatewaySubscriptionPaused") : t("gatewaySubscriptionMissing")}
+              </p>
+              <p className="text-muted-foreground">
+                {flags.paused ? t("gatewaySubscriptionPausedHint") : t("gatewaySubscriptionMissingHint")}
+              </p>
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-6">
       <PageHeader title={t("title")} description={t("description")} help={{
@@ -936,9 +1135,13 @@ export default function TenantsPage() {
                       <TableCell className="text-muted-foreground font-mono text-sm">{tenant.id}</TableCell>
                       <TableCell className="font-medium">{tenant.name}</TableCell>
                       <TableCell>
-                        <Badge variant={tenant.status === "active" ? "success" : tenant.status === "trial" ? "warning" : "destructive"}>
-                          {tenant.status === "active" ? t("statusActive") : tenant.status === "trial" ? "Trial" : (tenant.status as string) || "—"}
-                        </Badge>
+                        <div className="flex flex-wrap items-center gap-1">
+                          <Badge variant={tenant.status === "active" ? "success" : tenant.status === "trial" ? "warning" : "destructive"}>
+                            {tenant.status === "active" ? t("statusActive") : tenant.status === "trial" ? t("statusTrial") : (tenant.status as string) || "—"}
+                          </Badge>
+                          {renderTrialNonStandardBadge(tenant.trial)}
+                          {renderGatewaySubscriptionBadge(tenant)}
+                        </div>
                       </TableCell>
                       <TableCell>{(tenant.plan as string) ?? "—"}</TableCell>
                       <TableCell>{tenant.usersCount ?? tenant.maxUsers ?? "—"}</TableCell>
@@ -1168,20 +1371,24 @@ export default function TenantsPage() {
 
             {/* Trial */}
             <CollapsibleSection title={t("trialPeriodTitle")}>
-              <div className="flex items-center justify-between rounded-lg border p-3 mb-2">
-                <Label className="whitespace-nowrap">
-                  {editing.trial === "enabled" ? t("trialEnabled") : t("trialDisabled")}
-                  <TooltipProvider>
-                    <Tooltip>
-                      <TooltipTrigger asChild>
-                        <Info className="ml-1 inline-block h-3.5 w-3.5 align-[-2px] text-muted-foreground cursor-help" />
-                      </TooltipTrigger>
-                      <TooltipContent side="top">
-                        <p className="max-w-[240px] text-xs">{t("trialEnabledHelp")}</p>
-                      </TooltipContent>
-                    </Tooltip>
-                  </TooltipProvider>
-                </Label>
+              <div className="flex items-center justify-between gap-2 rounded-lg border p-3 mb-2">
+                {/* O interruptor mostra "desligado" para o valor fora do padrão: o selo diz o que está gravado. */}
+                <div className="flex min-w-0 flex-wrap items-center gap-2">
+                  <Label className="whitespace-nowrap">
+                    {editing.trial === "enabled" ? t("trialEnabled") : t("trialDisabled")}
+                    <TooltipProvider>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <Info className="ml-1 inline-block h-3.5 w-3.5 align-[-2px] text-muted-foreground cursor-help" />
+                        </TooltipTrigger>
+                        <TooltipContent side="top">
+                          <p className="max-w-[240px] text-xs">{t("trialEnabledHelp")}</p>
+                        </TooltipContent>
+                      </Tooltip>
+                    </TooltipProvider>
+                  </Label>
+                  {renderTrialNonStandardBadge(editing.trial)}
+                </div>
                 <Switch
                   checked={editing.trial === "enabled"}
                   onCheckedChange={(v) => set("trial", v ? "enabled" : "disabled")}
@@ -1242,6 +1449,14 @@ export default function TenantsPage() {
                     </p>
                     <p className="text-[11px] text-muted-foreground mt-0.5">{t("firstChargeGlobalDesc")}</p>
                   </div>
+                  {billingGlobalLoadState === "error" && (
+                    <div className="flex items-start gap-1.5 rounded-md border border-destructive/40 bg-destructive/5 p-2 text-[11px] text-destructive">
+                      <AlertTriangle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
+                      <span>{t("billingGlobalLoadError")}</span>
+                    </div>
+                  )}
+                  {/* Campos inativos até a config chegar: o que fosse digitado antes seria
+                      trocado, sem aviso, pelo valor carregado. */}
                   <div className="space-y-1.5">
                     <Label className="text-xs">{t("labelFirstChargeDueDays")}</Label>
                     <Input
@@ -1249,9 +1464,40 @@ export default function TenantsPage() {
                       className="h-8 text-sm"
                       value={globalFirstChargeDueDays}
                       onChange={(e) => setGlobalFirstChargeDueDays(Math.min(365, Math.max(0, Number(e.target.value) || 0)))}
+                      disabled={!billingGlobalLoaded}
                     />
                     <p className="text-[11px] text-muted-foreground">{t("firstChargeDueDaysHelp")}</p>
                   </div>
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <div className="space-y-1.5">
+                      <Label className="text-xs">{t("labelSignupBlockDays")}</Label>
+                      <Input
+                        type="number" min={0} max={365} step={1}
+                        className="h-8 text-sm"
+                        value={globalSignupBlockDays}
+                        onChange={(e) => setGlobalSignupBlockDays(clampBillingDays(e.target.value))}
+                        disabled={!billingGlobalLoaded || !billingGlobalHasSignupDefaults}
+                      />
+                      <p className="text-[11px] text-muted-foreground">{t("signupBlockDaysHelp")}</p>
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label className="text-xs">{t("labelSignupAlertDays")}</Label>
+                      <Input
+                        type="number" min={0} max={365} step={1}
+                        className="h-8 text-sm"
+                        value={globalSignupAlertDays}
+                        onChange={(e) => setGlobalSignupAlertDays(clampBillingDays(e.target.value))}
+                        disabled={!billingGlobalLoaded || !billingGlobalHasSignupDefaults}
+                      />
+                      <p className="text-[11px] text-muted-foreground">{t("signupAlertDaysHelp")}</p>
+                    </div>
+                  </div>
+                  {billingGlobalLoaded && !billingGlobalHasSignupDefaults && (
+                    <p className="flex items-start gap-1.5 text-[11px] text-muted-foreground">
+                      <Info className="h-3.5 w-3.5 shrink-0 mt-0.5" />
+                      <span>{t("billingGlobalFieldsUnavailable")}</span>
+                    </p>
+                  )}
                   <div className="flex items-start justify-between gap-3 rounded-md border bg-background p-2.5">
                     <div className="flex-1 min-w-0">
                       <Label className="text-xs font-semibold">{t("labelRequirePaymentBeforeAccess")}</Label>
@@ -1260,9 +1506,10 @@ export default function TenantsPage() {
                     <Switch
                       checked={globalRequirePaymentBeforeAccess}
                       onCheckedChange={setGlobalRequirePaymentBeforeAccess}
+                      disabled={!billingGlobalLoaded}
                     />
                   </div>
-                  <Button size="sm" variant="outline" onClick={handleSaveBillingGlobal} disabled={savingBillingGlobal}>
+                  <Button size="sm" variant="outline" onClick={handleSaveBillingGlobal} disabled={savingBillingGlobal || !billingGlobalLoaded}>
                     {t("saveBillingGlobal")}
                   </Button>
                 </div>
@@ -1333,12 +1580,13 @@ export default function TenantsPage() {
                   <div className="space-y-2">
                     <div className="space-y-1.5">
                       <Label className="text-xs">{t("labelPagarmeToken")}</Label>
-                      <Input type="password" value={editing.pagarmeToken || ""} onChange={(e) => set("pagarmeToken", e.target.value)} placeholder="ak_live_..." />
+                      <Input type="password" value={editing.pagarmeToken || ""} onChange={(e) => set("pagarmeToken", e.target.value)} placeholder="sk_..." />
                     </div>
                     <div className="space-y-1.5">
                       <Label className="text-xs">{t("labelPagarmeCustomerId")}</Label>
                       <Input value={editing.pagarmeCustomerId || ""} onChange={(e) => set("pagarmeCustomerId", e.target.value)} placeholder="cus_..." />
                     </div>
+                    {renderGatewaySubscriptionLine("pagarme")}
                   </div>
                 )}
 
@@ -1352,6 +1600,7 @@ export default function TenantsPage() {
                       <Label className="text-xs">{t("labelMercadopagoCustomerId")}</Label>
                       <Input value={editing.mercadopagoCustomerId || ""} onChange={(e) => set("mercadopagoCustomerId", e.target.value)} />
                     </div>
+                    {renderGatewaySubscriptionLine("mercadopago")}
                   </div>
                 )}
 
@@ -2122,6 +2371,11 @@ export default function TenantsPage() {
           {confirmDialog?.type === "cleanFiles" && (
             <div className="mt-2 rounded-lg border border-warning/30 bg-warning/5 px-3 py-2 text-xs text-foreground">
               {t("externalStorageNoticeAction")}
+            </div>
+          )}
+          {confirmDialog?.type === "deleteTenant" && (
+            <div className="mt-2 rounded-lg border border-warning/30 bg-warning/5 px-3 py-2 text-xs text-foreground">
+              {t("deleteTenantNote")}
             </div>
           )}
           {/* D35: saldo remanescente de Créditos de IA fica à vista antes de excluir */}

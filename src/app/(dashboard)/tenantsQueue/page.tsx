@@ -47,16 +47,16 @@ export default function TenantsQueuePage() {
   }, []);
 
   async function handleRestart() {
-    if (!confirm("Reiniciar todas as filas?")) return;
+    if (!confirm(t("restartAllTitle"))) return;
     setRestarting(true);
-    try { await restartQueue(); toast.success("Filas reiniciadas"); load(); }
-    catch { toast.error("Erro ao reiniciar"); }
+    try { await restartQueue(); toast.success(t("restartSuccess")); load(); }
+    catch { toast.error(t("restartFailed")); }
     finally { setRestarting(false); }
   }
 
   async function handleReprocess(name: string) {
-    try { await reprocessQueue(name); toast.success(`Fila "${name}" reprocessada`); load(); }
-    catch { toast.error("Erro ao reprocessar"); }
+    try { await reprocessQueue(name); toast.success(t("reprocessSuccessNamed", { name })); load(); }
+    catch { toast.error(t("reprocessFailed")); }
   }
 
   return (
@@ -69,26 +69,26 @@ export default function TenantsQueuePage() {
         ],
       }}>
         <div className="flex gap-2">
-          <Button variant="outline" size="sm" onClick={load}><RefreshCw className="mr-2 h-4 w-4" />Atualizar</Button>
+          <Button variant="outline" size="sm" onClick={load}><RefreshCw className="mr-2 h-4 w-4" />{t("refresh")}</Button>
           <Button variant="outline" size="sm" onClick={() => window.open("/bull-board", "_blank")}>
             <ExternalLink className="mr-2 h-4 w-4" />Bull Board
           </Button>
           <Button variant="destructive" size="sm" disabled={restarting} onClick={handleRestart}>
-            <RotateCcw className="mr-2 h-4 w-4" />{restarting ? "Reiniciando..." : "Reiniciar"}
+            <RotateCcw className="mr-2 h-4 w-4" />{restarting ? t("restarting") : t("restartAll")}
           </Button>
         </div>
       </PageHeader>
 
       {loading ? <Skeleton className="h-64 w-full" /> : queues.length === 0 ? (
-        <EmptyState icon={ListOrdered} title="Nenhuma fila" description="Nenhuma fila Bull encontrada" />
+        <EmptyState icon={ListOrdered} title={t("noQueues")} description={t("noQueuesDesc")} />
       ) : (
         <Card><CardContent className="p-0 overflow-x-auto">
           <Table>
             <TableHeader><TableRow>
-              <SortableTableHead sortKey="name" currentSortKey={sortKey} sortDir={sortDir} onSort={handleSort}>Nome da Fila</SortableTableHead>
-              <SortableTableHead sortKey="failed" currentSortKey={sortKey} sortDir={sortDir} onSort={handleSort}>Falhas</SortableTableHead>
-              <SortableTableHead sortKey="active" currentSortKey={sortKey} sortDir={sortDir} onSort={handleSort}>Ativas</SortableTableHead>
-              <SortableTableHead sortKey="waiting" currentSortKey={sortKey} sortDir={sortDir} onSort={handleSort}>Aguardando</SortableTableHead>
+              <SortableTableHead sortKey="name" currentSortKey={sortKey} sortDir={sortDir} onSort={handleSort}>{t("colQueueName")}</SortableTableHead>
+              <SortableTableHead sortKey="failed" currentSortKey={sortKey} sortDir={sortDir} onSort={handleSort}>{t("colFailed")}</SortableTableHead>
+              <SortableTableHead sortKey="active" currentSortKey={sortKey} sortDir={sortDir} onSort={handleSort}>{t("colActive")}</SortableTableHead>
+              <SortableTableHead sortKey="waiting" currentSortKey={sortKey} sortDir={sortDir} onSort={handleSort}>{t("colWaiting")}</SortableTableHead>
               <TableHead />
             </TableRow></TableHeader>
             <TableBody>
@@ -102,7 +102,7 @@ export default function TenantsQueuePage() {
                     <TableCell><Badge variant="secondary">{q.waiting ?? 0}</Badge></TableCell>
                     <TableCell>
                       <Button variant="ghost" size="sm" onClick={() => handleReprocess(name)}>
-                        <Play className="mr-1 h-3 w-3" />Reprocessar
+                        <Play className="mr-1 h-3 w-3" />{t("reprocess")}
                       </Button>
                     </TableCell>
                   </TableRow>

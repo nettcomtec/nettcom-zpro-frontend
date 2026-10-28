@@ -20,9 +20,10 @@ import { AccessDenied } from "@/components/layout/access-denied";
 import type { PageHelpProps } from "@/components/layout/page-help";
 import { usePageAccess } from "@/hooks/use-page-access";
 import { useLiveMode } from "@/hooks/use-live-mode";
+import { useRegion } from "@/hooks/use-region";
 import { useAuthStore } from "@/stores/auth-store";
 import { printReportTable } from "@/lib/print-report";
-import { formatCurrencyBRL, formatNumber } from "@/lib/format";
+import { formatNumber } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
 import { format, sub } from "date-fns";
@@ -64,6 +65,9 @@ export default function RelatorioFunilPorAtendentePage() {
   const allowed = usePageAccess("relatorios", { adminSuperOnly: true });
   const featureOn = useAuthStore((s) => s.hasFeature("funnelKanban"));
   const { isLiveMode } = useLiveMode();
+  // Valor das oportunidades = dinheiro da empresa: moeda e formato do país da Região
+  // (tela, CSV e impressão; a planilha segue com o número puro).
+  const { formatMoney } = useRegion();
 
   const [dateStart, setDateStart] = useState(format(sub(new Date(), { days: 30 }), "yyyy-MM-dd"));
   const [dateEnd, setDateEnd] = useState(format(new Date(), "yyyy-MM-dd"));
@@ -162,11 +166,11 @@ export default function RelatorioFunilPorAtendentePage() {
   const matrix = () => [
     ...sortedData.map((r) => [
       r.atendente, formatNumber(r.ganhas), formatNumber(r.perdidas),
-      formatCurrencyBRL(r.valorGanho), formatCurrencyBRL(r.valorPerdido), fmtConversion(r.conversao),
+      formatMoney(r.valorGanho), formatMoney(r.valorPerdido), fmtConversion(r.conversao),
     ]),
     [
       t("common.total"), formatNumber(totals.ganhas), formatNumber(totals.perdidas),
-      formatCurrencyBRL(totals.valorGanho), formatCurrencyBRL(totals.valorPerdido), fmtConversion(totals.conversao),
+      formatMoney(totals.valorGanho), formatMoney(totals.valorPerdido), fmtConversion(totals.conversao),
     ],
   ];
 
@@ -242,7 +246,7 @@ export default function RelatorioFunilPorAtendentePage() {
   const kpis = [
     { key: "ganhas", label: t("funnelByUser.colWon"), value: formatNumber(totals.ganhas), blur: false },
     { key: "perdidas", label: t("funnelByUser.colLost"), value: formatNumber(totals.perdidas), blur: false },
-    { key: "valorGanho", label: t("funnelByUser.colWonValue"), value: formatCurrencyBRL(totals.valorGanho), blur: true },
+    { key: "valorGanho", label: t("funnelByUser.colWonValue"), value: formatMoney(totals.valorGanho), blur: true },
     { key: "conversao", label: t("funnelByUser.colConversion"), value: fmtConversion(totals.conversao), blur: false },
   ];
 
@@ -367,10 +371,10 @@ export default function RelatorioFunilPorAtendentePage() {
                         <TableCell className="text-center tabular-nums text-emerald-600 dark:text-emerald-400">{formatNumber(r.ganhas)}</TableCell>
                         <TableCell className="text-center tabular-nums text-destructive">{formatNumber(r.perdidas)}</TableCell>
                         <TableCell className={cn("whitespace-nowrap text-right font-semibold tabular-nums", isLiveMode && "live-blur-text")}>
-                          {formatCurrencyBRL(r.valorGanho)}
+                          {formatMoney(r.valorGanho)}
                         </TableCell>
                         <TableCell className={cn("whitespace-nowrap text-right tabular-nums text-muted-foreground", isLiveMode && "live-blur-text")}>
-                          {formatCurrencyBRL(r.valorPerdido)}
+                          {formatMoney(r.valorPerdido)}
                         </TableCell>
                         <TableCell className="text-center tabular-nums">{fmtConversion(r.conversao)}</TableCell>
                       </TableRow>
@@ -382,10 +386,10 @@ export default function RelatorioFunilPorAtendentePage() {
                       <TableCell className="text-center tabular-nums">{formatNumber(totals.ganhas)}</TableCell>
                       <TableCell className="text-center tabular-nums">{formatNumber(totals.perdidas)}</TableCell>
                       <TableCell className={cn("whitespace-nowrap text-right tabular-nums", isLiveMode && "live-blur-text")}>
-                        {formatCurrencyBRL(totals.valorGanho)}
+                        {formatMoney(totals.valorGanho)}
                       </TableCell>
                       <TableCell className={cn("whitespace-nowrap text-right tabular-nums", isLiveMode && "live-blur-text")}>
-                        {formatCurrencyBRL(totals.valorPerdido)}
+                        {formatMoney(totals.valorPerdido)}
                       </TableCell>
                       <TableCell className="text-center tabular-nums">{fmtConversion(totals.conversao)}</TableCell>
                     </TableRow>

@@ -14,6 +14,18 @@ export const MENU_VISIBILITY_ALIASES: Record<string, string> = {
   "nuvemshop": "nuvemshop-produtos",
 };
 
+const MENU_VISIBILITY_REVERSE_ALIASES: Record<string, string> = Object.fromEntries(
+  Object.entries(MENU_VISIBILITY_ALIASES).map(([kebab, other]) => [other, kebab]),
+);
+
+// A outra grafia da chave, nos DOIS sentidos. O sentido inverso (camelCase → kebab)
+// existe porque as páginas consultam a camelCase (usePageAccess, guard de
+// /facebook-comentarios) enquanto o painel do tenant e o plano gravam a kebab: só
+// com a ida o interruptor "Facebook" desligado em /tenants não barrava a URL.
+export function menuKeyAlias(key: string): string | undefined {
+  return MENU_VISIBILITY_ALIASES[key] ?? MENU_VISIBILITY_REVERSE_ALIASES[key];
+}
+
 // Um item/rota está oculto se a chave OU o seu alias (2ª grafia) estiver marcado
 // como false. Só oculta quando ALGUMA grafia é explicitamente false (intenção real
 // de esconder) — nunca por ausência —, então é seguro para todos os perfis.
@@ -22,7 +34,7 @@ export function isMenuRouteHidden(
   routeName: string,
 ): boolean {
   if (menuVisibility[routeName] === false) return true;
-  const aliasKey = MENU_VISIBILITY_ALIASES[routeName];
+  const aliasKey = menuKeyAlias(routeName);
   if (aliasKey && menuVisibility[aliasKey] === false) return true;
   return false;
 }

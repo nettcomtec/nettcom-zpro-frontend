@@ -14,21 +14,48 @@
 //   - `tags` permitem filtrar por tema ATRAVESSANDO os cards, sem mover nenhuma
 //     setting de lugar.
 
-/** Chaves i18n dos 5 cards — idênticas às usadas hoje em geral/page.tsx. */
+/**
+ * Chaves i18n dos cards — idênticas às usadas hoje em geral/page.tsx.
+ * Exceção: `regionSettingsTitle` (card "Região e idioma") tem título e descrição
+ * no namespace `regionSettings` (title/description), não em `configGeralPage`.
+ */
 export type SettingSectionKey =
   | "ticketsVisibilityTitle"
   | "botChatbotTitle"
   | "orgDistTitle"
   | "attendanceResourcesTitle"
+  | "regionSettingsTitle"
   | "systemActionsTitle";
 
+// Seção nova PRECISA entrar aqui também: `sectionCounts` da página indexa por esta
+// lista e acessaria `undefined` para uma seção fora dela.
 export const SETTING_SECTION_ORDER: SettingSectionKey[] = [
   "ticketsVisibilityTitle",
   "botChatbotTitle",
   "orgDistTitle",
   "attendanceResourcesTitle",
+  "regionSettingsTitle",
   "systemActionsTitle",
 ];
+
+/**
+ * Card "Região e idioma": país, moeda e idioma das mensagens ao cliente (colunas do
+ * Tenant, `""` = herdar o padrão geral) + a ação "aplicar textos padrão". São
+ * seletores e uma execução, não interruptores: ficam FORA da contagem "N de M
+ * ativas". O card só existe quando o backend conhece a Região.
+ */
+export const REGION_SECTION_KEY: SettingSectionKey = "regionSettingsTitle";
+export const REGION_SETTING_KEYS = {
+  country: "regionCountry",
+  currency: "regionCurrency",
+  language: "regionLanguage",
+} as const;
+export const REGION_APPLY_ACTION_KEY = "regionApplyDefaults";
+
+/** Seções cujos itens não entram na contagem "N de M ativas". */
+export function isUncountedSection(section: SettingSectionKey): boolean {
+  return section === "systemActionsTitle" || section === REGION_SECTION_KEY;
+}
 
 /** Subgrupos visuais (chaves i18n novas em configGeralPage). */
 export type SettingGroupKey =
@@ -126,6 +153,7 @@ export const SETTINGS_CATALOG: SettingCatalogEntry[] = [
   { key: "windowTimerBanner", section: "orgDistTitle", group: "groupWaba", tags: ["waba"] },
   { key: "wabaTemplateBanner", section: "orgDistTitle", group: "groupWaba", tags: ["waba"] },
   { key: "windowClosedBanner", section: "orgDistTitle", group: "groupWaba", tags: ["waba"] },
+  { key: "freeEntryWindowBanner", section: "orgDistTitle", group: "groupWaba", tags: ["waba"] },
 
   // ── Organização e Distribuição · Telefonia e identificadores ──────────────
   { key: "validateContact", section: "orgDistTitle", group: "groupPhone", tags: [] },
@@ -192,6 +220,12 @@ export const SETTINGS_CATALOG: SettingCatalogEntry[] = [
   { key: "limiteTickets", section: "attendanceResourcesTitle", group: "groupLimits", tags: ["limits"] },
   { key: "limiteChatInterno", section: "attendanceResourcesTitle", group: "groupLimits", tags: ["limits"] },
   { key: "forbiddenNumbers", section: "attendanceResourcesTitle", group: "groupLimits", tags: ["limits"] },
+
+  // ── Região e idioma (seletores + 1 ação; fora da contagem de ativas) ──────
+  { key: "regionCountry", section: "regionSettingsTitle", tags: [] },
+  { key: "regionCurrency", section: "regionSettingsTitle", tags: [] },
+  { key: "regionLanguage", section: "regionSettingsTitle", tags: [] },
+  { key: "regionApplyDefaults", section: "regionSettingsTitle", tags: [] },
 
   // ── Ações do Sistema (execuções, não configurações) ───────────────────────
   { key: "forceMessage", section: "systemActionsTitle", tags: [] },

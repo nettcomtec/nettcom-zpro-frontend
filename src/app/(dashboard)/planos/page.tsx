@@ -23,7 +23,7 @@ import {
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
-import { Plus, MoreVertical, Pencil, Trash2, Package, Eye, EyeOff, Globe, CreditCard, Webhook, Copy, Check, RefreshCw, Info } from "lucide-react";
+import { Plus, MoreVertical, Pencil, Trash2, Package, Eye, EyeOff, Globe, CreditCard, Webhook, Copy, Check, RefreshCw, Info, AlertTriangle } from "lucide-react";
 import { toast } from "sonner";
 import { fetchPlans, createPlan, updatePlan, deletePlan, type Plan } from "@/services/plans";
 import { PLAN_CAPABILITIES, CAPABILITY_CATEGORIES } from "@/lib/plan-capabilities";
@@ -170,6 +170,15 @@ export default function PlanosPage() {
   // Recusa definitiva do servidor (4xx, fora 408/429): tentar de novo não muda a resposta
   // e cada 403 dispara o aviso global de "sem permissão".
   const globalConfigRetryBlockedRef = useRef(false);
+  // Configuração de pagamento ausente no servidor (voltou aos padrões) com empresas já
+  // cobradas por gateway — típico de atualização que recriou o container. Só leitura.
+  const [globalConfigMissing, setGlobalConfigMissing] = useState(false);
+  // Só leitura, aditivos do backend novo (PLANO_COBRANCA_MERCADOPAGO_PAGARME §5.9):
+  // gateways em que o teste grátis vale no cadastro (null = backend antigo, textos de hoje)
+  // e segredos de aviso de pagamento definidos no servidor (vencem o da tela; null = backend
+  // antigo, sem o aviso de segredo vazio — ele não saberia dizer se o servidor já tem um).
+  const [signupTrialGateways, setSignupTrialGateways] = useState<string[] | null>(null);
+  const [webhookSecretFromEnv, setWebhookSecretFromEnv] = useState<{ pagarme: boolean; mercadopago: boolean } | null>(null);
 
   // ── Webhook secrets (superadmin-only, stored in payment-config.json) ──────
   const [asaasWebhookToken, setAsaasWebhookToken] = useState("");
@@ -178,6 +187,42 @@ export default function PlanosPage() {
   const [mercadopagoWebhookSecret, setMercadopagoWebhookSecret] = useState("");
   const [savingWebhooks, setSavingWebhooks] = useState(false);
   const [copiedWebhook, setCopiedWebhook] = useState<string | null>(null);
+
+  // Teste grátis também no Mercado Pago/Pagar.me: o servidor diz em quais gateways ele vale
+  // agora (com os interruptores atuais). Os textos "todos os gateways" citam os dois: só com
+  // os dois na lista (com um interruptor desligado, a tela prometeria o que não vale — I7).
+  // Sem a lista (backend antigo), os textos de hoje.
+  const trialAllGateways =
+    !!signupTrialGateways &&
+    signupTrialGateways.includes("mercadopago") &&
+    signupTrialGateways.includes("pagarme");
+  // Backend que já conhece a cobrança nova do Mercado Pago/Pagar.me (manda um dos dois campos).
+  const gatewayBillingV2 = signupTrialGateways !== null || webhookSecretFromEnv !== null;
+
+  /**
+   * Segredo do aviso de pagamento (Pagar.me/Mercado Pago, D12.2): vazio, o servidor aceita
+   * aviso sem conferir quem mandou. Continua aceitando (para não quebrar quem usa assim), mas
+   * a tela avisa. Definido no servidor (variável de ambiente) vence o da tela: só a nota.
+   * Backend antigo não diz de onde vem o segredo, então nada aparece.
+   */
+  function renderWebhookSecretStatus(gw: "pagarme" | "mercadopago", value: string) {
+    if (!webhookSecretFromEnv || !globalConfigLoaded) return null;
+    if (webhookSecretFromEnv[gw]) {
+      return (
+        <p className="flex items-start gap-1.5 text-[11px] text-muted-foreground">
+          <Info className="h-3.5 w-3.5 shrink-0 mt-0.5" />
+          <span>{t("webhookSecretFromEnvNote")}</span>
+        </p>
+      );
+    }
+    if (value.trim()) return null;
+    return (
+      <div className="flex items-start gap-2 rounded-md border border-amber-300 bg-amber-50 p-2 text-[11px] leading-relaxed text-amber-900 dark:border-amber-800/60 dark:bg-amber-950/30 dark:text-amber-200">
+        <AlertTriangle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
+        <p>{t("webhookSecretMissingWarning", { gateway: gw === "mercadopago" ? "Mercado Pago" : "Pagar.me" })}</p>
+      </div>
+    );
+  }
 
   const backendUrl =
     (typeof window !== "undefined" ? process.env.NEXT_PUBLIC_API_URL : "") ||
@@ -245,6 +290,19 @@ export default function PlanosPage() {
       setStripeWebhookSecret(cfg.stripeWebhookSecret || "");
       setPagarmeWebhookBasic(cfg.pagarmeWebhookBasic || "");
       setMercadopagoWebhookSecret(cfg.mercadopagoWebhookSecret || "");
+      // Aditivo do backend novo; o antigo não manda e o aviso não aparece.
+      setGlobalConfigMissing(cfg.configMissing === true);
+      setSignupTrialGateways(
+        Array.isArray(cfg.signupTrialGateways)
+          ? (cfg.signupTrialGateways as unknown[]).filter((g): g is string => typeof g === "string")
+          : null
+      );
+      const fromEnv = cfg.webhookSecretFromEnv;
+      setWebhookSecretFromEnv(
+        fromEnv && typeof fromEnv === "object" && !Array.isArray(fromEnv)
+          ? { pagarme: fromEnv.pagarme === true, mercadopago: fromEnv.mercadopago === true }
+          : null
+      );
       globalConfigLoadedRef.current = true;
       setGlobalConfigLoaded(true);
       return true;
@@ -389,6 +447,8 @@ export default function PlanosPage() {
         requirePaymentBeforeAccess: globalRequirePaymentBeforeAccess,
       });
       toast.success(t("globalConfigSaved"));
+      // Gravada a configuração, o servidor deixa de estar nos padrões.
+      setGlobalConfigMissing(false);
     } catch { toast.error(t("errorSavingGlobalConfig")); }
     finally { setSavingGlobal(false); }
   }
@@ -406,6 +466,7 @@ export default function PlanosPage() {
         mercadopagoWebhookSecret,
       });
       toast.success(t("webhookSecretsSaved"));
+      setGlobalConfigMissing(false);
     } catch { toast.error(t("errorSavingWebhookSecrets")); }
     finally { setSavingWebhooks(false); }
   }
@@ -545,6 +606,14 @@ export default function PlanosPage() {
           </div>
           <p className="text-xs text-muted-foreground">{t("sectionGlobalConfigDesc")}</p>
 
+          {/* Configuração ausente no servidor com empresas já cobradas: pede conferir e salvar. */}
+          {globalConfigMissing && (
+            <div className="flex items-start gap-2 rounded-md border border-amber-300 bg-amber-50 p-3 text-xs leading-relaxed text-amber-900 dark:border-amber-800/60 dark:bg-amber-950/30 dark:text-amber-200">
+              <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
+              <p>{t("configMissingWarning")}</p>
+            </div>
+          )}
+
           {/* Banner: como funcionam planos, cobrança e bloqueio */}
           <div className="flex items-start gap-2 rounded-md border border-blue-200 bg-blue-50 p-3 text-xs leading-relaxed text-blue-900 dark:border-blue-900/40 dark:bg-blue-950/30 dark:text-blue-200">
             <Info className="h-4 w-4 shrink-0 mt-0.5" />
@@ -555,7 +624,10 @@ export default function PlanosPage() {
                 <li>{t("billingFlowI1")}</li>
                 <li>{t("billingFlowI2")}</li>
                 <li>{t("billingFlowI3")}</li>
+                <li>{t("billingFlowI4")}</li>
+                <li>{trialAllGateways ? t("billingFlowI5AllGateways") : t("billingFlowI5")}</li>
               </ul>
+              <p>{t("noToleranceNote")}</p>
             </div>
           </div>
 
@@ -626,6 +698,7 @@ export default function PlanosPage() {
               disabled={!globalConfigLoaded}
             />
             <p className="text-xs text-muted-foreground">{t("firstChargeDueDaysHelp")}</p>
+            <p className="text-xs text-muted-foreground">{t("firstChargeAllInvoicesNote")}</p>
           </div>
 
           <div className="flex items-start justify-between gap-3 rounded-lg border p-3">
@@ -712,18 +785,21 @@ export default function PlanosPage() {
                   </>
                 )}
                 {gw === "pagarme" && (
-                  <TokenInput
-                    label={t("webhookPagarmeBasicLabel")}
-                    placeholder={t("webhookPagarmeBasicPlaceholder")}
-                    value={pagarmeWebhookBasic}
-                    onChange={setPagarmeWebhookBasic}
-                    disabled={!globalConfigLoaded}
-                    generateLabel={t("generateToken")}
-                    onGenerate={() => {
-                      setPagarmeWebhookBasic(generateBasicPair());
-                      toast.success(t("tokenGenerated"));
-                    }}
-                  />
+                  <>
+                    <TokenInput
+                      label={t("webhookPagarmeBasicLabel")}
+                      placeholder={t("webhookPagarmeBasicPlaceholder")}
+                      value={pagarmeWebhookBasic}
+                      onChange={setPagarmeWebhookBasic}
+                      disabled={!globalConfigLoaded}
+                      generateLabel={t("generateToken")}
+                      onGenerate={() => {
+                        setPagarmeWebhookBasic(generateBasicPair());
+                        toast.success(t("tokenGenerated"));
+                      }}
+                    />
+                    {renderWebhookSecretStatus("pagarme", pagarmeWebhookBasic)}
+                  </>
                 )}
                 {gw === "mercadopago" && (
                   <>
@@ -735,6 +811,15 @@ export default function PlanosPage() {
                       disabled={!globalConfigLoaded}
                     />
                     <p className="text-[11px] text-muted-foreground">{t("webhookMpNote")}</p>
+                    {renderWebhookSecretStatus("mercadopago", mercadopagoWebhookSecret)}
+                    {/* O painel do Mercado Pago pode não configurar o aviso de assinaturas: o
+                        sistema relê na volta do cliente e a cada 6 h (backend novo). */}
+                    {gatewayBillingV2 && (
+                      <p className="flex items-start gap-1.5 text-[11px] text-muted-foreground">
+                        <Info className="h-3.5 w-3.5 shrink-0 mt-0.5" />
+                        <span>{t("webhookMpSubscriptionNote")}</span>
+                      </p>
+                    )}
                   </>
                 )}
               </div>
@@ -873,8 +958,13 @@ export default function PlanosPage() {
                 <p className="text-xs text-muted-foreground">{t("galleryQuotaHelp")}</p>
               </div>
             </div>
-            <div className="flex items-center justify-between rounded-lg border p-3">
-              <Label>{t("labelTrialPeriod")}</Label>
+            <div className="flex items-start justify-between gap-3 rounded-lg border p-3">
+              <div className="min-w-0 flex-1">
+                <Label>{t("labelTrialPeriod")}</Label>
+                <p className="mt-0.5 text-xs text-muted-foreground">
+                  {trialAllGateways ? t("trialGatewayNoteAllGateways") : t("trialGatewayNote")}
+                </p>
+              </div>
               <Switch
                 checked={editing.trial === "enabled"}
                 onCheckedChange={(v) => setEditing({ ...editing, trial: v ? "enabled" : "disabled" })}

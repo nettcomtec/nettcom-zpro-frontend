@@ -31,6 +31,7 @@ import { AreaChartCard } from "@/components/charts/area-chart-card";
 import { BarChartCard } from "@/components/charts/bar-chart-card";
 import { StackedBarChartCard } from "@/components/charts/stacked-bar-chart-card";
 import { StatCard } from "@/components/charts/stat-card";
+import { getBackendErrorCode, isMetaTokenUnauthorized } from "@/lib/backend-error-code";
 
 import * as gupshupApi from "@/services/gupshup";
 import * as dialog360Api from "@/services/dialog360";
@@ -233,6 +234,7 @@ function accountDisplayValue(v: any): string {
 
 export default function AnalyticsPage() {
   const t = useTranslations("Analytics");
+  const tCommon = useTranslations("common");
   const locale = useLocale();
   const router = useRouter();
   const search = useSearchParams();
@@ -277,7 +279,7 @@ export default function AnalyticsPage() {
       const r = await api.getWABAData({ wabaId, businessToken });
       setWabaData(r.data);
     } catch (e: any) {
-      toast.error(e?.response?.data?.error || e?.response?.data?.message || e.message);
+      toast.error(isMetaTokenUnauthorized(e) ? tCommon("metaTokenInvalidReconnect") : (getBackendErrorCode(e) || e?.message || tCommon("errorFetchingData")));
     } finally {
       setLoading(false);
     }
@@ -301,7 +303,7 @@ export default function AnalyticsPage() {
       });
       setAnalytics(r.data);
     } catch (e: any) {
-      toast.error(e?.response?.data?.error || e?.response?.data?.message || e.message);
+      toast.error(isMetaTokenUnauthorized(e) ? tCommon("metaTokenInvalidReconnect") : (getBackendErrorCode(e) || e?.message || tCommon("errorFetchingData")));
     } finally {
       setLoading(false);
     }
@@ -317,7 +319,7 @@ export default function AnalyticsPage() {
       const r = await api.getWABATemplateAnalytics({ wabaId, businessToken, start, end });
       setTplAnalytics(r.data);
     } catch (e: any) {
-      toast.error(e?.response?.data?.error || e?.response?.data?.message || e.message);
+      toast.error(isMetaTokenUnauthorized(e) ? tCommon("metaTokenInvalidReconnect") : (getBackendErrorCode(e) || e?.message || tCommon("errorFetchingData")));
     } finally {
       setLoading(false);
     }
@@ -329,7 +331,7 @@ export default function AnalyticsPage() {
       const r = await api.getWABALimitsInfo();
       setLimits(r.data);
     } catch (e: any) {
-      toast.error(e?.response?.data?.error || e?.response?.data?.message || e.message);
+      toast.error(isMetaTokenUnauthorized(e) ? tCommon("metaTokenInvalidReconnect") : (getBackendErrorCode(e) || e?.message || tCommon("errorFetchingData")));
     } finally {
       setLoading(false);
     }

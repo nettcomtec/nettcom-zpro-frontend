@@ -36,3 +36,25 @@ export function buildSignedBody(
     ? `*${cleanName}*:\n ${message}`
     : `${cleanName}:\n ${message}`;
 }
+
+/**
+ * Assinatura obrigatória nos diálogos que iniciam conversa: a mesma regra do chat
+ * (atendimento/page.tsx → MessageInput). Ficam isentos admin, superadmin e o supervisor
+ * que é admin (`supervisorAdmin !== "enabled"`); custom, user e supervisor limitado assinam.
+ */
+export function isSignatureMandatory({
+  signedSetting,
+  profile,
+  supervisorAdmin,
+}: {
+  signedSetting?: string | null;
+  profile?: string | null;
+  supervisorAdmin?: string | null;
+}): boolean {
+  if (signedSetting !== "enabled") return false;
+  const exempt =
+    profile === "admin" ||
+    profile === "superadmin" ||
+    (profile === "super" && supervisorAdmin !== "enabled");
+  return !exempt;
+}

@@ -1,4 +1,4 @@
-import api from "@/lib/api";
+import api, { BACKGROUND_REQUEST } from "@/lib/api";
 
 export type UazapiMenuType = "button" | "list" | "poll";
 
@@ -66,6 +66,18 @@ export interface UazapiStatusPayload {
 
 export function sendUazapiMenu(ticketId: number, data: UazapiMenuPayload) {
   return api.post(`/uazapi-menu/${ticketId}`, data);
+}
+
+export interface UazapiQuoteCheckResult {
+  /** true = a citação vai chegar ao celular; false = vai sem citação; null = canal não é UAzapi. */
+  willQuote: boolean | null;
+  availability: "present" | "absent" | "unknown";
+  stale?: boolean;
+}
+
+/** A barra de resposta pergunta se a citação vai chegar (pedido automático, sem toast). */
+export function checkUazapiQuote(ticketId: number, quotedMsgId: string) {
+  return api.post<UazapiQuoteCheckResult>(`/uazapi-quote-check/${ticketId}`, { quotedMsgId }, BACKGROUND_REQUEST);
 }
 
 export function sendUazapiCarousel(ticketId: number, data: UazapiCarouselPayload) {

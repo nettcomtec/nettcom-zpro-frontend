@@ -3,8 +3,10 @@
 import React, { createContext, useContext, useEffect, useState, useCallback } from "react";
 import { NextIntlClientProvider } from "next-intl";
 import { MotionConfig } from "framer-motion";
-import { defaultLocale, type Locale, locales } from "./config";
+import { defaultLocale, type Locale } from "./config";
 import { getMessages } from "./get-messages";
+import { getUiLocale } from "@/lib/ui-locale";
+import { setActiveUiMessages } from "@/lib/ui-t";
 
 interface LocaleContextType {
   locale: Locale;
@@ -31,13 +33,23 @@ export function LocaleProvider({ children }: LocaleProviderProps) {
 
   const loadMessages = useCallback(async (loc: Locale) => {
     const msgs = await getMessages(loc);
+    // Código sem hook (libs chamadas de várias telas) traduz pelo mesmo conjunto.
+    setActiveUiMessages(loc, msgs);
     setMessages(msgs);
     setReady(true);
   }, []);
 
   useEffect(() => {
-    const stored = localStorage.getItem("language") as Locale | null;
-    const initial = stored && locales.includes(stored) ? stored : defaultLocale;
+    // Formulário público (/f/<endereço>): os textos são próprios (lib/form-strings.ts) e a
+    // página não usa o dicionário do painel — o visitante não baixa o pt.json (~1,7 MB).
+    // Só o segmento único da página: /f/a/b é a 404 do Next, que usa o dicionário.
+    if (/^\/f\/[^/]+\/?$/.test(window.location.pathname)) {
+      setReady(true);
+      return;
+    }
+    // Leitor único do idioma da tela (lib/ui-locale): escolha explícita → dica da
+    // Região → pt. Sem request: a dica é gravada pelo /login e pelo painel.
+    const initial = getUiLocale();
     setLocaleState(initial);
     loadMessages(initial);
     if ("serviceWorker" in navigator && navigator.serviceWorker.controller) {

@@ -13,6 +13,10 @@ export interface ExistingOpenTicket {
   whatsappName: string | null;
   /** true = está no MESMO canal do ticket-alvo da ação (duplicata direta). */
   sameChannel?: boolean;
+  /** true = o usuário não abre este atendimento: atendente e fila omitidos pelo servidor. */
+  ownerHidden?: boolean;
+  /** false = o usuário não abre este atendimento (com ou sem atendente). */
+  accessible?: boolean;
   // Demais open/pending do MESMO contato (além deste, o principal) — o dialog
   // lista todos para a decisão não ser tomada vendo só um. Ausente/vazio quando
   // não há outros ou quando o backend ainda não devolve `tickets` (build antiga).
@@ -27,6 +31,9 @@ interface CheckTicketDto {
   contact: { id: number; name: string; number: string } | null;
   queue: { id: number; queue: string } | null;
   whatsapp: { id: number; name: string } | null;
+  /** O usuário não abre este atendimento: o servidor omitiu atendente e fila. */
+  ownerHidden?: boolean;
+  accessible?: boolean;
 }
 
 interface CheckResponse {
@@ -45,6 +52,8 @@ function toExistingOpenTicket(t: CheckTicketDto): ExistingOpenTicket {
     queueName: t.queue?.queue ?? null,
     whatsappId: t.whatsapp?.id != null ? Number(t.whatsapp.id) : null,
     whatsappName: t.whatsapp?.name ?? null,
+    ...(t.ownerHidden === true ? { ownerHidden: true } : {}),
+    ...(t.accessible === false ? { accessible: false } : {}),
   };
 }
 
@@ -119,6 +128,8 @@ function siblingToExistingOpenTicket(s: CrossChannelSibling): ExistingOpenTicket
     whatsappId: s.whatsappId != null ? Number(s.whatsappId) : null,
     whatsappName: s.whatsappName ?? null,
     sameChannel: s.sameChannel === true,
+    ownerHidden: s.ownerHidden === true,
+    ...(s.accessible === false ? { accessible: false } : {}),
   };
 }
 

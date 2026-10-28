@@ -11,6 +11,7 @@ import { useTranslations } from "next-intl";
 import { getTicketListPreview } from "@/lib/template-preview";
 import { searchMessages as searchMessagesApi } from "@/services/messages";
 import { useLiveMode } from "@/hooks/use-live-mode";
+import { useAuthStore } from "@/stores/auth-store";
 import { cn } from "@/lib/utils";
 
 interface GlobalSearchTicket {
@@ -43,6 +44,7 @@ export function GlobalMessageSearchDialog({
   // Chaves de preview de mídia/noMessages vivem no namespace do atendimento
   const tAtd = useTranslations("atendimentoChatExtra");
   const { isLiveMode } = useLiveMode();
+  const isRestricted = useAuthStore((s) => s.isRestrictedUser());
   const [searchTerm, setSearchTerm] = useState("");
   const [tickets, setTickets] = useState<GlobalSearchTicketResult[]>([]);
   const [loading, setLoading] = useState(false);
@@ -190,7 +192,10 @@ export function GlobalMessageSearchDialog({
                       {tx.ticket.contact?.name ? (
                         <>
                           {" — "}
-                          <span className={cn(isLiveMode && "live-blur-text")}>{tx.ticket.contact.name}</span>
+                          {/* Usuário restrito: mesmo corte de 5 letras da lista de atendimentos. */}
+                          <span className={cn(isLiveMode && "live-blur-text")}>
+                            {isRestricted ? `${tx.ticket.contact.name.slice(0, 5)}...` : tx.ticket.contact.name}
+                          </span>
                         </>
                       ) : ""}
                     </div>

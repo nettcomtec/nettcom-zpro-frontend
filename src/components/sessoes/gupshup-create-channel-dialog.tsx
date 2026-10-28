@@ -333,7 +333,7 @@ export function GupshupCreateChannelDialog({
                   id="gupshup-signup-appid"
                   value={signupAppId}
                   onChange={(e) => setSignupAppId(e.target.value)}
-                  placeholder="ex: f81c9d6c-..."
+                  placeholder={t("signupAppIdPlaceholder")}
                 />
                 <p className="text-[11px] text-muted-foreground">
                   {t("signupAppIdHint")}
@@ -357,7 +357,7 @@ export function GupshupCreateChannelDialog({
                 </AlertDescription>
               </Alert>
               <p className="text-xs text-muted-foreground">
-                Os campos (App ID, App Token, API Key, Phone Number ID, WABA ID) são preenchidos diretamente no popup seguro hospedado em oauth.techprovider.com.br, com validação de licença antes do envio. Clique abaixo para abrir.
+                {t("manualPopupNote")}
               </p>
               <Button
                 onClick={submitManual}

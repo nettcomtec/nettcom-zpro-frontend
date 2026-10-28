@@ -9,7 +9,7 @@ import { OpenAIBaseUrlTooltip } from "./openai-base-url-tooltip";
 interface Props {
   value: string;
   onChange: (value: string) => void;
-  context: "copilot" | "channel";
+  context: "copilot" | "channel" | "agent";
   disabled?: boolean;
 }
 

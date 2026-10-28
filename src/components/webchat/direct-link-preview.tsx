@@ -1,7 +1,8 @@
 "use client";
 
-import React from "react";
+import React, { useEffect } from "react";
 import { Mic, Paperclip, Send, Volume2 } from "lucide-react";
+import { useRegion } from "@/hooks/use-region";
 
 /**
  * Réplica React da página pública do link direto (WebChatPageServiceZPRO):
@@ -9,26 +10,20 @@ import { Mic, Paperclip, Send, Volume2 } from "lucide-react";
  * pré-visualização acompanhar o rascunho enquanto o admin digita (o iframe da
  * página real só mostra o que já foi salvo).
  *
- * Os textos padrão abaixo espelham DEFAULT_LABELS do backend de propósito: a
- * página do visitante os renderiza assim independentemente do idioma do painel,
- * e é exatamente isso que a aba "Textos da página" existe para sobrescrever.
+ * Os textos padrão espelham os da página do visitante de propósito: ela os mostra
+ * no idioma da empresa (catálogo `webchat.page.*` da Região), nunca no do painel, e
+ * é exatamente isso que a aba "Textos da página" existe para sobrescrever. Sem
+ * idioma configurado (ou com backend antigo) ficam os de sempre, em português.
  */
 
 const DEFAULT_COLOR = "#2196F3";
 const COLOR_RE = /^#[0-9a-fA-F]{3,8}$/;
 
-const DEFAULT_STATUS_ONLINE = "Online";
-const DEFAULT_INPUT_PLACEHOLDER = "Digite sua mensagem...";
-const DEFAULT_PRECHAT_TITLE = "Antes de começar";
-const DEFAULT_PRECHAT_SUBTITLE = "Preencha os dados abaixo para iniciar a conversa.";
-const DEFAULT_START_CHAT = "Iniciar conversa";
-const DEFAULT_PRIVACY_LINK = "Política de privacidade";
-
-const FIELD_LABELS: Record<string, string> = {
-  name: "Nome",
-  email: "E-mail",
-  phone: "Telefone",
-  cpf: "CPF",
+const FIELD_LABELS: Record<string, [string, string]> = {
+  name: ["fieldName", "Nome"],
+  email: ["fieldEmail", "E-mail"],
+  phone: ["fieldPhone", "Telefone"],
+  cpf: ["fieldCpf", "CPF"],
 };
 
 export interface DirectLinkPreviewProps {
@@ -68,15 +63,20 @@ export function DirectLinkPreview({
   labelStart,
   showPreChat,
 }: DirectLinkPreviewProps) {
+  const { text, ensureTexts } = useRegion();
+  useEffect(() => {
+    void ensureTexts();
+  }, [ensureTexts]);
+  const pageText = (key: string, ptFallback: string) => text(`webchat.page.${key}`, undefined, ptFallback);
   const rawColor = color.trim();
   const brand = COLOR_RE.test(rawColor) ? rawColor : DEFAULT_COLOR;
-  const headTitle = title.trim() || channelName || "Chat";
+  const headTitle = title.trim() || channelName || pageText("defaultTitle", "Chat");
   const rawLogo = logoUrl.trim();
   const logo = /^https?:\/\//i.test(rawLogo) ? rawLogo : "/webchat-logo.png";
   const welcome = welcomeMessage.trim();
-  const inputPlaceholder = placeholder.trim() || DEFAULT_INPUT_PLACEHOLDER;
-  const formTitle = labelFormTitle.trim() || DEFAULT_PRECHAT_TITLE;
-  const startLabel = labelStart.trim() || DEFAULT_START_CHAT;
+  const inputPlaceholder = placeholder.trim() || pageText("inputPlaceholder", "Digite sua mensagem...");
+  const formTitle = labelFormTitle.trim() || pageText("preChatTitle", "Antes de começar");
+  const startLabel = labelStart.trim() || pageText("startChat", "Iniciar conversa");
   const privacy = privacyText.trim();
   const privacyHref = privacyUrl.trim();
 
@@ -104,7 +104,7 @@ export function DirectLinkPreview({
           <div className="truncate text-[16px] font-semibold leading-tight">{headTitle}</div>
           <div className="mt-0.5 flex items-center gap-1.5 text-[12px] opacity-90">
             <span className="h-2 w-2 flex-none rounded-full bg-[#4ade80]" />
-            {DEFAULT_STATUS_ONLINE}
+            {pageText("statusOnline", "Online")}
           </div>
         </div>
         <Volume2 className="h-5 w-5 flex-none" />
@@ -115,11 +115,13 @@ export function DirectLinkPreview({
         <div className="flex flex-1 items-start justify-center overflow-y-auto px-4 py-6">
           <div className="my-auto w-full max-w-[380px] rounded-2xl bg-white p-5 shadow-[0_4px_24px_rgba(15,23,42,.08)]">
             <h2 className="text-[18px] font-semibold text-[#0f172a]">{formTitle}</h2>
-            <p className="mb-4 mt-1 text-[13.5px] text-[#64748b]">{DEFAULT_PRECHAT_SUBTITLE}</p>
+            <p className="mb-4 mt-1 text-[13.5px] text-[#64748b]">
+              {pageText("preChatSubtitle", "Preencha os dados abaixo para iniciar a conversa.")}
+            </p>
             {preChatFields.map((field) => (
               <div key={field} className="mb-3">
                 <label className="mb-1 block text-[13px] font-semibold text-[#334155]">
-                  {FIELD_LABELS[field] || field}
+                  {FIELD_LABELS[field] ? pageText(FIELD_LABELS[field][0], FIELD_LABELS[field][1]) : field}
                   {preChatRequired.includes(field) ? " *" : ""}
                 </label>
                 <div className="h-[42px] w-full rounded-[10px] border border-[#cbd5e1] bg-white" />
@@ -132,7 +134,7 @@ export function DirectLinkPreview({
                   {privacy}{" "}
                   {privacyHref && (
                     <span style={{ color: brand }} className="underline">
-                      {DEFAULT_PRIVACY_LINK}
+                      {pageText("privacyLink", "Política de privacidade")}
                     </span>
                   )}
                 </span>

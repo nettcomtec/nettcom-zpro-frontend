@@ -10,6 +10,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { cn } from "@/lib/utils";
 import { cepDigits, formatCep, lookupCep } from "@/lib/cep-lookup";
+import { useRegion } from "@/hooks/use-region";
 
 // Bloco de endereço do contato — componente ÚNICO dos 2 formulários (/contatos e o do
 // atendimento), PLANO_ENDERECO_COMPLETO_CONTATO D2/D3.
@@ -67,6 +68,10 @@ export function ContactAddressFields<T extends FieldValues & ContactAddressFormV
   className,
 }: ContactAddressFieldsProps<T>) {
   const t = useTranslations("contactAddressFields");
+  // CEP é brasileiro: busca (automática e lupa), máscara e placeholder só com o país efetivo da
+  // empresa BR (PLANO_REGIAO_MOEDA_IDIOMA, nota de 2026-09-28). Fora do BR o campo é livre e
+  // nada é consultado. Região ainda não carregada / backend antigo = BR (como sempre foi).
+  const isBr = useRegion().country === "BR";
   const baseId = useId();
   const [cepLoading, setCepLoading] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
@@ -87,6 +92,7 @@ export function ContactAddressFields<T extends FieldValues & ContactAddressFormV
 
   const runLookup = useCallback(
     async (manual: boolean) => {
+      if (!isBr) return;
       const digits = cepDigits(form.getValues(path("cep")) as string | undefined);
       if (digits.length !== 8) {
         if (manual) toast.error(t("cepInvalid"));
@@ -148,12 +154,13 @@ export function ContactAddressFields<T extends FieldValues & ContactAddressFormV
       }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [form, t]
+    [form, t, isBr]
   );
 
   // Busca automática: campo mexido, 8 dígitos e diferente do último CEP buscado. Ao abrir a
-  // edição com o CEP salvo nada é buscado (campo intocado); a lupa força.
+  // edição com o CEP salvo nada é buscado (campo intocado); a lupa força. Só no BR.
   useEffect(() => {
+    if (!isBr) return;
     const digits = cepDigits(cepValue);
     if (digits.length !== 8) return;
     if (digits === lastLookupRef.current) return;
@@ -184,38 +191,41 @@ export function ContactAddressFields<T extends FieldValues & ContactAddressFormV
                 cepField.ref(el);
                 cepInputRef.current = el;
               }}
-              inputMode="numeric"
+              inputMode={isBr ? "numeric" : undefined}
               autoComplete="postal-code"
-              placeholder={t("cepPlaceholder")}
+              placeholder={isBr ? t("cepPlaceholder") : undefined}
               disabled={disabled}
               onChange={(e) => {
                 // Máscara pelos dígitos, sem maxLength nativo: colar "CEP 01.310-100" funciona.
                 // Código postal estrangeiro (tem letra fora de um "CEP" colado) fica como digitado.
+                // Fora do BR não há máscara: o código postal fica como digitado (teto da coluna, 20).
                 const typed = e.target.value;
                 const withoutLabel = typed.replace(/^\s*cep\b[\s:.-]*/i, "");
-                e.target.value = /[A-Za-z]/.test(withoutLabel) ? typed.slice(0, 20) : formatCep(typed);
+                e.target.value = !isBr || /[A-Za-z]/.test(withoutLabel) ? typed.slice(0, 20) : formatCep(typed);
                 cepTypedRef.current = true;
                 void cepField.onChange(e);
               }}
               onKeyDown={(e) => {
-                if (e.key === "Enter") {
+                if (isBr && e.key === "Enter") {
                   e.preventDefault();
                   void runLookup(true);
                 }
               }}
             />
-            <Button
-              ref={lupaRef}
-              type="button"
-              variant="outline"
-              size="icon"
-              title={t("searchCep")}
-              aria-label={t("searchCep")}
-              onClick={() => void runLookup(true)}
-              disabled={disabled || cepLoading}
-            >
-              {cepLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Search className="h-4 w-4" />}
-            </Button>
+            {isBr && (
+              <Button
+                ref={lupaRef}
+                type="button"
+                variant="outline"
+                size="icon"
+                title={t("searchCep")}
+                aria-label={t("searchCep")}
+                onClick={() => void runLookup(true)}
+                disabled={disabled || cepLoading}
+              >
+                {cepLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Search className="h-4 w-4" />}
+              </Button>
+            )}
           </div>
         </div>
 

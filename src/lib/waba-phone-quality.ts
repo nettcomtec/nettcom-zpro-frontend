@@ -1,4 +1,5 @@
 import { getWABAPhoneNumbers } from "@/services/waba-meta";
+import { metaRateLimitedUntil } from "@/lib/backend-error-code";
 
 export type WabaQualityRating = "GREEN" | "YELLOW" | "RED" | "UNKNOWN";
 
@@ -9,10 +10,21 @@ type CacheEntry = {
   platform_type?: string;
   is_on_biz_app?: boolean;
   status?: string;
+  code_verification_status?: string;
   error?: string;
   ts: number;
 };
-const qualityCache = new Map<string, CacheEntry>();
+
+// Cache da LISTA de números por WABA (5 min) + consulta em andamento compartilhada:
+// o card, o selo de qualidade e o aviso de registro pendente pedem o mesmo WABA
+// quase ao mesmo tempo — uma consulta só serve a todos. Erro não é guardado
+// (a próxima chamada tenta de novo).
+type PhonesEntry = { phones: WabaPhoneNumberRow[]; ts: number };
+const phonesCache = new Map<string, PhonesEntry>();
+const phonesInflight = new Map<string, Promise<WabaPhoneNumberRow[]>>();
+// Consultas da WABA pausadas pelo limite da Meta (80008): até o horário que o backend
+// informou, a tela nem pede (devolve o mesmo erro).
+const phonesPausedUntil = new Map<string, number>();
 
 // Campos com info de coexistência (is_on_biz_app indica número ainda no app
 // WhatsApp Business). Em versões antigas da Graph API o campo pode não existir
@@ -20,13 +32,11 @@ const qualityCache = new Map<string, CacheEntry>();
 const FIELDS_WITH_COEX =
   "id,cc,country_dial_code,display_phone_number,verified_name,status,quality_rating,search_visibility,platform_type,code_verification_status,is_on_biz_app";
 
-function cacheKey(wabaId: string, phoneHint: string | null | undefined): string {
-  return `${wabaId}::${(phoneHint ?? "").trim()}`;
-}
-
 /** Limpa o cache manualmente (útil após reconectar ou trocar sessão). */
 export function clearWabaPhoneQualityCache() {
-  qualityCache.clear();
+  phonesCache.clear();
+  phonesInflight.clear();
+  phonesPausedUntil.clear();
 }
 
 export interface WabaPhoneNumberRow {
@@ -38,6 +48,7 @@ export interface WabaPhoneNumberRow {
   throughput?: unknown;
   platform_type?: string;
   is_on_biz_app?: boolean;
+  code_verification_status?: string;
 }
 
 function digitsOnly(s: string | null | undefined): string {
@@ -133,6 +144,76 @@ export function wabaPhoneStatusBadgeClasses(status?: string | null): string {
   return "bg-muted text-muted-foreground border-transparent";
 }
 
+const pickPhoneFields = (p: WabaPhoneNumberRow): Omit<CacheEntry, "ts"> => ({
+  quality_rating: p.quality_rating,
+  display_phone_number: p.display_phone_number,
+  platform_type: p.platform_type,
+  is_on_biz_app: p.is_on_biz_app,
+  status: p.status,
+  code_verification_status: p.code_verification_status,
+});
+
+/**
+ * Lista os números do WABA (`POST /wabametaGetWABAPhoneNumbers`) com cache de 5 min
+ * por WABA e consulta em andamento compartilhada. Lança em caso de erro (não guardado).
+ */
+async function loadWabaPhones(params: {
+  wabaId: string;
+  token: string;
+  wabaVersion?: string | null;
+}): Promise<WabaPhoneNumberRow[]> {
+  const key = params.wabaId;
+  const cached = phonesCache.get(key);
+  if (cached && Date.now() - cached.ts < CACHE_TTL_MS) return cached.phones;
+  const running = phonesInflight.get(key);
+  if (running) return running;
+  const pausedUntil = phonesPausedUntil.get(key);
+  if (pausedUntil && pausedUntil > Date.now()) {
+    throw { data: { error: `ERR_META_RATE_LIMITED:${new Date(pausedUntil).toISOString()}` } };
+  }
+
+  // A closure compara com a própria promise no finally (só roda depois do 1º await,
+  // com a variável já atribuída): `!` diz isso ao TypeScript.
+  let promise!: Promise<WabaPhoneNumberRow[]>;
+  promise = (async () => {
+    try {
+      let data: unknown;
+      try {
+        ({ data } = await getWABAPhoneNumbers({
+          wabaId: params.wabaId,
+          businessToken: params.token,
+          apiVersion: params.wabaVersion || undefined,
+          fields: FIELDS_WITH_COEX,
+        }));
+      } catch (err) {
+        // Limite da Meta (80008): repetir sem fields seria outra chamada à conta bloqueada.
+        if (metaRateLimitedUntil(err)) throw err;
+        // Versão da Graph API sem is_on_biz_app — retry com os fields default do backend
+        ({ data } = await getWABAPhoneNumbers({
+          wabaId: params.wabaId,
+          businessToken: params.token,
+          apiVersion: params.wabaVersion || undefined,
+        }));
+      }
+      const phones: WabaPhoneNumberRow[] = Array.isArray((data as any)?.data)
+        ? (data as any).data
+        : Array.isArray(data)
+          ? (data as any)
+          : [];
+      phonesCache.set(key, { phones, ts: Date.now() });
+      return phones;
+    } catch (err) {
+      const until = metaRateLimitedUntil(err);
+      if (until) phonesPausedUntil.set(key, until.getTime());
+      throw err;
+    } finally {
+      if (phonesInflight.get(key) === promise) phonesInflight.delete(key);
+    }
+  })();
+  phonesInflight.set(key, promise);
+  return promise;
+}
+
 /**
  * Busca quality_rating do número da WABA via backend (`POST /wabametaGetWABAPhoneNumbers`).
  * Se `phoneHint` for fornecido, escolhe o número correspondente; caso contrário retorna o primeiro.
@@ -149,7 +230,10 @@ export async function fetchWabaPhoneQualityRating(params: {
   platform_type?: string;
   is_on_biz_app?: boolean;
   status?: string;
+  code_verification_status?: string;
   error?: string;
+  /** Consultas pausadas pela Meta (80008) até esta data ISO. */
+  rateLimitedUntil?: string;
 }> {
   const token = resolveWabaGraphAccessToken({
     bmToken: params.bmToken,
@@ -158,50 +242,9 @@ export async function fetchWabaPhoneQualityRating(params: {
   const wabaId = (params.wabaId ?? "").trim();
   if (!token || !wabaId) return {};
 
-  const key = cacheKey(wabaId, params.phoneHint);
-  const cached = qualityCache.get(key);
-  const now = Date.now();
-  if (cached && now - cached.ts < CACHE_TTL_MS) {
-    const { ts: _ts, ...rest } = cached;
-    return rest;
-  }
-
-  const store = (res: Omit<CacheEntry, "ts">) => {
-    qualityCache.set(key, { ...res, ts: Date.now() });
-    return res;
-  };
-
-  const pick = (p: WabaPhoneNumberRow): Omit<CacheEntry, "ts"> => ({
-    quality_rating: p.quality_rating,
-    display_phone_number: p.display_phone_number,
-    platform_type: p.platform_type,
-    is_on_biz_app: p.is_on_biz_app,
-    status: p.status,
-  });
-
   try {
-    let data: unknown;
-    try {
-      ({ data } = await getWABAPhoneNumbers({
-        wabaId,
-        businessToken: token,
-        apiVersion: params.wabaVersion || undefined,
-        fields: FIELDS_WITH_COEX,
-      }));
-    } catch {
-      // Versão da Graph API sem is_on_biz_app — retry com os fields default do backend
-      ({ data } = await getWABAPhoneNumbers({
-        wabaId,
-        businessToken: token,
-        apiVersion: params.wabaVersion || undefined,
-      }));
-    }
-    const phones: WabaPhoneNumberRow[] = Array.isArray((data as any)?.data)
-      ? (data as any).data
-      : Array.isArray(data)
-        ? (data as any)
-        : [];
-    if (phones.length === 0) return store({});
+    const phones = await loadWabaPhones({ wabaId, token, wabaVersion: params.wabaVersion });
+    if (phones.length === 0) return {};
 
     // Seleciona o número correspondente e retorna TODOS os campos dele (quality + status
     // + platform), mesmo sem quality_rating — um número BANIDO pode vir sem rating e ainda
@@ -210,7 +253,7 @@ export async function fetchWabaPhoneQualityRating(params: {
     if (hint) {
       const byId = phones.find((p) => p.id && String(p.id) === hint);
       if (byId) {
-        return store(pick(byId));
+        return pickPhoneFields(byId);
       }
       const hintDigits = digitsOnly(hint);
       if (hintDigits.length >= 8) {
@@ -219,16 +262,60 @@ export async function fetchWabaPhoneQualityRating(params: {
           return d && (d === hintDigits || d.endsWith(hintDigits) || hintDigits.endsWith(d));
         });
         if (byDisplay) {
-          return store(pick(byDisplay));
+          return pickPhoneFields(byDisplay);
         }
       }
     }
 
     const first = phones[0];
-    return store(first ? pick(first) : {});
+    return first ? pickPhoneFields(first) : {};
   } catch (err) {
     const msg = err instanceof Error ? err.message : "Erro ao buscar qualidade Meta";
-    // Não cacheia erros — tentará de novo na próxima
-    return { error: msg };
+    const until = metaRateLimitedUntil(err);
+    // Erro comum não é guardado (tentará de novo na próxima); a pausa da Meta, sim.
+    return until ? { error: msg, rateLimitedUntil: until.toISOString() } : { error: msg };
+  }
+}
+
+/**
+ * Estado de UM número do WABA, casado SÓ pelo id (phone_number_id) — usa a mesma
+ * lista em cache da consulta de qualidade (nenhuma chamada a mais quando o card já
+ * consultou o WABA). Sem casamento exato devolve `found: false`: nunca cai no
+ * primeiro número da lista (WABA com vários números daria o estado de outro).
+ */
+export async function fetchWabaPhoneStateById(params: {
+  bmToken?: string | null;
+  tokenAPI?: string | null;
+  wabaId?: string | null;
+  wabaVersion?: string | null;
+  phoneId?: string | null;
+}): Promise<{
+  found: boolean;
+  status?: string;
+  platform_type?: string;
+  is_on_biz_app?: boolean;
+  code_verification_status?: string;
+  error?: string;
+}> {
+  const token = resolveWabaGraphAccessToken({
+    bmToken: params.bmToken,
+    tokenAPI: params.tokenAPI,
+  });
+  const wabaId = (params.wabaId ?? "").trim();
+  const phoneId = (params.phoneId ?? "").trim();
+  if (!token || !wabaId || !phoneId) return { found: false };
+  try {
+    const phones = await loadWabaPhones({ wabaId, token, wabaVersion: params.wabaVersion });
+    const row = phones.find((p) => p.id && String(p.id) === phoneId);
+    if (!row) return { found: false };
+    return {
+      found: true,
+      status: row.status,
+      platform_type: row.platform_type,
+      is_on_biz_app: row.is_on_biz_app,
+      code_verification_status: row.code_verification_status,
+    };
+  } catch (err) {
+    return { found: false, error: err instanceof Error ? err.message : "phone_state_failed" };
   }
 }

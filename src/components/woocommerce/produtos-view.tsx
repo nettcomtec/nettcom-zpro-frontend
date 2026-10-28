@@ -33,6 +33,10 @@ import {
   WooProduct, WooProductPayload, WooStoreSummary
 } from "@/services/woocommerceProdutosService";
 import { fetchGallery, getGalleryPreviewUrl, uploadGalleryFiles, GalleryItem } from "@/services/gallery";
+import { useRegion } from "@/hooks/use-region";
+
+// `_currency`: moeda da loja (ISO) devolvida pelo backend; null/ausente = moeda da empresa.
+type ProductWithCurrency = WooProduct & { _currency?: string | null };
 
 const EMPTY_FORM: WooProductPayload = {
   name: "",
@@ -100,6 +104,15 @@ export function WooCommerceProdutosView({ embedded = false }: { embedded?: boole
   const [storeId, setStoreId] = useState<number | null>(initialStoreId);
 
   const [products, setProducts] = useState<WooProduct[]>([]);
+  const { formatMoney } = useRegion();
+  // Moeda da loja: os itens da mesma loja trazem a mesma `_currency`; o item devolvido
+  // pelo salvar vem sem ela e usa a dos demais (sem nenhuma, a moeda da empresa).
+  const storeCurrency = useMemo(
+    () => (products as ProductWithCurrency[]).find((p) => p._currency)?._currency || undefined,
+    [products]
+  );
+  const displayPrice = (p: WooProduct, value: string) =>
+    formatMoney(value, { currency: (p as ProductWithCurrency)._currency || storeCurrency }) || value;
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
   const [searching, setSearching] = useState(false);
@@ -240,7 +253,8 @@ export function WooCommerceProdutosView({ embedded = false }: { embedded?: boole
     try {
       if (editing) {
         const { data } = await updateWooProduct(editing.id, form, storeId);
-        setProducts(prev => prev.map(p => p.id === data.id ? data : p));
+        // Mescla sobre o item antigo para manter a `_currency` (a resposta do salvar não a traz).
+        setProducts(prev => prev.map(p => p.id === data.id ? { ...p, ...data } : p));
         toast.success(t("updated"));
       } else {
         const { data } = await createWooProduct(form, storeId);
@@ -394,9 +408,9 @@ export function WooCommerceProdutosView({ embedded = false }: { embedded?: boole
                   {p.sku || "—"}
                 </TableCell>
                 <TableCell className="hidden md:table-cell text-foreground text-sm">
-                  {p.regular_price ? `R$ ${formatPrice(p.regular_price)}` : "—"}
+                  {p.regular_price ? displayPrice(p, p.regular_price) : "—"}
                   {p.sale_price && p.sale_price !== p.regular_price && (
-                    <div className="text-xs text-green-400">R$ {formatPrice(p.sale_price)}</div>
+                    <div className="text-xs text-green-400">{displayPrice(p, p.sale_price)}</div>
                   )}
                 </TableCell>
                 <TableCell className="hidden md:table-cell">

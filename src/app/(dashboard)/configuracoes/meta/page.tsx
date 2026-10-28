@@ -28,13 +28,16 @@ import {
   ChevronDown, Stethoscope, Dices, Calculator, Lock
 } from "lucide-react";
 import { generateRandomPin } from "@/lib/waba-pin";
+import { computeWabaSentCost, wabaSentRowCost, wabaSentAvoidableCost } from "@/lib/waba-sent-cost";
+import { Popover, PopoverTrigger, PopoverContent } from "@/components/ui/popover";
 import { WABA_LIMITS } from "@/lib/waba-text-limits";
 import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem } from "@/components/ui/dropdown-menu";
 import { Collapsible, CollapsibleTrigger, CollapsibleContent } from "@/components/ui/collapsible";
 import { sanitize } from "@/lib/sanitize";
 import { formatBulkSendError } from "@/lib/bulk-send-error-format";
+import { isMetaTokenUnauthorized, getBackendErrorCode, metaRateLimitedMessage } from "@/lib/backend-error-code";
 import { parseOAuthLicenseError, OAUTH_LICENSE_COOLDOWN_MS } from "@/lib/oauth-license-error";
-import { channelCreateErrorKey } from "@/lib/channel-create-error";
+import { channelCreateErrorKey, channelCreateErrorDetail } from "@/lib/channel-create-error";
 import { type GalleryItem } from "@/services/gallery";
 import { GalleryPickerWithUploadDialog, wabaHeaderFormatToGalleryParams } from "@/components/gallery/gallery-picker-with-upload-dialog";
 import { ORDER_DETAILS_BUTTON_TEXT } from "@/lib/order-details";
@@ -58,11 +61,20 @@ import {
 import { classifyWabaPhoneStatus, wabaPhoneStatusBadgeClasses, wabaPhoneStatusI18nKey } from "@/lib/waba-phone-quality";
 import { fetchTenantById, updateTenantMetaToken } from "@/services/tenants";
 import { generateTemplateViaCopilot } from "@/services/copilot";
-import { useMetaProxyPopup, type MetaProxyHijackPayload } from "@/hooks/use-meta-proxy-popup";
+import {
+  useMetaProxyPopup,
+  metaProxySuccessHasPhone,
+  describeMetaProxyOnboardingUpdate,
+  type MetaProxyHijackPayload,
+} from "@/hooks/use-meta-proxy-popup";
 import { HijackTakeoverDialog } from "@/components/common/hijack-takeover-dialog";
 import { DiagnoseModal } from "@/components/sessoes/diagnose-modal";
 import { WabaSendHealthNotice } from "@/components/sessoes/waba-send-health-notice";
-import { invalidateWabaPinPendingCache } from "@/hooks/use-waba-pin-pending";
+import {
+  WabaMarketingMessagesNotice,
+  useWabaMarketingMessagesStatuses,
+} from "@/components/sessoes/waba-marketing-messages-notice";
+import { invalidateWabaPinPendingCache, isWabaPhoneOnPremise, resolveOnPremisePinPending, resolveZdgOauthPinPending } from "@/hooks/use-waba-pin-pending";
 import { takeoverRegistry } from "@/lib/registry-hijack";
 import { useOAuthProxyDomain } from "@/hooks/use-oauth-proxy-domain";
 import { getProxyBaseUrl } from "@/config/oauth-proxy";
@@ -443,6 +455,12 @@ export default function MetaPage() {
 
   // ── Whatsapp store
   const { whatsapps, setWhatsapps } = useWhatsappStore();
+
+  // Termos da Marketing Messages API (bloco na "Info Conexão"): 1 consulta por carga da
+  // tela, só com canal WABA e só para quem resolve o aviso de pagamento.
+  const marketingMessagesStatuses = useWabaMarketingMessagesStatuses(
+    Array.isArray(whatsapps) && whatsapps.some((w) => w?.type === "waba")
+  );
 
   const sdkScriptRef = useRef<HTMLScriptElement | null>(null);
 
@@ -832,16 +850,34 @@ export default function MetaPage() {
       channel: "waba",
       credentials: { ...buildMetaCredentials(), ...resolveOwnAppCtx() },
       onSuccess: (data) => {
+        // Sem número = a Meta autorizou mas nenhum canal foi criado (proxy antigo
+        // avisava sucesso assim) — aviso, nunca "conectado".
+        if (!metaProxySuccessHasPhone(data)) {
+          toast.warning(tSess("waConnectedNoPhone"), { duration: 10000 });
+          return;
+        }
         toast.success(t("wabaConnectSuccess") || "WABA conectado com sucesso");
         // Recarrega listas/estado dependendo do contexto
         if ((data as any)?.wabaId) {
           try { loadWABAs(); } catch { /* ignore */ }
         }
       },
+      onOnboardingUpdate: (update) => {
+        const { registeredPhoneId, notices } = describeMetaProxyOnboardingUpdate(update);
+        if (registeredPhoneId) invalidateWabaPinPendingCache({ phoneNumberId: registeredPhoneId, markRegistered: true });
+        notices.forEach((n) => {
+          if (n.level === "success") toast.success(tSess(n.key));
+          else toast.warning(tSess(n.key), { duration: 10000 });
+        });
+      },
       onError: (msg, hijack, code) => {
         if (hijack) { setHijackState(hijack); return; }
         const key = channelCreateErrorKey(code || msg);
-        toast.error(key ? tSess(key) : (msg || t("wabaConnectError") || "Erro ao conectar WABA"));
+        const description = channelCreateErrorDetail(code, msg);
+        toast.error(
+          key ? tSess(key) : (msg || t("wabaConnectError") || "Erro ao conectar WABA"),
+          description ? { description } : undefined
+        );
       },
       onCancelled: () => { /* silencioso — user fechou popup */ },
     });
@@ -854,7 +890,13 @@ export default function MetaPage() {
       if (!selectedApp) { toast.error(t("selectAppWaba")); return; }
       const instagramAppId = (selectedApp as any).appInstagramId;
       if (!instagramAppId) { toast.error(t("instagramAppIdNotConfigured")); return; }
-      if (!(selectedApp as any).appInstagramSecret) { toast.error(t("instagramAppSecretNotConfigured")); return; }
+      // /app-waba-tenantActive nunca devolve o segredo: o backend novo manda o booleano
+      // `hasAppInstagramSecret`; sem ele (backend antigo) vale a leitura de antes.
+      const igSecretFlag = (selectedApp as any).hasAppInstagramSecret;
+      const hasInstagramSecret = typeof igSecretFlag === "boolean"
+        ? igSecretFlag
+        : !!(selectedApp as any).appInstagramSecret;
+      if (!hasInstagramSecret) { toast.error(t("instagramAppSecretNotConfigured")); return; }
     }
 
     metaProxy.open({
@@ -1002,7 +1044,7 @@ export default function MetaPage() {
       const allWabas = wabaArrays.flat();
       setWabasList(allWabas);
       if (allWabas.length === 0) toast.info(t("noWabasFound"));
-      else toast.success(`${allWabas.length} WABA${allWabas.length > 1 ? "s" : ""} encontrado${allWabas.length > 1 ? "s" : ""}`);
+      else toast.success(t("wabasFoundToast", { count: allWabas.length }));
     } catch (err: any) {
       toast.error(t("errorLoadWabas"));
     } finally {
@@ -1209,7 +1251,7 @@ export default function MetaPage() {
       const list = Array.isArray(data) ? data : Array.isArray(data?.data) ? data.data : [];
       setTemplates(list);
     } catch (err: any) {
-      toast.error(t("errorLoadTemplates"));
+      toast.error(metaRateLimitedMessage(err, tCommon) ?? (isMetaTokenUnauthorized(err) ? tCommon("metaTokenInvalidReconnect") : t("errorLoadTemplates")));
     } finally {
       setLoadingTemplates(false);
     }
@@ -1607,13 +1649,39 @@ Include only the components listed above. Do not add components that were not re
   // - webhookOrigin zdg_oauth → COEX/SMB, Meta gerencia (esconder)
   // - Erro (provavelmente sem permissão) → esconder também
   // - Outros status → ja registrado, esconder
+  // A lista de canais vira um array novo a cada aviso de status de qualquer canal: a
+  // consulta só refaz quando muda o que ela usa do canal escolhido (antes cada aviso
+  // virava uma chamada à Meta, que conta no limite da conta, erro 80008).
+  const whatsappsRef = useRef(whatsapps);
+  whatsappsRef.current = whatsapps;
+  const selectedPhoneConnKey = (() => {
+    const c = whatsapps.find((w) => w.id === Number(selectedPhone)) as (Whatsapp & {
+      tokenAPI?: string; wabaVersion?: string; bmToken?: string; wabaId?: string;
+    }) | undefined;
+    return c ? [c.id, c.status, c.tokenAPI, c.bmToken, c.wabaId, c.wabaVersion, c.webhookOrigin].map((v) => String(v ?? "")).join("|") : "";
+  })();
   useEffect(() => {
     if (!selectedPhone) { setPhoneNeedsManualReg(null); return; }
-    const conn = whatsapps.find((w) => w.id === Number(selectedPhone)) as Whatsapp & {
-      tokenAPI?: string; wabaVersion?: string; bmToken?: string;
+    const conn = whatsappsRef.current.find((w) => w.id === Number(selectedPhone)) as Whatsapp & {
+      tokenAPI?: string; wabaVersion?: string; bmToken?: string; wabaId?: string;
     };
-    // COEX/Embedded Signup: Meta gerencia, /register retorna "not available for SMB businesses".
-    if (conn?.webhookOrigin === "zdg_oauth") { setPhoneNeedsManualReg(false); return; }
+    // Embedded Signup (proxy): pendente só com o número em PENDING e fora do app
+    // WhatsApp Business (coexistência é gerenciada pela Meta e o /register responde
+    // "not available for SMB businesses"). Lido da lista de números do WABA (cache de
+    // 5 min compartilhado com o selo de qualidade); respeita o "registrado" desta aba.
+    if (conn?.webhookOrigin === "zdg_oauth") {
+      if (!conn?.tokenAPI || !conn?.bmToken || !conn?.wabaId) { setPhoneNeedsManualReg(false); return; }
+      let cancelledZdg = false;
+      resolveZdgOauthPinPending({
+        tokenAPI: conn.tokenAPI,
+        bmToken: conn.bmToken,
+        wabaId: conn.wabaId,
+        wabaVersion: conn.wabaVersion,
+      })
+        .then((needs) => { if (!cancelledZdg) setPhoneNeedsManualReg(needs); })
+        .catch(() => { if (!cancelledZdg) setPhoneNeedsManualReg(false); });
+      return () => { cancelledZdg = true; };
+    }
     if (!conn?.tokenAPI || !conn?.bmToken) { setPhoneNeedsManualReg(null); return; }
     let cancelled = false;
     (async () => {
@@ -1631,10 +1699,17 @@ Include only the components listed above. Do not add components that were not re
         const codeStatus = String(info?.code_verification_status || "").toUpperCase();
         // PENDING ou EXPIRED em CLOUD_API = precisa registrar/renovar PIN.
         // CONNECTED / DISCONNECTED / FLAGGED com code_verification_status != EXPIRED = já registrado.
+        // ON_PREMISE só com prova de que o número não está no app WhatsApp Business.
         const isCloudApi = platform === "" || platform === "CLOUD_API";
-        const needs =
-          isCloudApi &&
-          (status === "PENDING" || codeStatus === "EXPIRED");
+        const needs = isWabaPhoneOnPremise(platform)
+          ? await resolveOnPremisePinPending({
+              tokenAPI: conn.tokenAPI,
+              bmToken: conn.bmToken,
+              wabaId: conn.wabaId,
+              wabaVersion: conn.wabaVersion,
+            })
+          : isCloudApi && (status === "PENDING" || codeStatus === "EXPIRED");
+        if (cancelled) return;
         setPhoneNeedsManualReg(needs);
       } catch {
         if (cancelled) return;
@@ -1643,7 +1718,7 @@ Include only the components listed above. Do not add components that were not re
       }
     })();
     return () => { cancelled = true; };
-  }, [selectedPhone, whatsapps]);
+  }, [selectedPhone, selectedPhoneConnKey]);
 
   async function checkPhone() {
     if (!selectedPhone) { toast.error(t("errorSelectConn")); return; }
@@ -1664,7 +1739,16 @@ Include only the components listed above. Do not add components that were not re
       const platform = String(info?.platform_type || "").toUpperCase();
       const codeStatus = String(info?.code_verification_status || "").toUpperCase();
       const isCloudApi = platform === "" || platform === "CLOUD_API";
-      setPhoneNeedsManualReg(isCloudApi && (status === "PENDING" || codeStatus === "EXPIRED"));
+      setPhoneNeedsManualReg(
+        isWabaPhoneOnPremise(platform)
+          ? await resolveOnPremisePinPending({
+              tokenAPI: conn?.tokenAPI,
+              bmToken: conn?.bmToken,
+              wabaId: conn?.wabaId,
+              wabaVersion: conn?.wabaVersion,
+            })
+          : isCloudApi && (status === "PENDING" || codeStatus === "EXPIRED")
+      );
     } catch (err: any) {
       toast.error(t("errorLoadPhoneInfo"));
     } finally {
@@ -2020,7 +2104,7 @@ Include only the components listed above. Do not add components that were not re
       });
       setWabaAdminData(data);
     } catch (err: any) {
-      toast.error(t("errorLoadWabaData"));
+      toast.error(isMetaTokenUnauthorized(err) ? tCommon("metaTokenInvalidReconnect") : t("errorLoadWabaData"));
     } finally {
       setLoadingWabaData(false);
     }
@@ -2054,7 +2138,7 @@ Include only the components listed above. Do not add components that were not re
       setAnalyticsData(data);
     } catch (err: any) {
       // Repassa mensagem do backend (já contém error_user_msg do Meta) ou cai no i18n.
-      toast.error(formatBulkSendError(err) || t("errorLoadAnalytics"));
+      toast.error(isMetaTokenUnauthorized(err) ? tCommon("metaTokenInvalidReconnect") : (formatBulkSendError(err) || t("errorLoadAnalytics")));
     } finally {
       setLoadingAnalytics(false);
     }
@@ -2093,7 +2177,7 @@ Include only the components listed above. Do not add components that were not re
       setSelectedAnalyticsTemplateIds([]);
       if (list.length === 0) toast.info(t("noTemplatesInConn"));
     } catch (err: any) {
-      toast.error(t("errorLoadTemplateList"));
+      toast.error(metaRateLimitedMessage(err, tCommon) ?? (isMetaTokenUnauthorized(err) ? tCommon("metaTokenInvalidReconnect") : t("errorLoadTemplateList")));
     } finally {
       setLoadingAnalyticsTemplates(false);
     }
@@ -2127,7 +2211,7 @@ Include only the components listed above. Do not add components that were not re
       // Surface Meta's error_user_msg (e.g. "Os insights sobre o modelo
       // não foram habilitados para esta conta do WhatsApp Business.")
       // em vez do toast genérico.
-      toast.error(formatBulkSendError(err) || t("errorLoadTemplateAnalytics"));
+      toast.error(isMetaTokenUnauthorized(err) ? tCommon("metaTokenInvalidReconnect") : (formatBulkSendError(err) || t("errorLoadTemplateAnalytics")));
     } finally {
       setLoadingTemplateAnalytics(false);
     }
@@ -2207,13 +2291,13 @@ Include only the components listed above. Do not add components that were not re
     try {
       const { data } = await listMessengerTemplates(channelId);
       setFbTplList((data?.data || []) as typeof fbTplList);
-    } catch {
-      toast.error(t("fbTpl.loadError"));
+    } catch (err) {
+      toast.error(isMetaTokenUnauthorized(err) ? tCommon("metaTokenInvalidReconnect") : t("fbTpl.loadError"));
       setFbTplList([]);
     } finally {
       setFbTplLoading(false);
     }
-  }, [t]);
+  }, [t, tCommon]);
 
   useEffect(() => {
     if (fbTplChannelId) {
@@ -2313,7 +2397,11 @@ Include only the components listed above. Do not add components that were not re
       setFbTplSubTab("list");
       void loadFbTemplates(fbTplChannelId);
     } catch (err: any) {
-      toast.error(err?.response?.data?.error || err?.response?.data?.message || err?.message || (fbTplForm.editingId ? t("fbTpl.editError") : t("fbTpl.createError")));
+      // O motivo da Meta vem em err.data (o interceptor rejeita com o response) — a leitura
+      // antiga por err.response.data nunca chegava e a tela só mostrava o texto genérico.
+      toast.error(isMetaTokenUnauthorized(err)
+        ? tCommon("metaTokenInvalidReconnect")
+        : (getBackendErrorCode(err) || (fbTplForm.editingId ? t("fbTpl.editError") : t("fbTpl.createError"))));
     } finally {
       setFbTplCreating(false);
     }
@@ -2328,7 +2416,7 @@ Include only the components listed above. Do not add components that were not re
       setFbTplDeleteConfirm(null);
       void loadFbTemplates(fbTplChannelId);
     } catch (err: any) {
-      toast.error(err?.response?.data?.error || err?.message || t("fbTpl.deleteError"));
+      toast.error(isMetaTokenUnauthorized(err) ? tCommon("metaTokenInvalidReconnect") : (err?.response?.data?.error || err?.message || t("fbTpl.deleteError")));
     } finally {
       setFbTplDeletingName(null);
     }
@@ -2409,7 +2497,7 @@ Include only the components listed above. Do not add components that were not re
   return (
     <div className="space-y-6">
       <PageHeader
-        title="Contas META"
+        title={t("pageTitle")}
         description={t("pageDescription")}
         help={{
           description: t("helpDesc"),
@@ -2756,7 +2844,15 @@ Include only the components listed above. Do not add components that were not re
                         <DropdownMenuItem onClick={openPhoneRegistrationModal}>
                           <ShieldCheck className="w-4 h-4 mr-2" /> {t("registerPhone")}
                         </DropdownMenuItem>
-                        <DropdownMenuItem onClick={() => { if (!selectedPhone) { toast.error(t("errorSelectConn")); return; } setVerificationData(v => ({ ...v, phoneNumberId: String(selectedPhone) })); setVerificationStep("request"); setShowVerificationModal(true); }}>
+                        <DropdownMenuItem onClick={() => {
+                          if (!selectedPhone) { toast.error(t("errorSelectConn")); return; }
+                          // Mostra o Phone Number ID salvo no canal: é ele que o pedido e a
+                          // verificação usam (antes o campo vinha com o id interno do canal).
+                          const conn = whatsapps.find((w) => w.id === Number(selectedPhone)) as Whatsapp & { tokenAPI?: string };
+                          setVerificationData(v => ({ ...v, phoneNumberId: String(conn?.tokenAPI || "") }));
+                          setVerificationStep("request");
+                          setShowVerificationModal(true);
+                        }}>
                           <CheckCircle className="w-4 h-4 mr-2" /> {t("verifyCode")}
                         </DropdownMenuItem>
                       </DropdownMenuContent>
@@ -2814,6 +2910,12 @@ Include only the components listed above. Do not add components that were not re
                             <Card>
                               <CardContent className="space-y-2 text-sm pt-4">
                                 <WabaSendHealthNotice whatsappId={conn.id} variant="panel" />
+                                {conn.type === "waba" && (
+                                  <WabaMarketingMessagesNotice
+                                    status={marketingMessagesStatuses?.get(Number(conn.id)) ?? null}
+                                    variant="panel"
+                                  />
+                                )}
                                 <div className="flex justify-between"><span className="text-muted-foreground shrink-0">{t("labelName")}:</span><span className="ml-2 truncate">{conn.name}</span></div>
                                 <div className="flex justify-between"><span className="text-muted-foreground shrink-0">{t("labelStatus")}:</span><Badge variant="outline">{conn.status}</Badge></div>
                                 {conn.wabaId && <div className="flex flex-col gap-0.5"><span className="text-muted-foreground text-xs">WABA ID:</span><span className="font-mono text-xs break-all">{conn.wabaId}</span></div>}
@@ -3134,7 +3236,7 @@ Include only the components listed above. Do not add components that were not re
                         <Input type="date" value={templateAnalyticsEnd} onChange={(e) => setTemplateAnalyticsEnd(e.target.value)} className="h-8 text-xs w-36" />
                         <Button size="sm" variant="outline" onClick={loadTemplateAnalytics} disabled={loadingTemplateAnalytics || selectedAnalyticsTemplateIds.length === 0}>
                           <RefreshCw className={`w-3 h-3 mr-1 ${loadingTemplateAnalytics ? "animate-spin" : ""}`} />
-                          {loadingTemplateAnalytics ? "..." : `Carregar Métricas${selectedAnalyticsTemplateIds.length > 0 ? ` (${selectedAnalyticsTemplateIds.length})` : ""}`}
+                          {loadingTemplateAnalytics ? "..." : `${t("loadTemplateMetrics")}${selectedAnalyticsTemplateIds.length > 0 ? ` (${selectedAnalyticsTemplateIds.length})` : ""}`}
                         </Button>
                       </div>
                     </CardContent>
@@ -3252,25 +3354,73 @@ Include only the components listed above. Do not add components that were not re
                       const total = Number(sentCostData.total) || 0;
                       const failed = Number(sentCostData.failed) || 0;
                       const linkedDelivered = Number(sentCostData.linkedDelivered) || 0;
-                      const byDay = Array.isArray(sentCostData.byDay) ? sentCostData.byDay : [];
                       const byType = Array.isArray(sentCostData.byMediaType) ? sentCostData.byMediaType : [];
                       const bySendType = Array.isArray(sentCostData.bySendType) ? sentCostData.bySendType : [];
+                      // Franquia mensal, resposta grátis até 30/09/2026, canal vinculado e app do celular: lib/waba-sent-cost.ts
+                      const summary = computeWabaSentCost({
+                        startDate: String(sentCostData.startDate || sentCostStart),
+                        rate,
+                        byDay: Array.isArray(sentCostData.byDay) ? sentCostData.byDay : [],
+                        byDayDetail: Array.isArray(sentCostData.byDayDetail) ? sentCostData.byDayDetail : undefined,
+                        serviceBeforeStart: Number(sentCostData.serviceBeforeStart) || 0,
+                        linkedBeforeStart: Number(sentCostData.linkedBeforeStart) || 0,
+                      });
+                      const byDay = summary.days;
+                      // Linhas por tipo/origem: com o detalhe do backend, template leva o próprio custo e a
+                      // resposta divide as cobradas; sem ele (backend anterior), a conta de antes.
+                      const detailOf = (list: unknown, key: string) => {
+                        const map = new Map<string, any>();
+                        if (Array.isArray(list)) list.forEach((row: any) => map.set(String(row?.[key]), row));
+                        return map;
+                      };
+                      const mediaTypeDetail = detailOf(sentCostData.byMediaTypeDetail, "mediaType");
+                      const sendTypeDetail = detailOf(sentCostData.bySendTypeDetail, "sendType");
+                      const rowCost = (detail: Map<string, any>, key: unknown, count: unknown) => {
+                        const row = detail.get(String(key));
+                        if (summary.detailed && row) return wabaSentRowCost(row, summary, rate);
+                        return total > 0 ? (summary.cost * (Number(count) || 0)) / total : 0;
+                      };
                       const avoidableSendTypes = ["chat", "bot", "schedule"];
                       const avoidableCount = bySendType.reduce((acc: number, st: any) => acc + (avoidableSendTypes.includes(String(st.sendType)) ? (Number(st.count) || 0) : 0), 0);
+                      const avoidableCost = summary.detailed && Array.isArray(sentCostData.bySendTypeDetail)
+                        ? wabaSentAvoidableCost(sentCostData.bySendTypeDetail, avoidableSendTypes, summary, rate)
+                        : Math.min(avoidableCount, summary.paidService) * rate;
                       return (
                         <CardContent className="space-y-4">
-                          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                          {!summary.detailed && (
+                            <p className="text-[11px] leading-snug text-amber-700 dark:text-amber-400">{t("sentCostLegacyNote")}</p>
+                          )}
+                          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
                             <div className="border rounded p-3">
                               <p className="text-[11px] text-muted-foreground">{t("sentCostTotalMsgs")}</p>
                               <p className="text-lg font-semibold">{total}</p>
                             </div>
                             <div className="border rounded p-3">
-                              <p className="text-[11px] text-muted-foreground">{t("sentCostRateLabel")}</p>
-                              <p className="text-lg font-semibold">{fmtBRL(rate)}</p>
+                              <div className="flex items-center gap-1">
+                                <p className="text-[11px] text-muted-foreground">{t("sentCostFreeLabel")}</p>
+                                <Popover>
+                                  <PopoverTrigger asChild>
+                                    <button
+                                      type="button"
+                                      aria-label={t("sentCostFreeLabel")}
+                                      className="inline-flex h-5 w-5 items-center justify-center rounded text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                                    >
+                                      <Info className="w-3 h-3" />
+                                    </button>
+                                  </PopoverTrigger>
+                                  <PopoverContent className="max-w-xs text-xs leading-snug">{t("sentCostFreeTooltip")}</PopoverContent>
+                                </Popover>
+                              </div>
+                              <p className="text-lg font-semibold">{summary.free}</p>
+                            </div>
+                            <div className="border rounded p-3">
+                              <p className="text-[11px] text-muted-foreground">{t("sentCostPaidLabel")}</p>
+                              <p className="text-lg font-semibold">{summary.paid}</p>
+                              <p className="text-[11px] text-muted-foreground">{t("sentCostRateLabel")}: {fmtBRL(rate)}</p>
                             </div>
                             <div className="border rounded p-3">
                               <p className="text-[11px] text-muted-foreground">{t("sentCostEstimatedTotal")}</p>
-                              <p className="text-lg font-semibold">{fmtBRL(total * rate)}</p>
+                              <p className="text-lg font-semibold">{fmtBRL(summary.cost)}</p>
                             </div>
                           </div>
                           {linkedDelivered > 0 && (
@@ -3279,7 +3429,7 @@ Include only the components listed above. Do not add components that were not re
                                 <p className="text-[11px] text-muted-foreground">{t("sentCostLinkedDelivered")}</p>
                                 <p className="text-[11px] leading-snug text-muted-foreground">{t("sentCostLinkedDeliveredHint", { count: linkedDelivered })}</p>
                               </div>
-                              <p className="text-lg font-semibold text-emerald-600 dark:text-emerald-400 whitespace-nowrap">{fmtBRL(linkedDelivered * rate)}</p>
+                              <p className="text-lg font-semibold text-emerald-600 dark:text-emerald-400 whitespace-nowrap">{fmtBRL(summary.detailed ? summary.linkedSavings : linkedDelivered * rate)}</p>
                             </div>
                           )}
                           {failed > 0 && (
@@ -3290,13 +3440,14 @@ Include only the components listed above. Do not add components that were not re
                               <p className="text-xs font-medium text-muted-foreground mb-2">{t("sentCostByDay")}</p>
                               <div className="overflow-x-auto">
                                 <table className="w-full text-xs border-collapse">
-                                  <thead><tr className="bg-muted"><th className="p-2 border text-left">{t("colDate")}</th><th className="p-2 border text-right">{t("sentCostColMessages")}</th><th className="p-2 border text-right">{t("labelCost")}</th></tr></thead>
+                                  <thead><tr className="bg-muted"><th className="p-2 border text-left">{t("colDate")}</th><th className="p-2 border text-right">{t("sentCostColMessages")}</th><th className="p-2 border text-right">{t("sentCostFreeLabel")}</th><th className="p-2 border text-right">{t("labelCost")}</th></tr></thead>
                                   <tbody>
-                                    {byDay.map((d: any, i: number) => (
+                                    {byDay.map((d, i) => (
                                       <tr key={i} className="border-b hover:bg-muted/50">
                                         <td className="p-2 border">{fmtDay(d.day)}</td>
                                         <td className="p-2 border text-right font-medium">{d.count}</td>
-                                        <td className="p-2 border text-right">{fmtBRL((Number(d.count) || 0) * rate)}</td>
+                                        <td className="p-2 border text-right">{d.free}</td>
+                                        <td className="p-2 border text-right">{fmtBRL(d.cost)}</td>
                                       </tr>
                                     ))}
                                   </tbody>
@@ -3304,7 +3455,8 @@ Include only the components listed above. Do not add components that were not re
                                     <tr className="bg-muted/60 font-semibold">
                                       <td className="p-2 border">{t("colTotal")}</td>
                                       <td className="p-2 border text-right">{total}</td>
-                                      <td className="p-2 border text-right">{fmtBRL(total * rate)}</td>
+                                      <td className="p-2 border text-right">{summary.free}</td>
+                                      <td className="p-2 border text-right">{fmtBRL(summary.cost)}</td>
                                     </tr>
                                   </tfoot>
                                 </table>
@@ -3316,13 +3468,13 @@ Include only the components listed above. Do not add components that were not re
                               <p className="text-xs font-medium text-muted-foreground mb-2">{t("sentCostByType")}</p>
                               <div className="overflow-x-auto">
                                 <table className="w-full text-xs border-collapse">
-                                  <thead><tr className="bg-muted"><th className="p-2 border text-left">{t("labelType")}</th><th className="p-2 border text-right">{t("sentCostColMessages")}</th><th className="p-2 border text-right">{t("labelCost")}</th></tr></thead>
+                                  <thead><tr className="bg-muted"><th className="p-2 border text-left">{t("labelType")}</th><th className="p-2 border text-right">{t("sentCostColMessages")}</th><th className="p-2 border text-right">{t("sentCostColCostShare")}</th></tr></thead>
                                   <tbody>
                                     {byType.map((mt: any, i: number) => (
                                       <tr key={i} className="border-b hover:bg-muted/50">
                                         <td className="p-2 border"><Badge variant="outline" className="text-xs">{mt.mediaType || "—"}</Badge></td>
                                         <td className="p-2 border text-right font-medium">{mt.count}</td>
-                                        <td className="p-2 border text-right">{fmtBRL((Number(mt.count) || 0) * rate)}</td>
+                                        <td className="p-2 border text-right">{fmtBRL(rowCost(mediaTypeDetail, mt.mediaType, mt.count))}</td>
                                       </tr>
                                     ))}
                                   </tbody>
@@ -3335,13 +3487,13 @@ Include only the components listed above. Do not add components that were not re
                               <p className="text-xs font-medium text-muted-foreground mb-2">{t("sentCostBySendType")}</p>
                               <div className="overflow-x-auto">
                                 <table className="w-full text-xs border-collapse">
-                                  <thead><tr className="bg-muted"><th className="p-2 border text-left">{t("sentCostColOrigin")}</th><th className="p-2 border text-right">{t("sentCostColMessages")}</th><th className="p-2 border text-right">{t("labelCost")}</th></tr></thead>
+                                  <thead><tr className="bg-muted"><th className="p-2 border text-left">{t("sentCostColOrigin")}</th><th className="p-2 border text-right">{t("sentCostColMessages")}</th><th className="p-2 border text-right">{t("sentCostColCostShare")}</th></tr></thead>
                                   <tbody>
                                     {bySendType.map((st: any, i: number) => (
                                       <tr key={i} className="border-b hover:bg-muted/50">
                                         <td className="p-2 border"><Badge variant="outline" className="text-xs">{st.sendType || "—"}</Badge></td>
                                         <td className="p-2 border text-right font-medium">{st.count}</td>
-                                        <td className="p-2 border text-right">{fmtBRL((Number(st.count) || 0) * rate)}</td>
+                                        <td className="p-2 border text-right">{fmtBRL(rowCost(sendTypeDetail, st.sendType, st.count))}</td>
                                       </tr>
                                     ))}
                                   </tbody>
@@ -3349,7 +3501,7 @@ Include only the components listed above. Do not add components that were not re
                                     <tr className="bg-emerald-50 dark:bg-emerald-950/30 font-semibold">
                                       <td className="p-2 border">{t("sentCostAvoidable")}</td>
                                       <td className="p-2 border text-right">{avoidableCount}</td>
-                                      <td className="p-2 border text-right">{fmtBRL(avoidableCount * rate)}</td>
+                                      <td className="p-2 border text-right">{fmtBRL(avoidableCost)}</td>
                                     </tr>
                                   </tfoot>
                                 </table>
@@ -3946,19 +4098,19 @@ Include only the components listed above. Do not add components that were not re
                               <SelectTrigger><SelectValue placeholder={t("labelStatus")} /></SelectTrigger>
                               <SelectContent>
                                 <SelectItem value="all">{t("allStatuses")}</SelectItem>
-                                <SelectItem value="APPROVED">Aprovado</SelectItem>
-                                <SelectItem value="PENDING">Pendente</SelectItem>
-                                <SelectItem value="REJECTED">Rejeitado</SelectItem>
-                                <SelectItem value="PAUSED">Pausado</SelectItem>
+                                <SelectItem value="APPROVED">{t("statusApproved")}</SelectItem>
+                                <SelectItem value="PENDING">{tCommon("status.pending")}</SelectItem>
+                                <SelectItem value="REJECTED">{t("statusRejected")}</SelectItem>
+                                <SelectItem value="PAUSED">{t("statusPaused")}</SelectItem>
                               </SelectContent>
                             </Select>
                             <Select value={filtros.category} onValueChange={(v) => setFiltros((f) => ({ ...f, category: v }))}>
                               <SelectTrigger><SelectValue placeholder={t("labelCategory")} /></SelectTrigger>
                               <SelectContent>
                                 <SelectItem value="all">{t("allCategories")}</SelectItem>
-                                <SelectItem value="MARKETING">Marketing</SelectItem>
-                                <SelectItem value="UTILITY">Utilidade</SelectItem>
-                                <SelectItem value="AUTHENTICATION">Autenticação</SelectItem>
+                                <SelectItem value="MARKETING">{t("categoryMarketing")}</SelectItem>
+                                <SelectItem value="UTILITY">{t("categoryUtility")}</SelectItem>
+                                <SelectItem value="AUTHENTICATION">{t("categoryAuthentication")}</SelectItem>
                               </SelectContent>
                             </Select>
                             <Select value={filtros.language} onValueChange={(v) => setFiltros((f) => ({ ...f, language: v }))}>
@@ -4044,7 +4196,7 @@ Include only the components listed above. Do not add components that were not re
                                 </CardContent>
                                 <div className="p-4 pt-0 flex gap-2">
                                   <Button variant="outline" size="sm" onClick={() => viewTemplate(template)} className="flex-1">
-                                    <Eye className="w-3 h-3 mr-1" /> Ver
+                                    <Eye className="w-3 h-3 mr-1" /> {t("viewBtn")}
                                   </Button>
                                   <Button variant="outline" size="sm" onClick={() => editTemplateAction(template)}>
                                     <Edit className="w-3 h-3" />
@@ -4106,14 +4258,14 @@ Include only the components listed above. Do not add components that were not re
                           </div>
                           <div className="space-y-1">
                             <Label>App ID</Label>
-                            <Input value={appId} onChange={(e) => setAppId(e.target.value)} placeholder="App ID do Facebook" />
+                            <Input value={appId} onChange={(e) => setAppId(e.target.value)} placeholder={t("placeholderFacebookAppId")} />
                           </div>
                           <div className="space-y-1">
                             <Label>{t("labelTemplateName")}</Label>
                             <Input
                               value={novoTemplate.name}
                               onChange={(e) => setNovoTemplate((t) => ({ ...t, name: e.target.value.toLowerCase().replace(/\s+/g, "_") }))}
-                              placeholder="meu_template"
+                              placeholder={t("placeholderTemplateName")}
                               maxLength={WABA_LIMITS.templateName}
                             />
                             <p className="text-xs text-muted-foreground">{t("templateNameHint")}</p>
@@ -4136,9 +4288,9 @@ Include only the components listed above. Do not add components that were not re
                               <Select value={novoTemplate.category} onValueChange={(v) => setNovoTemplate((t) => ({ ...t, category: v }))}>
                                 <SelectTrigger><SelectValue /></SelectTrigger>
                                 <SelectContent>
-                                  <SelectItem value="MARKETING">Marketing</SelectItem>
-                                  <SelectItem value="UTILITY">Utilidade</SelectItem>
-                                  <SelectItem value="AUTHENTICATION">Autenticação</SelectItem>
+                                  <SelectItem value="MARKETING">{t("categoryMarketing")}</SelectItem>
+                                  <SelectItem value="UTILITY">{t("categoryUtility")}</SelectItem>
+                                  <SelectItem value="AUTHENTICATION">{t("categoryAuthentication")}</SelectItem>
                                 </SelectContent>
                               </Select>
                             </div>
@@ -4179,7 +4331,7 @@ Include only the components listed above. Do not add components that were not re
                                 {comp.type === "HEADER" && (
                                   <>
                                     <Select value={comp.format || "TEXT"} onValueChange={(v) => updateComponent(idx, { format: v })}>
-                                      <SelectTrigger><SelectValue placeholder="Formato" /></SelectTrigger>
+                                      <SelectTrigger><SelectValue placeholder={t("labelFormat")} /></SelectTrigger>
                                       <SelectContent>
                                         <SelectItem value="TEXT">{t("formatText")}</SelectItem>
                                         <SelectItem value="IMAGE">{t("formatImage")}</SelectItem>
@@ -4470,7 +4622,7 @@ Include only the components listed above. Do not add components that were not re
                           <Input
                             value={fbTplForm.name}
                             onChange={(e) => setFbTplForm((p) => ({ ...p, name: e.target.value }))}
-                            placeholder="confirmacao_agendamento"
+                            placeholder={t("fbTpl.namePlaceholder")}
                             maxLength={WABA_LIMITS.templateName}
                             className="mt-1 h-9 text-sm font-mono"
                             disabled={!!fbTplForm.editingId}
@@ -4527,6 +4679,7 @@ Include only the components listed above. Do not add components that were not re
                                 className="h-9 text-sm"
                               />
                               <p className="text-[11px] text-muted-foreground">{t("fbTpl.headerMediaHint")}</p>
+                              <p className="text-[11px] text-muted-foreground">{t("fbTpl.headerMediaNote")}</p>
                             </div>
                           )}
                         </div>
@@ -4537,7 +4690,7 @@ Include only the components listed above. Do not add components that were not re
                           <Textarea
                             value={fbTplForm.body}
                             onChange={(e) => setFbTplForm((p) => ({ ...p, body: e.target.value }))}
-                            placeholder={"Ola {{1}}, seu agendamento esta confirmado para {{2}} as {{3}}h."}
+                            placeholder={t.raw("fbTpl.bodyPlaceholderVars") as string}
                             maxLength={WABA_LIMITS.templateBody}
                             rows={5}
                             className="mt-1 text-sm"
@@ -4557,7 +4710,7 @@ Include only the components listed above. Do not add components that were not re
                                   ex[i] = e.target.value;
                                   return { ...p, examples: ex };
                                 })}
-                                placeholder={`{{${i + 1}}} — exemplo`}
+                                placeholder={`{{${i + 1}}} — ${t("fbTpl.examplePlaceholder")}`}
                                 className="h-8 text-sm"
                               />
                             ))}
@@ -4873,7 +5026,7 @@ Include only the components listed above. Do not add components that were not re
               { key: "phoneNumberId", label: "Phone Number ID" },
               { key: "wabaId", label: "WABA ID" },
               { key: "wabaVersion", label: t("labelApiVersion") },
-              { key: "wabaToken", label: "Token WABA", type: "password" },
+              { key: "wabaToken", label: t("labelWabaToken"), type: "password" },
               { key: "pin", label: t("labelPinOptional") },
             ].map(({ key, label, type }) => (
               <div key={key} className="space-y-1">
@@ -4927,7 +5080,16 @@ Include only the components listed above. Do not add components that were not re
             <div className="space-y-4">
               <div className="space-y-1">
                 <Label>Phone Number ID</Label>
-                <Input value={verificationData.phoneNumberId} onChange={(e) => setVerificationData((d) => ({ ...d, phoneNumberId: e.target.value }))} />
+                <Input value={verificationData.phoneNumberId} readOnly className="bg-muted" />
+                <p className="text-xs text-muted-foreground">{t("verifyCodePhoneIdHint")}</p>
+              </div>
+              <div className="flex gap-2 rounded-md border border-amber-300 bg-amber-50 p-3 text-xs text-amber-800 dark:border-amber-800 dark:bg-amber-950/30 dark:text-amber-300">
+                <Info className="h-4 w-4 shrink-0 mt-0.5" />
+                <div className="space-y-1">
+                  <p>{t("verifyCodeRequestOnce")}</p>
+                  <p>{t("verifyCodeInUseOnPhone")}</p>
+                  <p>{t("verifyCodeTryRegisterFirst")}</p>
+                </div>
               </div>
               <div className="space-y-1">
                 <Label>{t("labelMethod")}</Label>
@@ -4945,7 +5107,7 @@ Include only the components listed above. Do not add components that were not re
               </div>
               <DialogFooter>
                 <Button variant="outline" onClick={() => setShowVerificationModal(false)}>{t("cancelBtn")}</Button>
-                <Button onClick={requestVerifCode} disabled={loadingCodeRequest}>
+                <Button onClick={requestVerifCode} disabled={loadingCodeRequest || !verificationData.phoneNumberId}>
                   {loadingCodeRequest ? t("loadText") : t("sendBtn")}
                 </Button>
               </DialogFooter>
@@ -5012,7 +5174,7 @@ Include only the components listed above. Do not add components that were not re
               { key: "address", label: t("labelProfileAddress"), placeholder: t("placeholderProfileAddress") },
               { key: "description", label: t("labelProfileAbout"), placeholder: t("placeholderProfileAbout") },
               { key: "email", label: t("labelProfileEmail"), placeholder: t("placeholderProfileEmail") },
-              { key: "vertical", label: t("labelProfileName"), placeholder: "Ex: RETAIL, EDUCATION, ..." },
+              { key: "vertical", label: t("labelProfileName"), placeholder: t("placeholderVertical") },
             ].map(({ key, label, placeholder }) => (
               <div key={key} className="space-y-1">
                 <Label>{label}</Label>
@@ -5168,9 +5330,9 @@ Include only the components listed above. Do not add components that were not re
                 <Select value={aiForm.category} onValueChange={(v) => setAiForm((f) => ({ ...f, category: v }))}>
                   <SelectTrigger><SelectValue /></SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="MARKETING">Marketing</SelectItem>
-                    <SelectItem value="UTILITY">Utilidade</SelectItem>
-                    <SelectItem value="AUTHENTICATION">Autenticação</SelectItem>
+                    <SelectItem value="MARKETING">{t("categoryMarketing")}</SelectItem>
+                    <SelectItem value="UTILITY">{t("categoryUtility")}</SelectItem>
+                    <SelectItem value="AUTHENTICATION">{t("categoryAuthentication")}</SelectItem>
                   </SelectContent>
                 </Select>
               </div>

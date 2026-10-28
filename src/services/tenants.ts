@@ -57,7 +57,9 @@ export async function updateTenantPostmanLink(tenantId: number, postmanLink: str
 }
 
 export async function deleteTenant(tenantId: number) {
-  return api.delete(`/tenants/${tenantId}`);
+  // Teto de 30 min em vez dos 30 s gerais: a exclusão de uma empresa grande leva
+  // minutos, e o corte mostrava erro enquanto o servidor terminava de apagar.
+  return api.delete(`/tenants/${tenantId}`, { timeout: 30 * 60 * 1000 });
 }
 
 export async function acceptTermsForTenant(tenantId: number) {
@@ -218,8 +220,77 @@ export async function refreshPaymentStatusV2() {
   return api.post("/tenantsRefreshPaymentStatus");
 }
 
-export async function changePlanV2(planId: number) {
-  return api.post("/tenantsChangePlanV2", { planId });
+/**
+ * Prévia da troca de plano (PLANO_COBRANCA_PLANOS_GATEWAY): o que será cobrado antes de
+ * confirmar. Backend antigo responde 404 — a tela segue com o texto de antes.
+ * `amount` vem em reais; `amountCents` é o que volta na confirmação.
+ */
+export type PlanChangeQuoteMode =
+  | "difference"
+  | "update_first_charge"
+  | "no_charge"
+  | "new_subscription"
+  | "unsupported";
+
+export interface PlanChangeQuote {
+  direction: "up" | "down" | "same";
+  mode: PlanChangeQuoteMode;
+  amount: number;
+  amountCents: number;
+  currentLevel?: number;
+  newValue?: number;
+  remainingDays?: number;
+  totalDays?: number;
+  periodEnd?: string | null;
+  gateway?: string;
+}
+
+export interface PlanChangeCharge {
+  mode: PlanChangeQuoteMode;
+  amount: number;
+  paymentUrl?: string | null;
+  /** `authorize` = link de autorização da assinatura (Mercado Pago); ausente = pagar. */
+  paymentAction?: "pay" | "authorize";
+}
+
+/**
+ * Campos aditivos de GET /tenantsSubscriptionV2 (PLANO_COBRANCA_MERCADOPAGO_PAGARME §5.3.6).
+ * Backend antigo não manda nenhum: a tela fica como era.
+ */
+export interface SubscriptionV2Extras {
+  /** O gateway não tem assinatura ativa desta empresa. */
+  subscriptionMissing?: boolean;
+  /** A empresa pode gerar o link (MP) / boleto (Pagar.me) da assinatura. */
+  canRecreate?: boolean;
+  /** Assinatura pausada pelo revendedor no gateway (D16): não bloqueia. */
+  subscriptionPaused?: boolean;
+  /** O teste grátis do plano vale de fato no gateway desta empresa. */
+  gatewayTrialSupported?: boolean;
+}
+
+/**
+ * Gera (ou devolve) o link de autorização da assinatura no Mercado Pago, ou o boleto da
+ * assinatura no Pagar.me (D7/D20). Backend antigo responde 404: a tela esconde o botão.
+ */
+export async function createSubscriptionAuthorizationLink() {
+  return api.post<{ paymentUrl: string | null; paymentAction?: "pay" | "authorize" }>(
+    "/tenantsSubscriptionV2/authorization-link"
+  );
+}
+
+export async function fetchPlanChangeQuoteV2(planId: number) {
+  return api.get<PlanChangeQuote>(`/tenantsChangePlanV2/quote/${planId}`);
+}
+
+/**
+ * Troca de plano. Com o quote mostrado na tela, manda o valor/modo confirmados: se mudaram
+ * no servidor, ele recusa (409 ERR_PLAN_CHANGE_QUOTE_CHANGED) com o quote novo em `quote`.
+ */
+export async function changePlanV2(planId: number, quote?: Pick<PlanChangeQuote, "amountCents" | "mode"> | null) {
+  return api.post<{ success: boolean; gateway?: string; charge?: PlanChangeCharge }>("/tenantsChangePlanV2", {
+    planId,
+    ...(quote ? { quotedAmount: quote.amountCents, quotedMode: quote.mode } : {}),
+  });
 }
 
 export interface PaymentGatewayConfig {
@@ -263,6 +334,18 @@ export interface PaymentGatewayGlobalConfig {
   firstChargeDueDays?: number;
   /** Quando true, novos cadastros só acessam após confirmação do 1º pagamento. */
   requirePaymentBeforeAccess?: boolean;
+  /** Tolerância (dias após o vencimento) aplicada às empresas do cadastro público. 0 = nunca bloqueia. */
+  signupBillingBlockDaysAfter?: number;
+  /** Aviso antes do vencimento (dias) aplicado às empresas do cadastro público. */
+  signupBillingAlertDaysBefore?: number;
+  /** Só leitura (GET): de onde a config veio — db, file, memory ou defaults. */
+  configSource?: string;
+  /** Só leitura (GET): config ausente com empresas já provisionadas em gateway. */
+  configMissing?: boolean;
+  /** Só leitura (GET): gateways em que o teste grátis do plano vale no cadastro. Ausente = backend antigo. */
+  signupTrialGateways?: string[];
+  /** Só leitura (GET): segredo do webhook definido por variável de ambiente (vence o da tela). */
+  webhookSecretFromEnv?: { pagarme?: boolean; mercadopago?: boolean };
 }
 
 export async function fetchPaymentGatewayGlobalConfig() {

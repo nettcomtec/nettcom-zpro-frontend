@@ -11,6 +11,8 @@ import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter,
 } from "@/components/ui/dialog";
 import type { ExistingOpenTicket } from "@/lib/check-existing-open-ticket";
+import { useAuthStore } from "@/stores/auth-store";
+import { isNotViewAssignedRestricted } from "@/lib/not-view-assigned-scope";
 
 /**
  * Confirmação de TROCA DE CANAL quando o contato já tem atendimento aberto no
@@ -51,10 +53,18 @@ export function TransferChannelConfirmDialog({
 }) {
   const t = useTranslations("existingTicket");
   const router = useRouter();
+  const { user } = useAuthStore();
+  const supervisorAdmin = useAuthStore((s) => s.supervisorAdmin);
 
-  const restricted = isRestrictedUser || notViewAssignedTickets;
-  const canOpen = Boolean(sibling) && !restricted;
+  // Mesma regra dos outros avisos de atendimento existente (lib/not-view-assigned-scope):
+  // admin e supervisor com privilégio continuam podendo abrir.
+  const restricted =
+    isRestrictedUser || (notViewAssignedTickets && isNotViewAssignedRestricted(user, supervisorAdmin));
+  const canOpen = Boolean(sibling) && !restricted && sibling?.accessible !== false;
   const channelLabel = targetChannelName || t("noChannel");
+  // ownerHidden: atendimento que este usuário não abre; o servidor omitiu atendente e fila.
+  const ownerOf = (s: ExistingOpenTicket) => (s.ownerHidden ? t("ownerHidden") : s.ownerName || t("noOwner"));
+  const queueOf = (s: ExistingOpenTicket) => (s.ownerHidden ? t("queueHidden") : s.queueName || t("noQueue"));
   const cleanCount = bulk ? Math.max(0, bulk.total - bulk.conflictCount) : 0;
 
   const handleGoTo = (ticketId: number) => {
@@ -97,8 +107,8 @@ export function TransferChannelConfirmDialog({
                 {t("message", {
                   contact: sibling.contactName || "",
                   ticketId: String(sibling.ticketId),
-                  owner: sibling.ownerName || t("noOwner"),
-                  queue: sibling.queueName || t("noQueue"),
+                  owner: ownerOf(sibling),
+                  queue: queueOf(sibling),
                 })}
               </span>
             )}
@@ -144,11 +154,11 @@ export function TransferChannelConfirmDialog({
                   </Badge>
                   <span
                     className="text-xs text-muted-foreground truncate flex-1 min-w-0"
-                    title={`${s.ownerName || t("noOwner")} — ${s.queueName || t("noQueue")}`}
+                    title={`${ownerOf(s)} — ${queueOf(s)}`}
                   >
-                    {s.ownerName || t("noOwner")}
+                    {ownerOf(s)}
                   </span>
-                  {canOpen && (
+                  {!restricted && s.accessible !== false && (
                     <Button
                       variant="ghost"
                       size="sm"

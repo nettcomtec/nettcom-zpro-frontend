@@ -1,24 +1,24 @@
 "use client";
 
 import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
-import { useRouter } from "next/navigation";
+import { useRouter, usePathname } from "next/navigation";
 import {
   Bell, Search, MessageSquare, ClipboardList, Send,
   PhoneCall, Phone, CircleDot, LogOut, User, Trash2, Cookie,
   Check, CheckCheck, Mail, Loader2, X, BookOpen, PlayCircle,
   ShieldCheck, ShieldAlert, CreditCard, Tag, Share2, RefreshCw, XCircle, Menu, MoreHorizontal, History, Headset,
   Languages, BellRing, Zap, Clock, Calendar, Images, HelpCircle, Inbox, ChevronRight, ChevronDown,
-  PauseCircle,
+  PauseCircle, AlertTriangle, Star, Lock,
 } from "lucide-react";
 import { useUIStore } from "@/stores/ui-store";
 import { TOUR_KEY } from "@/components/tour/AppTour";
 import { cn, isValidHttpUrl } from "@/lib/utils";
+import { getBackendErrorCode, isMetaTokenUnauthorized, metaRateLimitedMessage } from "@/lib/backend-error-code";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
-import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
@@ -49,11 +49,19 @@ import { useLocale } from "@/i18n/locale-provider";
 import { locales, localeNames, type Locale } from "@/i18n/config";
 import { usePushNotifications } from "@/hooks/use-push-notifications";
 import { unsubscribePush } from "@/lib/push-subscription";
+import { endServerSession } from "@/lib/auth-session";
 import { UpdateNotification } from "@/components/UpdateNotification";
 import { toast } from "sonner";
 import { useTranslations } from "next-intl";
 import { fetchWhatsapps, type Whatsapp } from "@/services/whatsapp";
-import { sendIndividualMessage } from "@/services/individual-message";
+import {
+  sendIndividualMessage,
+  AVULSA_MESSAGE_CHANNEL_TYPES,
+  AVULSA_EMAIL_CHANNEL_TYPES,
+} from "@/services/individual-message";
+import { useQuickReplies } from "@/hooks/use-quick-replies";
+import { QuickReplyTextarea, type QuickReplyVarWarningsContext } from "@/components/quick-replies/quick-reply-textarea";
+import { QuickReplyTemplateShortcuts } from "@/components/quick-replies/quick-reply-template-shortcuts";
 import { fetchContacts, type Contact } from "@/services/contacts";
 import { fetchQueues, type Queue } from "@/services/queues";
 import { toNumberArray } from "@/lib/can-user-see-ticket";
@@ -90,11 +98,34 @@ import { fetchTickets } from "@/services/tickets";
 import { findExistingOpenTicket, type ExistingOpenTicket } from "@/lib/check-existing-open-ticket";
 import { ExistingTicketDialog } from "@/components/atendimento/existing-ticket-dialog";
 import { normalizeTickets } from "@/lib/normalize-ticket";
-import { fetchUnreadCounts, fetchUnreadGroupCounts, markAllAsRead as markAllChatAsRead, fetchUnreadPreview, type UnreadPreviewItem } from "@/services/private-chat";
+import { fetchChatUnreadTotal, markAllAsRead as markAllChatAsRead, fetchUnreadPreview, type UnreadPreviewItem } from "@/services/private-chat";
+import { InternalChatIndicator } from "@/components/layout/internal-chat-indicator";
+import { NotificationSoundToggle } from "@/components/layout/notification-sound-toggle";
+import { InternalChatUnreadList } from "@/components/layout/internal-chat-unread-list";
+import { internalChatHref } from "@/lib/internal-chat-link";
+import { usePageAccess } from "@/hooks/use-page-access";
+import { getSocket } from "@/lib/socket";
+import { loadGoogleBusinessBadge, type GoogleBusinessBadge } from "@/services/google-business";
 import { fetchTodos, updateTodo, deleteTodo, type TodoItem } from "@/services/todos";
+import { useTaskSummaryStore } from "@/stores/task-summary-store";
+import { useTaskSummary, OPEN_TASK_DETAIL_STORAGE_KEY, OPEN_TASK_LIST_STORAGE_KEY } from "@/hooks/use-task-summary";
+import {
+  formatTaskDeadline,
+  isTimedTask,
+  sortTasksByDeadline,
+  taskCivilDay,
+  taskDeadlineState,
+} from "@/lib/task-deadline";
 import { fetchTutorials, type Tutorial } from "@/services/tutorials";
-import { fetchTenantById, fetchTenantSubscription } from "@/services/tenants";
+import { fetchTenantById, fetchSubscriptionV2 } from "@/services/tenants";
 import { PaymentPlanModal, type AsaasSubscription, type AsaasPayment } from "@/components/layout/payment-plan-modal";
+import {
+  hasConfirmedSubscriptionPayment,
+  isPaidPayment,
+  isTenantBillingProvisioned,
+  isZeroValuePayment,
+  normalizePaymentStatus,
+} from "@/lib/tenant-billing";
 import type { Plan } from "@/services/plans";
 import { fetchTicketSharedByUser, deleteTicketShared, updateAllUnreadMessages } from "@/services/tickets";
 import packageJson from "../../../package.json";
@@ -119,7 +150,9 @@ import {
 } from "@/lib/ticket-notification-visibility";
 import { getTicketLastMessagePreview, getSyntheticBodyLabel } from "@/lib/template-preview";
 import { normalizeBrPhone } from "@/lib/phone-utils";
-import { buildSignedBody } from "@/lib/signature";
+import { examplePhone, looksLikeMissingDialCode } from "@/lib/region";
+import { useRegion } from "@/hooks/use-region";
+import { buildSignedBody, isSignatureMandatory } from "@/lib/signature";
 
 // ─── Internal Messages Modal ─────────────────────────────
 
@@ -214,33 +247,85 @@ function NotificationIframe({ htmlContent }: { htmlContent: string }) {
 
 // ─── Tasks Modal ─────────────────────────────────────────
 
-function TasksModal({ open, onOpenChange }: { open: boolean; onOpenChange: (o: boolean) => void }) {
+/** Resposta do GET /todoLists: array (atual) ou envelope (legado). */
+function asTodoList(data: unknown): TodoItem[] {
+  if (Array.isArray(data)) return data as TodoItem[];
+  const env = (data ?? {}) as { todoLists?: unknown; data?: unknown };
+  if (Array.isArray(env.todoLists)) return env.todoLists as TodoItem[];
+  if (Array.isArray(env.data)) return env.data as TodoItem[];
+  return [];
+}
+
+/**
+ * Prazo do detalhe da tarefa no sino (PLANO_TAREFAS_ATENDIMENTO_LEMBRETES §5.0): com hora, o
+ * instante; "para o dia", o dia civil gravado — nunca o instante cru da meia-noite UTC (que
+ * mostrava 14/10 21:00 para a tarefa de 15/10).
+ */
+function taskDetailDeadline(task: TodoItem, now: Date = new Date()): {
+  tone: "overdue" | "today" | "soon" | "later";
+  relativeTo: Date | null;
+  absolute: string;
+} | null {
+  const absolute = formatTaskDeadline(task);
+  if (!absolute) return null;
+  const state = taskDeadlineState(task, now);
+  if (isTimedTask(task)) {
+    const instant = new Date((task.limitDate || task.dueDate) as string);
+    const tone = state === "overdue" ? "overdue" : getDeadlineTone(instant);
+    return { tone, relativeTo: instant, absolute };
+  }
+  const day = taskCivilDay(task);
+  if (!day) return null;
+  const [y, m, d] = day.split("-").map(Number);
+  const dayStart = new Date(y, m - 1, d);
+  if (state === "overdue") return { tone: "overdue", relativeTo: new Date(y, m - 1, d, 23, 59, 59, 999), absolute };
+  if (state === "today") return { tone: "today", relativeTo: null, absolute };
+  const diffDays = (dayStart.getTime() - now.getTime()) / 86400000;
+  return { tone: diffDays < 7 ? "soon" : "later", relativeTo: dayStart, absolute };
+}
+
+function TasksModal({
+  open,
+  onOpenChange,
+  canOpenTasksPage,
+  onSelectTask,
+}: {
+  open: boolean;
+  onOpenChange: (o: boolean) => void;
+  canOpenTasksPage: boolean;
+  onSelectTask: (task: TodoItem) => void;
+}) {
   const t = useTranslations("layoutHeader");
+  const router = useRouter();
   const { user } = useAuthStore();
+  const tasksEnabled = useAuthStore((s) => s.hasFeature("tasks"));
+  const isRestricted = useAuthStore((s) => s.isRestrictedUser());
+  const { isLiveMode } = useLiveMode();
   const [items, setItems] = useState<TodoItem[]>([]);
   const [loading, setLoading] = useState(false);
 
   const load = useCallback(async () => {
+    if (!tasksEnabled) {
+      setItems([]);
+      return;
+    }
     setLoading(true);
     try {
-      const { data } = await fetchTodos();
-      const all = Array.isArray(data) ? data : [];
- // Front legado — filtra por ownerId do usuário e status delayed/pending
-      const filtered = all.filter((t) =>
-        t.ownerId === user?.userId &&
-        (t.status === "delayed" || t.status === "pending")
+      const { data } = await fetchTodos({ mine: true });
+      // `mine` é ignorado por backend antigo: o filtro do cliente continua valendo.
+      const filtered = asTodoList(data).filter((task) =>
+        task.ownerId === user?.userId &&
+        (task.status === "delayed" || task.status === "pending")
       );
-      setItems(filtered);
+      setItems(sortTasksByDeadline(filtered));
     } catch { /* empty */ }
     finally { setLoading(false); }
-  }, [user?.userId]);
+  }, [user?.userId, tasksEnabled]);
 
   useEffect(() => { if (open) load(); }, [open, load]);
 
-  const pending = items.filter((t) => t.status !== "completed" && t.status !== "done");
-
   const priorityColor: Record<string, string> = {
-    high: "text-destructive", medium: "text-warning", low: "text-success",
+    high: "bg-destructive", medium: "bg-warning", low: "bg-success",
   };
 
   return (
@@ -249,7 +334,7 @@ function TasksModal({ open, onOpenChange }: { open: boolean; onOpenChange: (o: b
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <ClipboardList className="h-5 w-5" /> {t("tasks.title")}
-            {pending.length > 0 && <Badge variant="secondary" className="text-xs">{pending.length} {t("tasks.pending")}</Badge>}
+            {items.length > 0 && <Badge variant="secondary" className="text-xs">{items.length} {t("tasks.pending")}</Badge>}
           </DialogTitle>
           <DialogDescription>{t("tasks.description")}</DialogDescription>
         </DialogHeader>
@@ -260,40 +345,60 @@ function TasksModal({ open, onOpenChange }: { open: boolean; onOpenChange: (o: b
             <p className="text-sm text-muted-foreground text-center py-8">{t("tasks.noTasks")}</p>
           ) : (
             <div className="space-y-2">
-              {items.map((item) => (
-                <div key={item.id} className={cn(
-                  "flex items-start gap-3 p-3 rounded-lg border",
-                  item.status === "completed" || item.status === "done" ? "opacity-60" : ""
-                )}>
-                  <div className={cn("h-2 w-2 rounded-full mt-2 shrink-0", priorityColor[item.priority || ""] || "bg-muted")} />
-                  <div className="flex-1 min-w-0">
-                    <p className={cn("text-sm font-medium", (item.status === "completed" || item.status === "done") && "line-through")}>{item.name}</p>
-                    {item.description && <p className="text-xs text-muted-foreground mt-0.5">{item.description}</p>}
-                    <div className="flex items-center gap-2 mt-1">
-                      <Badge variant="secondary" className="text-[10px]">{item.status}</Badge>
-                      {item.limitDate && (
-                        <span className="text-[10px] text-muted-foreground">
-                          {t("tasks.deadline")}: {new Date(item.limitDate).toLocaleDateString()}
-                        </span>
+              {items.map((item) => {
+                const state = taskDeadlineState(item);
+                const deadline = formatTaskDeadline(item);
+                const contactName = !isRestricted ? item.contact?.name : undefined;
+                return (
+                  <button
+                    key={item.id}
+                    type="button"
+                    onClick={() => onSelectTask(item)}
+                    className="w-full flex items-start gap-3 p-3 rounded-lg border text-left hover:bg-muted/50 transition-colors"
+                  >
+                    <div className={cn("h-2 w-2 rounded-full mt-2 shrink-0", priorityColor[item.priority || ""] || "bg-muted-foreground/40")} />
+                    <div className="flex-1 min-w-0">
+                      <p className={cn("text-sm font-medium", state === "overdue" && "text-destructive")}>{item.name}</p>
+                      {item.description && <p className="text-xs text-muted-foreground mt-0.5 line-clamp-2">{item.description}</p>}
+                      {contactName && (
+                        <p className={cn("text-xs text-muted-foreground mt-0.5 truncate", isLiveMode && "live-blur-text")}>{contactName}</p>
                       )}
+                      <div className="flex flex-wrap items-center gap-2 mt-1">
+                        <Badge variant={state === "overdue" ? "destructive" : "secondary"} className="text-[10px]">
+                          {state === "overdue" ? t("tasks.statusDelayed") : t("tasks.statusPending")}
+                        </Badge>
+                        {deadline && (
+                          <span className={cn(
+                            "text-[10px]",
+                            state === "overdue" ? "text-destructive font-medium" : state === "today" ? "text-warning font-medium" : "text-muted-foreground",
+                          )}>
+                            {t("tasks.deadline")}: {deadline}
+                          </span>
+                        )}
+                      </div>
                     </div>
-                  </div>
-                </div>
-              ))}
+                  </button>
+                );
+              })}
             </div>
           )}
         </div>
-        <DialogFooter>
-          <Button variant="outline" size="sm" onClick={() => { onOpenChange(false); window.location.href = "/tarefas"; }}>
-            {t("tasks.viewAll")}
-          </Button>
-        </DialogFooter>
+        {canOpenTasksPage && (
+          <DialogFooter>
+            <Button variant="outline" size="sm" onClick={() => { onOpenChange(false); router.push("/tarefas"); }}>
+              {t("tasks.viewAll")}
+            </Button>
+          </DialogFooter>
+        )}
       </DialogContent>
     </Dialog>
   );
 }
 
 // ─── New Conversation Dialog ─────────────────────────────
+
+// Nome "de verdade" tem letra; contato novo nasce com o telefone como nome.
+const hasLetter = (s?: string | null) => /\p{L}/u.test(s ?? "");
 
 export function NewConversationDialog({
   open,
@@ -303,6 +408,7 @@ export function NewConversationDialog({
   prefilledContactEmail,
   parentTicketId,
   lockNumber = false,
+  prefilledMessage,
 }: {
   open: boolean;
   onOpenChange: (o: boolean) => void;
@@ -316,11 +422,17 @@ export function NewConversationDialog({
   parentTicketId?: number | null;
   /** Se true, campo "numero" fica somente leitura. Default true quando prefilledNumber vier. */
   lockNumber?: boolean;
+  /** Texto inicial da mensagem (ex.: convite do Telegram), aplicado a cada abertura. Canal oficial ignora (so modelo). */
+  prefilledMessage?: string | null;
 }) {
   const t = useTranslations("layoutHeader");
   const tMsgInput = useTranslations("messageInput");
   const tErrors = useTranslations("errors");
   const tOrder = useTranslations("orderDetails");
+  const tPhone = useTranslations("phoneInput");
+  const tCommon = useTranslations("common");
+  // País da empresa: só o exemplo e o aviso de DDI do campo cru de número.
+  const { country: regionCountry } = useRegion();
   const router = useRouter();
   const { user, getConfigValue, supervisorAdmin } = useAuthStore();
   const { isLiveMode } = useLiveMode();
@@ -364,15 +476,27 @@ export function NewConversationDialog({
   const [contactSearch, setContactSearch] = useState("");
   const [contactResults, setContactResults] = useState<Contact[]>([]);
   const [contactLoading, setContactLoading] = useState(false);
+  // Contato escolhido na busca: decide se os avisos de variável da mensagem rápida
+  // ({{name}} etc.) aparecem. Só vale enquanto o número/e-mail do destino for o dele.
+  const [pickedContact, setPickedContact] = useState<{ number: string; name: string; email: string } | null>(null);
+
+  // Mensagens rápidas ("/" no campo e atalhos de template): 1 carga por abertura do diálogo.
+  const { rows: quickReplies, loading: quickRepliesLoading } = useQuickReplies(open);
 
  // Aviso "ticket aberto em outro operador" antes do envio avulso (espelho do front legado)
   const [existingTicket, setExistingTicket] = useState<ExistingOpenTicket | null>(null);
 
-  const isAdminOrSuper = user?.profile === "admin" || user?.profile === "super" || user?.profile === "superadmin";
   // supervisorAdmin === 'enabled' => super age como supervisor limitado (restringe canal/fila),
   // espelhando o backend e o filtro de /atendimento. Usado nos gates de canal e fila da avulsa.
   const isAdminAvulsa = user?.profile === "admin" || user?.profile === "superadmin" || (user?.profile === "super" && supervisorAdmin !== "enabled");
-  const forceSignature = getConfigValue("signed") === "enabled" && !isAdminOrSuper;
+  // Assinatura obrigatória com a regra do chat (D9): o supervisor limitado também assina.
+  const forceSignature = isSignatureMandatory({
+    signedSetting: getConfigValue("signed"),
+    profile: user?.profile,
+    supervisorAdmin,
+  });
+  // A chave "Assinado" só aparece com o nome de quem assina disponível (como antes).
+  const showSignatureToggle = !!(user?.username || (typeof window !== "undefined" && localStorage.getItem("username")));
   const isRestrictedUserHere = user?.restrictedUser === true || user?.restrictedUser === "enabled";
 
   const selectedSessionObj = sessions.find((s) => String(s.id) === selectedSession);
@@ -420,20 +544,58 @@ export function NewConversationDialog({
       setConnectionFilter(null);
       setContactSearch("");
       setContactResults([]);
+      setPickedContact(null);
       setManualEmail("");
       setEmailSubject("");
       setInputMode("phone");
       setBsuid("");
       setApplyBrPhoneCorrection(true);
       setSelectedQueue("none");
+      setTemplateSearch("");
+      setTemplateCategoryFilter("all");
     } else if (prefilledNumber) {
       // Modo cross-channel reply: numero ja vem do contato do ticket pai.
       setNumber(prefilledNumber);
     }
   }, [open, prefilledNumber]);
 
+  // Mensagem inicial: so na ABERTURA (efeito proprio, dependente so de `open`), para nunca
+  // sobrescrever o que o atendente ja editou com o modal aberto. Sem a prop, nada muda.
+  useEffect(() => {
+    if (open && prefilledMessage) setMessage(prefilledMessage);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
+
   // Locked = explicito via prop OU auto-lock quando vem prefilledNumber
   const numberLocked = lockNumber || !!prefilledNumber;
+
+  // Avisos de variável da mensagem rápida: o servidor troca {{name}} etc. pelo cadastro
+  // do contato, então o aviso some só quando o destino é um contato conhecido com nome
+  // de verdade (nome = telefone não conta). Contato prefixado vale só para o número dele.
+  const phoneWarnings = useMemo<QuickReplyVarWarningsContext>(() => {
+    const digits = (s?: string | null) => (s || "").replace(/\D/g, "");
+    const typed = digits(number);
+    const prefilledKnown = !!typed && typed === digits(prefilledNumber) && hasLetter(prefilledContactName);
+    const pickedKnown = !!pickedContact && !!typed && typed === digits(pickedContact.number) && hasLetter(pickedContact.name);
+    return {
+      contactKnown: prefilledKnown || pickedKnown,
+      ownerKnown: desiredStatus === "open",
+      // Nesses 3 canais a mensagem sai antes de o atendimento existir (protocolo/atendimento vazios).
+      ticketVarsEmpty: ["whatsapp", "baileys", "zapo"].includes(selectedType),
+      channel: "phone",
+    };
+  }, [number, prefilledNumber, prefilledContactName, pickedContact, desiredStatus, selectedType]);
+
+  // E-mail: o servidor acha o contato pelo e-mail do destino; {{user}} = quem envia (D8)
+  // e não há atendimento no envio (protocolo/atendimento vazios).
+  const emailWarnings = useMemo<QuickReplyVarWarningsContext>(() => {
+    const dest = emailDestinationFinal.toLowerCase();
+    const prefilledKnown =
+      !!dest && (prefilledContactEmail || "").trim().toLowerCase() === dest && hasLetter(prefilledContactName);
+    const pickedKnown =
+      !!dest && !!pickedContact && pickedContact.email.trim().toLowerCase() === dest && hasLetter(pickedContact.name);
+    return { contactKnown: prefilledKnown || pickedKnown, ownerKnown: true, ticketVarsEmpty: true, channel: "email" };
+  }, [emailDestinationFinal, prefilledContactEmail, prefilledContactName, pickedContact]);
 
   // Debounce: busca de contato para pré-selecionar número
   useEffect(() => {
@@ -472,7 +634,8 @@ export function NewConversationDialog({
       .then(({ data }) => {
         // Inclui canais email/webmail sempre — usuario pode digitar o email manualmente.
         // Quando vier de cross-channel reply (prefilledContactEmail) o destino ja vem preenchido.
-        const AVULSA_SUPPORTED_TYPES = ["whatsapp", "baileys", "zapo", "meow", "evo", "evogo", "uazapi", "zapi", "waba", "gupshup", "dialog360", "email", "webmail"];
+        // Mesma lista da conversa avulsa do /atendimento e do Funil (services/individual-message).
+        const AVULSA_SUPPORTED_TYPES = [...AVULSA_MESSAGE_CHANNEL_TYPES, ...AVULSA_EMAIL_CHANNEL_TYPES];
         let connected = (Array.isArray(data) ? data : [])
           .filter((w) => w.status === "CONNECTED" && AVULSA_SUPPORTED_TYPES.includes((w.type ?? "").toLowerCase()));
         if (!isAdminAvulsa && user?.whatsappAllowed && Array.isArray(user.whatsappAllowed) && user.whatsappAllowed.length > 0) {
@@ -496,30 +659,47 @@ export function NewConversationDialog({
 
   // Fetch templates when WABA/Gupshup/Dialog360 session is selected
   useEffect(() => {
+    // Troca de conexão: lista, modelo escolhido e variáveis eram da conexão anterior
+    // (o atalho de 1 clique escolheria o modelo de uma conexão e enviaria pela outra).
+    setWabaTemplates([]);
+    setSelectedTemplate(null);
+    setTemplateVars([]);
+    // O atalho "escolha o idioma" filtra pelo nome: o filtro da conexão anterior esconderia a lista nova.
+    setTemplateSearch("");
+    setTemplateCategoryFilter("all");
     if (!isWabaLike) {
-      setWabaTemplates([]);
-      setSelectedTemplate(null);
+      setLoadingTemplates(false);
       return;
     }
     const sess = selectedSessionObj as
       | { type?: string; id?: number; tokenAPI?: string; appId?: string }
       | undefined;
     if (!sess) {
-      setWabaTemplates([]);
-      setSelectedTemplate(null);
+      setLoadingTemplates(false);
       return;
     }
+    // Resposta de uma conexão anterior (troca rápida entre duas oficiais) é descartada.
+    let alive = true;
     // getTemplatesForChannel resolve o identificador do canal (tokenAPI no WABA;
     // id nos BSP). Se a sessao chegar sem tokenAPI logo apos o login, ele refaz
     // o fetch de /whatsapp e re-resolve — antes o WABA desistia e so um F5 curava.
     setLoadingTemplates(true);
     getTemplatesForChannel(sess)
       .then((res) => {
+        if (!alive) return;
         const list = (Array.isArray(res) ? res : (res as { data?: WabaTemplate[] })?.data || []) as WabaTemplate[];
         setWabaTemplates([...list].sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase())));
       })
-      .catch(() => toast.error(t("newConversation.errorLoadingTemplates")))
-      .finally(() => setLoadingTemplates(false));
+      .catch((err) => {
+        if (!alive) return;
+        toast.error(metaRateLimitedMessage(err, tCommon) ?? (isMetaTokenUnauthorized(err) ? tCommon("metaTokenInvalidReconnect") : t("newConversation.errorLoadingTemplates")));
+      })
+      .finally(() => {
+        if (alive) setLoadingTemplates(false);
+      });
+    return () => {
+      alive = false;
+    };
   }, [isWabaLike, isWaba, selectedSessionObj?.tokenAPI, selectedSessionObj?.id]);
 
   // Parse template variables when selection changes
@@ -604,6 +784,9 @@ export function NewConversationDialog({
           to: emailDestination,
           subject: emailSubject.trim(),
           text: message.trim(),
+          // Variáveis da mensagem rápida ({{name}}, {{user}}...) trocadas no servidor
+          // (contato pelo e-mail do destino; backend antigo ignora e manda literal).
+          applyVariables: true,
         });
         const childTicketId = (emailRes as { ticketId?: number })?.ticketId;
         if (parentTicketId && childTicketId) {
@@ -887,9 +1070,9 @@ export function NewConversationDialog({
             });
             return <p className="font-bold text-sm text-gray-900">{rendered}</p>;
           }
-          if (hdr.format === "IMAGE") return <div className="h-24 bg-gray-100 rounded flex items-center justify-center text-xs text-gray-500">[Imagem]</div>;
-          if (hdr.format === "VIDEO") return <div className="h-24 bg-gray-100 rounded flex items-center justify-center text-xs text-gray-500">[Vídeo]</div>;
-          if (hdr.format === "DOCUMENT") return <div className="h-12 bg-gray-100 rounded flex items-center justify-center text-xs text-gray-500">[Documento]</div>;
+          if (hdr.format === "IMAGE") return <div className="h-24 bg-gray-100 rounded flex items-center justify-center text-xs text-gray-500">{t("newConversation.previewImage")}</div>;
+          if (hdr.format === "VIDEO") return <div className="h-24 bg-gray-100 rounded flex items-center justify-center text-xs text-gray-500">{t("newConversation.previewVideo")}</div>;
+          if (hdr.format === "DOCUMENT") return <div className="h-12 bg-gray-100 rounded flex items-center justify-center text-xs text-gray-500">{t("newConversation.previewDocument")}</div>;
           return null;
         })()}
         {tpl.components?.find((c) => c.type === "BODY")?.text && (() => {
@@ -940,6 +1123,7 @@ export function NewConversationDialog({
                     <li>{t("newConversation.helpItem1")}</li>
                     <li>{t("newConversation.helpItem2")}</li>
                     <li>{t("newConversation.helpItem3")}</li>
+                    <li>{t("newConversation.helpItem4")}</li>
                   </ul>
                 </TooltipContent>
               </Tooltip>
@@ -1074,6 +1258,7 @@ export function NewConversationDialog({
                         if ((c as { email?: string }).email) {
                           setManualEmail((c as { email?: string }).email || "");
                         }
+                        setPickedContact({ number: c.number || "", name: c.name || "", email: (c as { email?: string }).email || "" });
                         setContactSearch("");
                         setContactResults([]);
                       }}
@@ -1154,6 +1339,7 @@ export function NewConversationDialog({
                             if ((c as { email?: string }).email) {
                               setManualEmail((c as { email?: string }).email || "");
                             }
+                            setPickedContact({ number: c.number || "", name: c.name || "", email: (c as { email?: string }).email || "" });
                           }
                           setContactSearch("");
                           setContactResults([]);
@@ -1190,12 +1376,21 @@ export function NewConversationDialog({
                 <Input
                   value={number}
                   onChange={(e) => setNumber(e.target.value)}
-                  placeholder="+5511999999999"
+                  placeholder={examplePhone(regionCountry)}
                   type="tel"
                   readOnly={numberLocked}
                   className={numberLocked ? "bg-muted/50" : undefined}
                 />
-                <p className="text-xs text-muted-foreground">{t("newConversation.includeCountryCode")}</p>
+                <p className="text-xs text-muted-foreground">{t("newConversation.includeCountryCodeExample", { example: examplePhone(regionCountry) })}</p>
+                {/* Campo cru (o valor enviado não muda): aviso NÃO bloqueante quando o
+                    número digitado parece nacional do país da empresa, sem o código do país.
+                    Com o número travado (veio de outro atendimento) não há o que corrigir. */}
+                {!numberLocked && looksLikeMissingDialCode(number, regionCountry) && (
+                  <p className="flex items-start gap-1 text-xs text-amber-600 dark:text-amber-400" role="status">
+                    <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" aria-hidden />
+                    <span>{tPhone("missingCountryCodeHint", { example: examplePhone(regionCountry) })}</span>
+                  </p>
+                )}
                 {(() => {
                   const raw = number.replace(/\D/g, "");
                   const normalized = normalizeBrPhone(raw);
@@ -1247,6 +1442,18 @@ export function NewConversationDialog({
                 <div className="flex items-center gap-2 text-sm text-muted-foreground"><Loader2 className="h-4 w-4 animate-spin" /> {t("newConversation.loading")}</div>
               ) : !selectedTemplate ? (
                 <>
+                  {/* Mensagens rápidas do tipo Template: atalho que pré-seleciona o modelo
+                      (no oficial não há campo livre para o "/"). */}
+                  <QuickReplyTemplateShortcuts
+                    quickReplies={quickReplies}
+                    templates={wabaTemplates}
+                    loading={loadingTemplates}
+                    onSelectTemplate={setSelectedTemplate}
+                    onFilterByName={(name) => {
+                      setTemplateCategoryFilter("all");
+                      setTemplateSearch(name);
+                    }}
+                  />
                   <div className="flex gap-2">
                     <Input
                       placeholder={t("newConversation.searchTemplate")}
@@ -1358,20 +1565,24 @@ export function NewConversationDialog({
                 />
               </div>
               <div className="space-y-1.5">
-                <Label>{t("newConversation.emailBody")} *</Label>
-                <Textarea
+                <Label htmlFor="newconv-email-body">{t("newConversation.emailBody")} *</Label>
+                <QuickReplyTextarea
+                  id="newconv-email-body"
                   value={message}
-                  onChange={(e) => setMessage(e.target.value)}
+                  onChange={setMessage}
+                  quickReplies={quickReplies}
+                  quickRepliesLoading={quickRepliesLoading}
                   placeholder={t("newConversation.emailBodyPlaceholder")}
                   className="min-h-[120px]"
+                  warnings={emailWarnings}
                 />
               </div>
             </div>
           ) : (
             <div className="space-y-2">
               <div className="flex items-center justify-between gap-2">
-                <Label>{t("newConversation.message")}</Label>
-                {(user?.username || (typeof window !== "undefined" && localStorage.getItem("username"))) && (
+                <Label htmlFor="newconv-message">{t("newConversation.message")}</Label>
+                {showSignatureToggle && (
                   <div className="flex items-center gap-1.5 shrink-0">
                     <Switch
                       id="newconv-sig-toggle"
@@ -1381,6 +1592,7 @@ export function NewConversationDialog({
                         setSignatureEnabled(v);
                       }}
                       disabled={forceSignature}
+                      aria-describedby={forceSignature ? "newconv-sig-mandatory" : undefined}
                       className="scale-90"
                     />
                     <Label htmlFor="newconv-sig-toggle" className="text-xs text-muted-foreground cursor-pointer whitespace-nowrap">
@@ -1389,11 +1601,22 @@ export function NewConversationDialog({
                   </div>
                 )}
               </div>
-              <Textarea
+              {/* Chave travada: diz o motivo (texto, não tooltip: no celular não há hover). */}
+              {showSignatureToggle && forceSignature && (
+                <p id="newconv-sig-mandatory" className="flex items-start gap-1 text-[11px] leading-tight text-muted-foreground sm:justify-end">
+                  <Lock className="h-3 w-3 mt-px shrink-0" aria-hidden="true" />
+                  <span>{t("newConversation.signatureMandatoryHint")}</span>
+                </p>
+              )}
+              <QuickReplyTextarea
+                id="newconv-message"
                 value={message}
-                onChange={(e) => setMessage(e.target.value)}
+                onChange={setMessage}
+                quickReplies={quickReplies}
+                quickRepliesLoading={quickRepliesLoading}
                 placeholder={t("newConversation.messagePlaceholder")}
                 className="min-h-[80px]"
+                warnings={phoneWarnings}
               />
             </div>
           )}
@@ -1465,11 +1688,25 @@ export function NewConversationDialog({
 
 // ─── User Menu ───────────────────────────────────────────
 
+/** Data de fatura/assinatura. "AAAA-MM-DD" é lida no fuso local (como meia-noite UTC daria o dia anterior). */
+function parseBillingDate(value: unknown): Date | null {
+  if (typeof value !== "string" || !value.trim()) return null;
+  const s = value.trim();
+  const d = /^\d{4}-\d{2}-\d{2}$/.test(s) ? new Date(`${s}T00:00:00`) : new Date(s);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
+function billingDateLabel(d: Date): string {
+  return d.toLocaleDateString(undefined, { day: "2-digit", month: "2-digit", year: "numeric" });
+}
+
 function UserMenu({ onOpenActivityLog }: { onOpenActivityLog?: () => void }) {
   const t = useTranslations("layoutHeader");
   const router = useRouter();
   const { user, clearAuth, patchUser, canViewPayments } = useAuthStore();
   const showPayments = canViewPayments();
+  // Troca de plano é do administrador da empresa (o servidor recusa os demais perfis).
+  const canChangePlan = user?.profile === "admin" || user?.profile === "superadmin";
   const [isOnline, setIsOnline] = useState<boolean>(user?.isOnline ?? true);
   // Pausa do operador (status "Pausado": online mas fora do roteamento automatico)
   const [activePause, setActivePause] = useState<ActivePauseSession | null>(null);
@@ -1496,41 +1733,68 @@ function UserMenu({ onOpenActivityLog }: { onOpenActivityLog?: () => void }) {
   } | null>(null);
   const [dueDaysLeft, setDueDaysLeft] = useState<number | null>(null);
   const [billingDueDate, setBillingDueDate] = useState<Date | null>(null);
+  // De onde veio a data acima: fatura em aberto ("Falta N dia(s) para vencer") ou a
+  // renovação da assinatura, sem fatura em aberto ("Renova em").
+  const [dueSource, setDueSource] = useState<"invoice" | "subscription" | null>(null);
+  const [subscriptionLoaded, setSubscriptionLoaded] = useState(false);
+  const [currentPlanId, setCurrentPlanId] = useState<number | null>(null);
+  const [subscriptionGateway, setSubscriptionGateway] = useState<string | null>(null);
 
-  const loadSubscription = useCallback(async () => {
-    if (!user?.tenantId) return;
+  /**
+   * Assinatura e faturas pela rota V2 (liberada para empresa bloqueada por pagamento).
+   * Devolve se veio assinatura.
+   */
+  const loadSubscription = useCallback(async (): Promise<boolean> => {
+    if (!user?.tenantId) return false;
     try {
-      const { data } = await fetchTenantSubscription();
-      const d = data as { subscription?: AsaasSubscription; payments?: AsaasPayment[]; availablePlans?: Plan[] };
-      setSubscription(d?.subscription ?? null);
-      setPayments(d?.payments ?? []);
+      const { data } = await fetchSubscriptionV2();
+      const d = data as {
+        subscription?: AsaasSubscription | null;
+        payments?: AsaasPayment[];
+        availablePlans?: Plan[];
+        currentPlanId?: number | null;
+        gateway?: string | null;
+      };
+      const sub = d?.subscription ?? null;
+      const pays = (Array.isArray(d?.payments) ? d.payments : []) as AsaasPayment[];
+      setSubscription(sub);
+      setPayments(pays);
       setAvailablePlans(d?.availablePlans ?? []);
+      const planIdNum = Number(d?.currentPlanId);
+      setCurrentPlanId(Number.isInteger(planIdNum) && planIdNum > 0 ? planIdNum : null);
+      setSubscriptionGateway(d?.gateway ?? null);
 
       // Dias até o vencimento da PRÓXIMA FATURA a pagar — não subscription.nextDueDate,
       // que o Asaas avança para o 2º ciclo logo após gerar a 1ª cobrança (mostrava
       // ~61 dias em vez dos 30 reais). Usa a fatura vencida ou a pendente mais próxima
       // (espelha o cálculo de layout.tsx); só cai no nextDueDate se não houver fatura.
-      const pays = (d?.payments ?? []) as AsaasPayment[];
-      const overdueInv = pays.find((p) => (p.status ?? "").toUpperCase() === "OVERDUE");
+      const overdueInv = pays.find((p) => normalizePaymentStatus(p.status) === "OVERDUE" && !!p.dueDate);
       const pendingInv = pays
-        .filter((p) => (p.status ?? "").toUpperCase() === "PENDING")
+        .filter((p) => normalizePaymentStatus(p.status) === "PENDING" && !!p.dueDate)
         .sort((a, b) => (a.dueDate ?? "").localeCompare(b.dueDate ?? ""))[0];
-      const nextDue = (overdueInv ?? pendingInv)?.dueDate
-        ?? (d?.subscription as AsaasSubscription | undefined)?.nextDueDate;
-      if (nextDue) {
+      const invoiceDate = parseBillingDate((overdueInv ?? pendingInv)?.dueDate);
+      const due = invoiceDate ?? parseBillingDate(sub?.nextDueDate);
+      if (due) {
         const today = new Date(); today.setHours(0, 0, 0, 0);
-        const due = new Date(nextDue + "T00:00:00");
         const diff = Math.ceil((due.getTime() - today.getTime()) / 86400000);
         setDueDaysLeft(diff);
         // Vencimento REAL da 1ª cobrança: quando o tenant já está provisionado no
         // gateway, é ele que define até quando o acesso vai — não a janela fixa de
         // 30 dias (que só serve de estimativa enquanto nenhuma fatura foi gerada).
         setBillingDueDate(due);
+        setDueSource(invoiceDate ? "invoice" : "subscription");
       } else {
         setDueDaysLeft(null);
         setBillingDueDate(null);
+        setDueSource(null);
       }
-    } catch { /* sem assinatura */ }
+      return !!sub;
+    } catch {
+      /* sem assinatura */
+      return false;
+    } finally {
+      setSubscriptionLoaded(true);
+    }
   }, [user?.tenantId]);
 
   useEffect(() => {
@@ -1540,6 +1804,12 @@ function UserMenu({ onOpenActivityLog }: { onOpenActivityLog?: () => void }) {
         const d = Array.isArray(data) ? data[0] : data;
         const td = d as Record<string, unknown>;
         setTenantLicense((td?.tenantLicense as string) ?? "enabled");
+
+        // Cobrança provisionada: um critério só para a caixa do trial e o bloco da
+        // assinatura (lib/tenant-billing) — antes eram dois, e divergiam. Usa o veredito
+        // do backend (`billingProvisioned`, mesmo critério do job); backend antigo sem
+        // ele cai no cliente criado no gateway, nunca na flag `asaas` sozinha.
+        const billing = isTenantBillingProvisioned(td);
 
         // Trial info — espelha o que REALMENTE expira, nunca uma janela inventada.
         // Quem governa o fim do acesso é o backend: `billingProvisioned` usa o mesmo
@@ -1552,19 +1822,6 @@ function UserMenu({ onOpenActivityLog }: { onOpenActivityLog?: () => void }) {
         if (td?.trial === "enabled" && td?.createdAt) {
           const BILLING_WINDOW_DAYS = 30; // /signup: nextDueDate = createdAt + 30 (cycle MONTHLY)
           const created = new Date(td.createdAt as string);
-
-          // Backend antigo não manda `billingProvisioned` (rollout aditivo): o
-          // fallback exige o customerId de fato — nunca a flag `asaas` sozinha,
-          // que é justamente o que inflava o prazo.
-          const gw = (td?.paymentGateway as string) || "asaas";
-          const fallbackBilling =
-            gw === "asaas"
-              ? td?.asaas === "enabled" && !!td?.asaasCustomerId
-              : !!td?.[`${gw}CustomerId`];
-          const billing =
-            typeof td?.billingProvisioned === "boolean"
-              ? (td.billingProvisioned as boolean)
-              : fallbackBilling;
 
           if (billing) {
             // Cobrança provisionada: o job NÃO bloqueia mais pelo trialPeriod — o
@@ -1588,19 +1845,22 @@ function UserMenu({ onOpenActivityLog }: { onOpenActivityLog?: () => void }) {
         }
 
         // LGPD: só carrega/expõe dados de assinatura se o perfil pode ver pagamentos.
-        // Cobrança habilitada = Asaas legado (flag) OU tenant provisionado em outro
-        // gateway (paymentGateway + customerId, ex.: Stripe via signup/migração) —
-        // o gate antigo `asaas === "enabled"` escondia o plano de tenants Stripe.
-        const pg = td?.paymentGateway as string | undefined;
-        const gatewayProvisioned =
-          (td?.asaas as string) === "enabled" ||
-          (!!pg && pg !== "asaas" && !!td?.[`${pg}CustomerId`]);
-        if (gatewayProvisioned && showPayments) {
+        if (billing && showPayments) {
           setBillingEnabled(true);
           await loadSubscription();
         }
       })
-      .catch(() => {});
+      .catch(async (err: unknown) => {
+        // Empresa bloqueada por pagamento: GET /tenants/:id responde 402 (fora da lista
+        // liberada), mas a rota V2 da assinatura é liberada — sem esta consulta o menu e
+        // o "Mudar plano" ficavam vazios justamente para quem precisa regularizar.
+        const e = err as { status?: number; response?: { status?: number } } | null;
+        const status = e?.status ?? e?.response?.status;
+        const code = getBackendErrorCode(err);
+        if (status !== 402 || !showPayments) return;
+        if (code === "LICENSE_BLOCKED" || code === "ERR_FEATURE_NOT_IN_PLAN") return;
+        if (await loadSubscription()) setBillingEnabled(true);
+      });
   }, [user?.tenantId, loadSubscription, showPayments]);
 
   /**
@@ -1628,17 +1888,44 @@ function UserMenu({ onOpenActivityLog }: { onOpenActivityLog?: () => void }) {
     };
   }, [trialSource, billingDueDate]);
 
-  const latestPayment = payments?.[0] ?? null;
+  // Caixa do trial: o trial interno aparece como sempre; em modo cobrança ela fala da
+  // 1ª cobrança e só faz sentido para quem vê pagamentos e ENQUANTO a assinatura não
+  // teve um pagamento de verdade (a fatura de R$ 0 do teste e a avulsa de troca de
+  // plano não contam) — antes ficava "até a primeira cobrança" para sempre.
+  const showTrialBox =
+    !!trialView &&
+    (!trialView.billing ||
+      (showPayments && subscriptionLoaded && !hasConfirmedSubscriptionPayment(payments)));
+
+  // Último pagamento: a fatura de R$ 0 do teste grátis não conta.
+  const latestPayment = (payments ?? []).find((p) => !isZeroValuePayment(p)) ?? null;
+  const latestPaymentStatus = latestPayment
+    ? (isPaidPayment(latestPayment) ? "RECEIVED" : normalizePaymentStatus(latestPayment.status))
+    : "";
+
+  // Assinatura em teste grátis no gateway (Stripe `trialing`): selo e "Teste até".
+  const subTrialing = subscription?.gatewayStatus === "trialing";
+  const subTrialEnd = subTrialing ? parseBillingDate(subscription?.trialEnd ?? subscription?.nextDueDate) : null;
+  const subValue = Number(subscription?.value);
 
   const paymentStatusColor: Record<string, string> = {
     PENDING: "text-warning",
     RECEIVED: "text-success",
     OVERDUE: "text-destructive",
+    // Mercado Pago/Pagar.me (D8): recusada, paga a menos, estornada, assinatura cancelada.
+    FAILED: "text-destructive",
+    UNDERPAID: "text-destructive",
+    CHARGEBACK: "text-destructive",
+    SUBSCRIPTION_CANCELED: "text-destructive",
   };
   const paymentStatusLabel: Record<string, string> = {
     PENDING: t("userMenu.paymentPending"),
     RECEIVED: t("userMenu.paymentReceived"),
     OVERDUE: t("userMenu.paymentOverdue"),
+    FAILED: t("userMenu.paymentFailed"),
+    UNDERPAID: t("userMenu.paymentUnderpaid"),
+    CHARGEBACK: t("userMenu.paymentChargeback"),
+    SUBSCRIPTION_CANCELED: t("userMenu.paymentSubscriptionCanceled"),
   };
   const subStatusColor: Record<string, string> = {
     ACTIVE:   "text-success",
@@ -1650,6 +1937,12 @@ function UserMenu({ onOpenActivityLog }: { onOpenActivityLog?: () => void }) {
     INACTIVE: t("userMenu.subInactive"),
     EXPIRED:  t("userMenu.subExpired"),
   };
+  // Mercado Pago: assinatura criada que o cliente ainda não autorizou (`pending` → INACTIVE
+  // com o link de autorização). Backend antigo não manda o link e o rótulo segue "Inativo".
+  const subAwaitingAuthorization =
+    normalizePaymentStatus(subscription?.status) === "INACTIVE" &&
+    typeof subscription?.authorizeUrl === "string" &&
+    /^https?:\/\/\S+$/i.test(subscription.authorizeUrl.trim());
 
   useEffect(() => {
     if (typeof user?.isOnline === "boolean") {
@@ -1791,8 +2084,9 @@ function UserMenu({ onOpenActivityLog }: { onOpenActivityLog?: () => void }) {
       }
     } catch { /* ignora */ }
     // Web Push (PWA): desfaz a assinatura deste aparelho para quem saiu parar de
-    // receber avisos aqui. Best-effort com teto de 3s — sair nunca trava.
-    await unsubscribePush();
+    // receber avisos aqui. Best-effort com teto de 3s — sair nunca trava. Junto,
+    // encerra no servidor a renovação do login deste aparelho (teto de 2s).
+    await Promise.all([unsubscribePush(), endServerSession()]);
     setLogoutDialogOpen(false);
     setLoggingOut(false);
     clearAuth();
@@ -1852,7 +2146,7 @@ function UserMenu({ onOpenActivityLog }: { onOpenActivityLog?: () => void }) {
                 </div>
               )}
               {/* Trial ativo */}
-              {trialView && (
+              {trialView && showTrialBox && (
                 <div className="mt-1 space-y-1">
                   <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
                     <Clock className="h-3 w-3 shrink-0 text-info" />
@@ -1864,7 +2158,11 @@ function UserMenu({ onOpenActivityLog }: { onOpenActivityLog?: () => void }) {
                   </div>
                   <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
                     <Calendar className="h-3 w-3 shrink-0" />
-                    <span>{t("userMenu.trialExpiresOn", { date: trialView.endsAtLabel })}</span>
+                    <span>
+                      {trialView.billing
+                        ? t("userMenu.firstChargeOn", { date: trialView.endsAtLabel })
+                        : t("userMenu.trialExpiresOn", { date: trialView.endsAtLabel })}
+                    </span>
                   </div>
                   <div className="w-full">
                     <div className="h-1.5 w-full rounded-full bg-muted overflow-hidden">
@@ -1892,23 +2190,46 @@ function UserMenu({ onOpenActivityLog }: { onOpenActivityLog?: () => void }) {
                           <span className="font-medium text-foreground leading-tight">
                             {subscription.description || t("userMenu.currentPlan")}
                           </span>
-                          <span className={cn("text-[9px] font-medium px-1 py-px rounded-full",
-                            subscription.status === "ACTIVE" ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-400" :
-                            subscription.status === "EXPIRED" ? "bg-red-100 text-red-700 dark:bg-red-950 dark:text-red-400" :
-                            "bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-400"
-                          )}>
-                            {subStatusLabel[subscription.status] ?? subscription.status}
-                          </span>
+                          {subTrialing ? (
+                            <span className="text-[9px] font-medium px-1 py-px rounded-full bg-blue-100 text-blue-700 dark:bg-blue-950 dark:text-blue-400">
+                              {t("userMenu.subTrial")}
+                            </span>
+                          ) : (
+                            <span className={cn("text-[9px] font-medium px-1 py-px rounded-full",
+                              subAwaitingAuthorization ? "bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300" :
+                              normalizePaymentStatus(subscription.status) === "ACTIVE" ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-400" :
+                              normalizePaymentStatus(subscription.status) === "EXPIRED" ? "bg-red-100 text-red-700 dark:bg-red-950 dark:text-red-400" :
+                              "bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-400"
+                            )}>
+                              {subAwaitingAuthorization
+                                ? t("userMenu.subAwaitingAuthorization")
+                                : subStatusLabel[normalizePaymentStatus(subscription.status)] ?? subscription.status}
+                            </span>
+                          )}
                         </div>
-                        <span>
-                          {new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" }).format(subscription.value)}
-                          {subscription.nextDueDate ? ` · ${subscription.nextDueDate.split("-").reverse().join("/")}` : ""}
-                        </span>
+                        {Number.isFinite(subValue) && (
+                          <span>
+                            {new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" }).format(subValue)}
+                          </span>
+                        )}
+                        {/* Data: fim do teste, ou a renovação quando não há fatura em aberto
+                            (com fatura em aberto, a barra abaixo mostra quanto falta). */}
+                        {subTrialing && subTrialEnd ? (
+                          <span className="flex items-center gap-1">
+                            <Calendar className="h-3 w-3 shrink-0" />
+                            {t("userMenu.trialUntil", { date: billingDateLabel(subTrialEnd) })}
+                          </span>
+                        ) : dueSource === "subscription" && billingDueDate ? (
+                          <span className="flex items-center gap-1">
+                            <Calendar className="h-3 w-3 shrink-0" />
+                            {t("userMenu.renewsOn", { date: billingDateLabel(billingDueDate) })}
+                          </span>
+                        ) : null}
                       </div>
                     </div>
                   )}
-                  {/* Barra de progresso — dias até vencimento */}
-                  {dueDaysLeft !== null && dueDaysLeft >= 0 && (
+                  {/* Barra de progresso — dias até o vencimento da fatura em aberto */}
+                  {dueSource === "invoice" && dueDaysLeft !== null && dueDaysLeft >= 0 && (
                     <div className="w-full">
                       <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground mb-0.5">
                         <Calendar className="h-3 w-3 shrink-0" />
@@ -1935,8 +2256,8 @@ function UserMenu({ onOpenActivityLog }: { onOpenActivityLog?: () => void }) {
                     <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
                       <CreditCard className="h-3 w-3 shrink-0" />
                       <span>{t("userMenu.payment")}:</span>
-                      <span className={cn("font-medium", paymentStatusColor[latestPayment.status] ?? "text-muted-foreground")}>
-                        {paymentStatusLabel[latestPayment.status] ?? latestPayment.status}
+                      <span className={cn("font-medium", paymentStatusColor[latestPaymentStatus] ?? "text-muted-foreground")}>
+                        {paymentStatusLabel[latestPaymentStatus] ?? latestPayment.status}
                       </span>
                     </div>
                   )}
@@ -1946,8 +2267,8 @@ function UserMenu({ onOpenActivityLog }: { onOpenActivityLog?: () => void }) {
                       <span>{t("userMenu.noSubscription")}</span>
                     </div>
                   )}
-                  {/* Botão mudar plano */}
-                  {availablePlans.length > 0 && (
+                  {/* Botão mudar plano — só o administrador troca (o servidor recusa os demais) */}
+                  {canChangePlan && availablePlans.length > 0 && (
                     <button
                       onClick={(e) => { e.preventDefault(); setPlanModalOpen(true); }}
                       className="flex items-center gap-1 text-[10px] font-medium text-primary hover:opacity-70 transition-opacity"
@@ -2040,14 +2361,16 @@ function UserMenu({ onOpenActivityLog }: { onOpenActivityLog?: () => void }) {
       </DropdownMenuContent>
     </DropdownMenu>
 
-    {planModalOpen && showPayments && (
+    {planModalOpen && showPayments && canChangePlan && (
       <PaymentPlanModal
         open={planModalOpen}
         onOpenChange={setPlanModalOpen}
         subscription={subscription}
         payments={payments}
         availablePlans={availablePlans}
-        onPlanChanged={loadSubscription}
+        onPlanChanged={() => { void loadSubscription(); }}
+        currentPlanId={currentPlanId}
+        gateway={subscriptionGateway}
       />
     )}
 
@@ -2204,6 +2527,16 @@ const isTourPendingOrActive = (): boolean => {
   return useUIStore.getState().tourActive;
 };
 
+/** Contagens da seção "Avaliações do Google" do sino (REST ou socket); null = ilegível. */
+function normalizeGoogleBadge(raw: unknown): GoogleBusinessBadge | null {
+  if (!raw || typeof raw !== "object") return null;
+  const r = raw as { newCount?: unknown; alertCount?: unknown };
+  const n = Number(r.newCount);
+  const a = Number(r.alertCount);
+  if (!Number.isFinite(n) || !Number.isFinite(a)) return null;
+  return { newCount: Math.max(0, Math.floor(n)), alertCount: Math.max(0, Math.floor(a)) };
+}
+
 export function Header() {
   const t = useTranslations("layoutHeader");
   const tAdmin = useTranslations("supportChatAdmin");
@@ -2233,6 +2566,10 @@ export function Header() {
   } = useNotificationStore();
   const chatUnread = useChatStore((s) => s.unreadCount);
   const setChatUnreadCount = useChatStore((s) => s.setUnreadCount);
+  // Mesmo gate da página /chat-privado (superadmin = false). Sem acesso não há contador do chat.
+  const canAccessChat = usePageAccess("chat-privado");
+  const canAccessChatRef = useRef(canAccessChat);
+  canAccessChatRef.current = canAccessChat;
   const { tickets: storeTickets, setTickets } = useTicketStore();
   const socketModelOptimized = useBrandingStore((s) => s.socketModelOptimized);
   const isSuperAdmin = user?.profile === "superadmin";
@@ -2250,6 +2587,9 @@ export function Header() {
   // e a lista de notificações mostra atendimento que o supervisor não pode ver.
   const supervisorViewDept = user?.profile === "super" && user?.configs?.supervisorViewDept === "enabled";
   const isRestrictedUser = user?.restrictedUser === true || user?.restrictedUser === "enabled";
+  // Personalizado sem "criar atendimento" e sem "envio em massa": o servidor recusa a
+  // Nova Conversa (403), então nenhum ponto a oferece (D12).
+  const canStartConversation = useAuthStore((s) => s.canStartConversation());
   const blockWavoip = user?.blockWavoip === true;
  // SIP: igual ao front legado: userProfile !== 'superadmin' && usuario.sipEnabled
   const sipEnabled = !!user?.sipEnabled;
@@ -2311,9 +2651,9 @@ export function Header() {
   const [chatPreviewOpen, setChatPreviewOpen] = useState(false);
   const [chatPreviewItems, setChatPreviewItems] = useState<UnreadPreviewItem[]>([]);
   const [chatPreviewLoading, setChatPreviewLoading] = useState(false);
+  const [chatPreviewError, setChatPreviewError] = useState(false);
   const chatPreviewLoadedRef = useRef(false);
   const convitesLoadedRef = useRef(false);
-  const [tasksList, setTasksList] = useState<TodoItem[]>([]);
   const [tasksExpandOpen, setTasksExpandOpen] = useState(false);
   const [tasksDetailItem, setTasksDetailItem] = useState<TodoItem | null>(null);
   const [systemExpandOpen, setSystemExpandOpen] = useState(false);
@@ -2385,20 +2725,154 @@ export function Header() {
   }, [addActivity]);
 
   // Command palette → abre o dialog de Nova Conversa (mesmo caminho do botão Send).
-  // Gate reavaliado AQUI (não confia no emissor): mesmo guard do botão (!isSuperAdmin && !isRestrictedUser).
+  // Gate reavaliado AQUI (não confia no emissor): mesmo guard do botão
+  // (!isSuperAdmin && !isRestrictedUser && canStartConversation).
   useEffect(() => {
     const handler = () => {
-      if (isSuperAdmin || isRestrictedUser) return;
+      if (isSuperAdmin || isRestrictedUser || !canStartConversation) return;
       setSendMsgOpen(true);
     };
     window.addEventListener("zpro:new-conversation", handler as EventListener);
     return () => window.removeEventListener("zpro:new-conversation", handler as EventListener);
-  }, [isSuperAdmin, isRestrictedUser]);
+  }, [isSuperAdmin, isRestrictedUser, canStartConversation]);
 
   const totalBadge = unreadCount + chatUnread + convitesCount;
   // Espelha a contagem do sino no título da aba, no favicon e no badge do PWA.
   // Superadmin não tem sino (gate !isSuperAdmin no popover) → força 0.
   useTabNotificationBadge(totalBadge, isSuperAdmin);
+
+  // ── Tarefas (PLANO_TAREFAS_ATENDIMENTO_LEMBRETES §5.6) ──
+  // Resumo das MINHAS tarefas (sino, menu lateral e avisos), sem nenhuma chamada em plano
+  // sem Tarefas. Substitui o GET /todoLists inteiro do mount (admin baixava as da empresa).
+  const tTarefas = useTranslations("tarefasPage");
+  const tTask = useTranslations("taskShared");
+  const { isLiveMode } = useLiveMode();
+  const tasksFeature = useAuthStore((s) => s.hasFeature("tasks"));
+  const taskSummaryEnabled = !isSuperAdmin && !!user?.userId && tasksFeature;
+  const taskItemsRaw = useTaskSummaryStore((s) => s.items);
+  const taskOverdue = useTaskSummaryStore((s) => s.overdue);
+  const taskToday = useTaskSummaryStore((s) => s.today);
+  const taskSummarySupported = useTaskSummaryStore((s) => s.supported);
+  const taskItems = useMemo(
+    () => (taskSummaryEnabled ? sortTasksByDeadline(taskItemsRaw) : []),
+    [taskSummaryEnabled, taskItemsRaw],
+  );
+  // D8: atrasadas + de hoje somam no número do SINO. D24: título da aba, favicon e ícone do
+  // app seguem só com mensagens, convites e chat (useTabNotificationBadge acima).
+  const taskBadgeCount = taskSummaryEnabled && taskSummarySupported === true ? taskOverdue + taskToday : 0;
+
+  // ── Avaliações do Google (PLANO_AVALIACAO_GOOGLE_PERFIL_EMPRESA §5.10) ──
+  // Seção própria do sino, sem popup e sem linha de aviso interno: só as contagens
+  // (novas e nota baixa sem resposta no prazo). Mesmo gate da página /avaliacoes +
+  // plano com Avaliações/NPS + personalizado com "ver avaliações" (o backend confere
+  // o mesmo). Backend antigo ou plano sem o recurso = sem seção.
+  const canAccessRatingsPage = usePageAccess("avaliacoes", { adminSuperOnly: true });
+  const npsFeature = useAuthStore((s) => s.hasFeature("nps"));
+  const canViewRatings = useAuthStore((s) => s.hasPermission("ratings_view"));
+  const googleReviewsEnabled = !isSuperAdmin && canAccessRatingsPage && npsFeature && canViewRatings;
+  const [googleBadge, setGoogleBadge] = useState<GoogleBusinessBadge | null>(null);
+  useEffect(() => {
+    const tenantId = user?.tenantId;
+    if (!googleReviewsEnabled || !tenantId) {
+      setGoogleBadge(null);
+      return;
+    }
+    let cancelled = false;
+    // O aviso do socket vai para a sala da empresa inteira: só vale para quem o
+    // servidor liberou na leitura (GET respondeu ok).
+    let allowed = false;
+    const refresh = () => {
+      loadGoogleBusinessBadge().then((res) => {
+        if (cancelled) return;
+        allowed = res.state === "ok";
+        setGoogleBadge(res.state === "ok" ? normalizeGoogleBadge(res.data) : null);
+      });
+    };
+    refresh();
+    const socket = getSocket();
+    const event = `${tenantId}:google-business:badge`;
+    const onBadge = (payload: unknown) => {
+      if (cancelled || !allowed) return;
+      const next = normalizeGoogleBadge(payload);
+      if (next) setGoogleBadge(next);
+    };
+    // Reconexão do socket: um aviso pode ter passado enquanto ele estava fora.
+    const onReconnect = () => { if (!cancelled) refresh(); };
+    socket?.on(event, onBadge);
+    socket?.io.on("reconnect", onReconnect);
+    return () => {
+      cancelled = true;
+      socket?.off(event, onBadge);
+      socket?.io.off("reconnect", onReconnect);
+    };
+  }, [googleReviewsEnabled, user?.tenantId]);
+  // Soma no número do sino; título da aba, favicon e ícone do app seguem sem ela.
+  const googleBadgeCount = googleBadge ? googleBadge.newCount + googleBadge.alertCount : 0;
+  const bellBadge = totalBadge + taskBadgeCount + googleBadgeCount;
+
+  // D23: detalhe da tarefa no sino — para quem não abre o /tarefas (aviso, resumo, push).
+  const openTaskDetailById = useCallback(async (taskId: number, fallback?: Partial<TodoItem>) => {
+    // `TodoLists.id` é BIGINT: a API devolve o id como texto ("29").
+    const known = useTaskSummaryStore.getState().items.find((x) => Number(x.id) === taskId);
+    if (known) {
+      setTasksDetailItem(known);
+      return;
+    }
+    try {
+      const { data } = await fetchTodos({ mine: true });
+      const found = asTodoList(data).find((x) => Number(x.id) === taskId);
+      if (found) {
+        setTasksDetailItem(found);
+        return;
+      }
+    } catch { /* cai no que veio do aviso */ }
+    if (fallback?.name) {
+      setTasksDetailItem({ status: "pending", createdAt: "", updatedAt: "", ...fallback, id: taskId, name: fallback.name } as TodoItem);
+      return;
+    }
+    toast.error(tTarefas("taskNotFound"));
+  }, [tTarefas]);
+
+  const openTasksOverview = useCallback(() => {
+    setNotificationsTab("summary");
+    setTasksExpandOpen(true);
+    setNotificationsOpen(true);
+  }, []);
+
+  const { reload: reloadTaskSummary, canAccessTasksPage } = useTaskSummary({
+    enabled: taskSummaryEnabled,
+    onOpenTaskDetail: openTaskDetailById,
+    onOpenTasksOverview: openTasksOverview,
+    isTourBlocking: isTourPendingOrActive,
+    tourActive,
+  });
+
+  const removeTaskFromSummary = useCallback((taskId: number) => {
+    const state = useTaskSummaryStore.getState();
+    useTaskSummaryStore.setState({ items: state.items.filter((x) => Number(x.id) !== Number(taskId)) });
+    if (state.supported === true) reloadTaskSummary();
+  }, [reloadTaskSummary]);
+
+  // D23: o /tarefas sem acesso guarda a tarefa pedida (link do push/aviso) e manda para a
+  // página inicial; o detalhe abre aqui, no sino. Lê e apaga a cada navegação.
+  const pathname = usePathname();
+  useEffect(() => {
+    let raw: string | null = null;
+    let openList = false;
+    try {
+      raw = sessionStorage.getItem(OPEN_TASK_DETAIL_STORAGE_KEY);
+      if (raw !== null) sessionStorage.removeItem(OPEN_TASK_DETAIL_STORAGE_KEY);
+      openList = sessionStorage.getItem(OPEN_TASK_LIST_STORAGE_KEY) !== null;
+      if (openList) sessionStorage.removeItem(OPEN_TASK_LIST_STORAGE_KEY);
+    } catch {
+      return;
+    }
+    if (!taskSummaryEnabled) return;
+    if (openList) openTasksOverview();
+    if (!raw) return;
+    const taskId = Number(raw);
+    if (Number.isInteger(taskId) && taskId > 0) void openTaskDetailById(taskId);
+  }, [pathname, taskSummaryEnabled, openTaskDetailById, openTasksOverview]);
 
  // Carregar notificações internas (API) e tickets (atendimentos) ao montar — igual ao front legado
   useEffect(() => {
@@ -2442,15 +2916,8 @@ export function Header() {
       })
       .catch(() => {});
 
- // Contagem de mensagens não lidas no chat interno (igual front legado: Number(data?.count) + Number(data?.count?.count))
-    Promise.all([fetchUnreadCounts(), fetchUnreadGroupCounts()])
-      .then(([privateRes, groupRes]) => {
-        const privateCount = Number((privateRes.data as { count?: number })?.count) || 0;
-        const groupData = groupRes.data as { count?: number | { count?: number } };
-        const groupCount = Number(groupData?.count && typeof groupData.count === "object" ? groupData.count?.count : groupData?.count) || 0;
-        setChatUnreadCount(privateCount + groupCount);
-      })
-      .catch(() => {});
+    // Contagem do Chat Privado: effect próprio (depois de `refreshChatUnreadCount`), porque
+    // depende do acesso à página.
 
  // Convites: tickets compartilhados com o usuário (Front legado / carregarConvitesTickets)
     fetchTicketSharedByUser()
@@ -2460,16 +2927,7 @@ export function Header() {
       })
       .catch(() => {});
 
-    // Tarefas pendentes/atrasadas do usuário (mesmo filtro do TasksModal)
-    fetchTodos()
-      .then(({ data }) => {
-        const all = Array.isArray(data) ? data : [];
-        const filtered = (all as TodoItem[]).filter((t) =>
-          t.ownerId === user?.userId && (t.status === "delayed" || t.status === "pending"),
-        );
-        setTasksList(filtered);
-      })
-      .catch(() => {});
+    // Tarefas: carregadas pelo useTaskSummary (resumo do próprio usuário, só com o recurso no plano).
 
  // Tutoriais: verifica se há tutoriais ativos para exibir o botão (Front legado / buscarTutoriaisAtivos)
     if (user.profile !== "superadmin") {
@@ -2595,16 +3053,21 @@ export function Header() {
     sweepTicketNotifications();
   }, [notificationsOpen, user?.userId, user?.queues, user?.whatsappAllowed, tenantConfigsLoaded, notViewAssignedForSweep]);
 
+  // Total do Chat Privado (diretas + equipes). Sem acesso à página (e superadmin) não há
+  // contador do chat; a resposta que chega depois de perder o acesso não regrava o número.
   const refreshChatUnreadCount = useCallback(() => {
-    Promise.all([fetchUnreadCounts(), fetchUnreadGroupCounts()])
-      .then(([privateRes, groupRes]) => {
-        const privateCount = Number((privateRes.data as { count?: number })?.count) || 0;
-        const groupData = groupRes.data as { count?: number | { count?: number } };
-        const groupCount = Number(groupData?.count && typeof groupData.count === "object" ? groupData.count?.count : groupData?.count) || 0;
-        setChatUnreadCount(privateCount + groupCount);
-      })
+    if (!canAccessChatRef.current) return;
+    fetchChatUnreadTotal()
+      .then((total) => { if (canAccessChatRef.current) setChatUnreadCount(total); })
       .catch(() => {});
   }, [setChatUnreadCount]);
+
+  // Semente do total no boot e quando o acesso ao Chat Privado muda.
+  useEffect(() => {
+    if (!user?.userId) return;
+    if (!canAccessChat) { setChatUnreadCount(0); return; }
+    refreshChatUnreadCount();
+  }, [user?.userId, canAccessChat, refreshChatUnreadCount, setChatUnreadCount]);
 
   const loadConvites = useCallback(async () => {
     setLoadingConvites(true);
@@ -2913,11 +3376,20 @@ export function Header() {
           {/* Live presentation mode toggle (only renders if env flag enabled) */}
           <LiveModeToggle />
 
+          {/* Chat Privado: contador próprio, fora do bloco só-desktop (aparece no celular).
+              Sem acesso à página não renderiza nada. */}
+          <InternalChatIndicator />
+
           {/* Notificações */}
           {!isSuperAdmin && (() => {
-            const tasksCount = tasksList.length;
+            const tasksCount = taskItems.length;
+            // Pílula da linha de tarefas: atrasadas + de hoje (D8); backend antigo, a lista de antes.
+            const tasksPillCount = taskSummarySupported === true ? taskOverdue + taskToday : tasksCount;
             const systemCount = internalNotifications.length;
-            const summaryCount = (convitesCount > 0 ? 1 : 0) + (chatUnread > 0 ? 1 : 0) + (ticketUnreadCount > 0 ? 1 : 0) + (tasksCount > 0 ? 1 : 0) + (systemCount > 0 ? 1 : 0);
+            const googleNew = googleBadge?.newCount ?? 0;
+            const googleAlert = googleBadge?.alertCount ?? 0;
+            const showGoogleReviews = googleNew + googleAlert > 0;
+            const summaryCount = (convitesCount > 0 ? 1 : 0) + (chatUnread > 0 ? 1 : 0) + (ticketUnreadCount > 0 ? 1 : 0) + (tasksCount > 0 ? 1 : 0) + (showGoogleReviews ? 1 : 0) + (systemCount > 0 ? 1 : 0);
             const messagesCount = ticketNotifications.length;
             const footerAction = () => {
               if (notificationsTab === "messages") {
@@ -2948,9 +3420,13 @@ export function Header() {
               <PopoverTrigger asChild>
                 <Button id="tour-header-bell" data-tour="header-bell" variant="ghost" size="icon" className="relative h-9 w-9">
                   <Bell className="h-4 w-4" />
-                  {totalBadge > 0 && (
-                    <Badge variant="destructive" className="absolute -top-1 -right-1 h-4 min-w-[16px] rounded-full px-1 text-[9px]">
-                      {totalBadge > 99 ? "99+" : totalBadge}
+                  {bellBadge > 0 && (
+                    <Badge
+                      variant="destructive"
+                      className="absolute -top-1 -right-1 h-4 min-w-[16px] rounded-full px-1 text-[9px]"
+                      title={taskBadgeCount > 0 ? tTask("bellBadgeTooltip") : undefined}
+                    >
+                      {bellBadge > 99 ? "99+" : bellBadge}
                     </Badge>
                   )}
                 </Button>
@@ -3111,9 +3587,10 @@ export function Header() {
                                 if (next && !chatPreviewLoadedRef.current) {
                                   chatPreviewLoadedRef.current = true;
                                   setChatPreviewLoading(true);
+                                  setChatPreviewError(false);
                                   fetchUnreadPreview(5)
                                     .then((res) => setChatPreviewItems(res.data?.items ?? []))
-                                    .catch(() => setChatPreviewItems([]))
+                                    .catch(() => { setChatPreviewItems([]); setChatPreviewError(true); })
                                     .finally(() => setChatPreviewLoading(false));
                                 }
                               }}
@@ -3134,60 +3611,23 @@ export function Header() {
                             </button>
                             {chatPreviewOpen && (
                               <div className="mt-1 ml-11 mr-1 pl-2 border-l border-border/60 flex flex-col gap-1">
-                                {chatPreviewLoading ? (
+                                {/* Mesmo renderizador do ícone do Chat Privado. O link vai por
+                                    `contactId`/`groupId` (com `userId` a página abria só a lista). */}
+                                <InternalChatUnreadList
+                                  compact
+                                  items={chatPreviewItems}
+                                  loading={chatPreviewLoading}
+                                  error={chatPreviewError}
+                                  // Com contador e lista vazia (remetente excluído, equipe
+                                  // desativada), "Nenhuma mensagem" contradiria o número ao lado.
+                                  emptyText={chatUnread > 0 ? t("internalChat.emptyButCount") : t("notifications.empty.messages")}
+                                  onOpen={(item) => {
+                                    router.push(internalChatHref({ type: item.type, peerId: item.peerId }));
+                                    setNotificationsOpen(false);
+                                  }}
+                                />
+                                {!chatPreviewLoading && chatPreviewItems.length > 0 && (
                                   <>
-                                    <div className="h-12 rounded-md bg-muted/50 animate-pulse" />
-                                    <div className="h-12 rounded-md bg-muted/50 animate-pulse" />
-                                    <div className="h-12 rounded-md bg-muted/50 animate-pulse" />
-                                  </>
-                                ) : chatPreviewItems.length === 0 ? (
-                                  <span className="text-xs text-muted-foreground py-2">
-                                    {t("notifications.empty.messages")}
-                                  </span>
-                                ) : (
-                                  <>
-                                    {chatPreviewItems.map((item) => {
-                                      const initials = (item.name || "?").trim().slice(0, 2).toUpperCase();
-                                      const preview = item.lastMessage.text
-                                        || (item.lastMessage.mediaType ? `[${item.lastMessage.mediaType}]` : "");
-                                      const when = item.lastMessage.createdAt
-                                        ? new Date(item.lastMessage.createdAt).toLocaleTimeString(
-                                            "pt-BR",
-                                            { hour: "2-digit", minute: "2-digit" },
-                                          )
-                                        : "";
-                                      return (
-                                        <button
-                                          key={`${item.type}-${item.peerId}`}
-                                          type="button"
-                                          onClick={() => {
-                                            const qs = item.type === "group"
-                                              ? `?groupId=${item.peerId}`
-                                              : `?userId=${item.peerId}`;
-                                            router.push(`/chat-privado${qs}`);
-                                            setNotificationsOpen(false);
-                                          }}
-                                          className="w-full flex items-start gap-2 rounded-md px-2 py-1.5 hover:bg-muted/60 transition-colors text-left"
-                                        >
-                                          <Avatar className="h-7 w-7 shrink-0">
-                                            {item.avatarUrl && <AvatarImage src={item.avatarUrl} alt={item.name} />}
-                                            <AvatarFallback className="text-[10px]">{initials}</AvatarFallback>
-                                          </Avatar>
-                                          <span className="flex-1 min-w-0">
-                                            <span className="flex items-center justify-between gap-2">
-                                              <span className="text-xs font-medium truncate">{item.name}</span>
-                                              <span className="text-[10px] text-muted-foreground shrink-0">{when}</span>
-                                            </span>
-                                            <span className="block text-[11px] text-muted-foreground line-clamp-1">{preview}</span>
-                                          </span>
-                                          {item.unreadCount > 0 && (
-                                            <span className="inline-flex h-4 min-w-[16px] items-center justify-center rounded-full bg-blue-500/15 text-blue-500 px-1 text-[10px] font-semibold shrink-0">
-                                              {item.unreadCount > 99 ? "99+" : item.unreadCount}
-                                            </span>
-                                          )}
-                                        </button>
-                                      );
-                                    })}
                                     <button
                                       type="button"
                                       onClick={() => { router.push("/chat-privado"); setNotificationsOpen(false); }}
@@ -3269,9 +3709,19 @@ export function Header() {
                                 <ClipboardList className="h-4 w-4" />
                               </span>
                               <span className="flex-1 text-sm">{t("notifications.pendingTasks")}</span>
-                              <span className="inline-flex h-5 min-w-[20px] items-center justify-center rounded-full bg-muted px-1.5 text-xs font-semibold">
-                                {tasksCount > 99 ? "99+" : tasksCount}
-                              </span>
+                              {tasksPillCount > 0 && (
+                                <span
+                                  className={cn(
+                                    "inline-flex h-5 min-w-[20px] items-center justify-center rounded-full px-1.5 text-xs font-semibold",
+                                    taskSummarySupported === true && taskOverdue > 0
+                                      ? "bg-destructive/15 text-destructive"
+                                      : "bg-muted",
+                                  )}
+                                  title={taskSummarySupported === true ? tTask("bellBadgeTooltip") : undefined}
+                                >
+                                  {tasksPillCount > 99 ? "99+" : tasksPillCount}
+                                </span>
+                              )}
                               {tasksExpandOpen ? (
                                 <ChevronDown className="h-3.5 w-3.5 text-muted-foreground transition-transform" />
                               ) : (
@@ -3280,10 +3730,13 @@ export function Header() {
                             </button>
                             {tasksExpandOpen && (
                               <div className="mt-1 ml-11 mr-1 pl-2 border-l border-border/60 flex flex-col gap-1">
-                                {tasksList.slice(0, 5).map((task) => {
+                                {taskItems.slice(0, 5).map((task) => {
                                   const dotColor = task.priority === "high" ? "bg-destructive"
                                     : task.priority === "medium" ? "bg-warning"
                                     : task.priority === "low" ? "bg-success" : "bg-muted-foreground/40";
+                                  const state = taskDeadlineState(task);
+                                  const deadline = formatTaskDeadline(task);
+                                  const contactName = !isRestrictedUser ? task.contact?.name : undefined;
                                   return (
                                     <button
                                       key={task.id}
@@ -3293,17 +3746,23 @@ export function Header() {
                                     >
                                       <span className={cn("mt-1 h-2 w-2 rounded-full shrink-0", dotColor)} />
                                       <span className="flex-1 min-w-0">
-                                        <span className={cn("block text-xs font-medium truncate", task.status === "delayed" && "text-destructive")}>{task.name}</span>
-                                        {task.limitDate && (
-                                          <span className="block text-[10px] text-muted-foreground">
-                                            {t("tasks.deadline")}: {new Date(task.limitDate).toLocaleDateString()}
+                                        <span className={cn("block text-xs font-medium truncate", state === "overdue" && "text-destructive")}>{task.name}</span>
+                                        {contactName && (
+                                          <span className={cn("block text-[10px] text-muted-foreground truncate", isLiveMode && "live-blur-text")}>{contactName}</span>
+                                        )}
+                                        {deadline && (
+                                          <span className={cn(
+                                            "block text-[10px]",
+                                            state === "overdue" ? "text-destructive" : state === "today" ? "text-warning" : "text-muted-foreground",
+                                          )}>
+                                            {t("tasks.deadline")}: {deadline}
                                           </span>
                                         )}
                                       </span>
                                     </button>
                                   );
                                 })}
-                                {tasksList.length > 5 && (
+                                {taskItems.length > 5 && (
                                   <button
                                     type="button"
                                     onClick={() => { setTasksOpen(true); setNotificationsOpen(false); }}
@@ -3314,6 +3773,38 @@ export function Header() {
                                 )}
                               </div>
                             )}
+                          </li>
+                        )}
+                        {showGoogleReviews && (
+                          <li>
+                            <button
+                              type="button"
+                              onClick={() => { setNotificationsOpen(false); router.push("/avaliacoes?tab=google"); }}
+                              className="w-full flex items-center gap-3 rounded-md px-2 py-2 hover:bg-muted/60 transition-colors text-left"
+                            >
+                              <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-yellow-500/15 text-yellow-600 dark:text-yellow-400">
+                                <Star className="h-4 w-4" />
+                              </span>
+                              <span className="flex-1 min-w-0">
+                                <span className="block text-sm">{t("notifications.googleReviews")}</span>
+                                <span className="block text-[11px] text-muted-foreground">
+                                  {[
+                                    googleNew > 0 ? t("notifications.googleReviewsNew", { count: googleNew }) : null,
+                                    googleAlert > 0 ? t("notifications.googleReviewsAlert", { count: googleAlert }) : null,
+                                  ].filter(Boolean).join(" · ")}
+                                </span>
+                              </span>
+                              <span
+                                className={cn(
+                                  "inline-flex h-5 min-w-[20px] items-center justify-center rounded-full px-1.5 text-xs font-semibold",
+                                  googleAlert > 0 ? "bg-destructive/15 text-destructive" : "bg-muted",
+                                )}
+                                title={googleAlert > 0 ? t("notifications.googleReviewsAlertTooltip") : undefined}
+                              >
+                                {googleNew + googleAlert > 99 ? "99+" : googleNew + googleAlert}
+                              </span>
+                              <ChevronRight className="h-3.5 w-3.5 text-muted-foreground" />
+                            </button>
                           </li>
                         )}
                         {systemCount > 0 && (
@@ -3512,10 +4003,13 @@ export function Header() {
             );
           })()}
 
+          {/* Som das notificações só deste usuário: ao lado do sino, também no celular. */}
+          <NotificationSoundToggle />
+
           {/* Secondary buttons — desktop only (hidden on mobile) */}
           <div className="hidden md:flex items-center gap-1">
             {/* Nova Conversa */}
-            {!isSuperAdmin && !isRestrictedUser && (
+            {!isSuperAdmin && !isRestrictedUser && canStartConversation && (
               <Tooltip>
                 <TooltipTrigger asChild>
                   <Button id="tour-header-new-conversation" data-tour="header-new-conversation" variant="ghost" size="icon" className="h-9 w-9" onClick={() => setSendMsgOpen(true)}>
@@ -3704,7 +4198,7 @@ export function Header() {
               {/* Non-superadmin actions */}
               {!isSuperAdmin && (
                 <>
-                  {!isRestrictedUser && (
+                  {!isRestrictedUser && canStartConversation && (
                     <DropdownMenuItem onClick={() => setSendMsgOpen(true)}>
                       <Send className="mr-2 h-4 w-4" /> {t("tooltips.newConversation")}
                     </DropdownMenuItem>
@@ -3766,7 +4260,12 @@ export function Header() {
 
       {/* Modals */}
       <NewConversationDialog open={sendMsgOpen} onOpenChange={setSendMsgOpen} />
-      <TasksModal open={tasksOpen} onOpenChange={setTasksOpen} />
+      <TasksModal
+        open={tasksOpen}
+        onOpenChange={setTasksOpen}
+        canOpenTasksPage={canAccessTasksPage}
+        onSelectTask={(task) => { setTasksOpen(false); setTasksDetailItem(task); }}
+      />
       <Dialog open={!!tasksDetailItem} onOpenChange={(o) => !o && setTasksDetailItem(null)}>
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
@@ -3795,21 +4294,32 @@ export function Header() {
                       : t("tasks.priorityNone")}
                   </Badge>
                 )}
-                <Badge variant={tasksDetailItem.status === "delayed" ? "destructive" : "secondary"} className="text-[10px]">
-                  {tasksDetailItem.status === "delayed" ? t("tasks.statusDelayed")
-                    : tasksDetailItem.status === "finished" || tasksDetailItem.status === "done" || tasksDetailItem.status === "completed" ? t("tasks.statusFinished")
-                    : t("tasks.statusPending")}
-                </Badge>
+                {(() => {
+                  const state = taskDeadlineState(tasksDetailItem);
+                  const finished = state === "done" || tasksDetailItem.status === "done" || tasksDetailItem.status === "completed";
+                  return (
+                    <Badge variant={state === "overdue" ? "destructive" : "secondary"} className="text-[10px]">
+                      {state === "overdue" ? t("tasks.statusDelayed")
+                        : finished ? t("tasks.statusFinished")
+                        : t("tasks.statusPending")}
+                    </Badge>
+                  );
+                })()}
               </div>
-              {tasksDetailItem.limitDate && (() => {
-                const deadline = new Date(tasksDetailItem.limitDate);
-                const tone = getDeadlineTone(deadline);
+              {!isRestrictedUser && tasksDetailItem.contact?.name && (
+                <p className={cn("text-xs text-muted-foreground truncate", isLiveMode && "live-blur-text")}>
+                  {tasksDetailItem.contact.name}
+                </p>
+              )}
+              {(() => {
+                const info = taskDetailDeadline(tasksDetailItem);
+                if (!info) return null;
+                const { tone, absolute } = info;
                 const dfLocale = DATEFNS_LOCALE_MAP[locale] ?? ptBR;
-                const rel = formatDistanceToNow(deadline, { locale: dfLocale, addSuffix: true });
+                const rel = info.relativeTo
+                  ? formatDistanceToNow(info.relativeTo, { locale: dfLocale, addSuffix: true })
+                  : tTask("stateToday");
                 const relCap = rel.charAt(0).toUpperCase() + rel.slice(1);
-                const absolute = deadline.toLocaleString(undefined, {
-                  day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit",
-                });
                 const toneStyles = {
                   overdue: { border: "border-destructive/30", bg: "bg-destructive/5", icon: "text-destructive", text: "text-destructive" },
                   today: { border: "border-warning/30", bg: "bg-warning/5", icon: "text-warning", text: "text-warning" },
@@ -3828,6 +4338,39 @@ export function Header() {
               })()}
             </div>
           )}
+          {tasksDetailItem && (!!tasksDetailItem.ticketId || canAccessTasksPage) && (
+            <div className="flex flex-wrap items-center gap-2 pt-1">
+              {!!tasksDetailItem.ticketId && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-8"
+                  onClick={() => {
+                    const ticketId = tasksDetailItem.ticketId;
+                    setTasksDetailItem(null);
+                    router.push(`/atendimento?ticketId=${ticketId}`);
+                  }}
+                >
+                  <MessageSquare className="h-3.5 w-3.5 mr-1" /> {tTask("openTicket")}
+                </Button>
+              )}
+              {canAccessTasksPage && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-8"
+                  onClick={() => {
+                    const taskId = tasksDetailItem.id;
+                    setTasksDetailItem(null);
+                    setNotificationsOpen(false);
+                    router.push(`/tarefas?taskId=${taskId}`);
+                  }}
+                >
+                  <ClipboardList className="h-3.5 w-3.5 mr-1" /> {tTask("openTask")}
+                </Button>
+              )}
+            </div>
+          )}
           <div className="flex items-center justify-end gap-2 pt-2">
             <Button
               variant="ghost"
@@ -3836,7 +4379,7 @@ export function Header() {
                 if (!tasksDetailItem) return;
                 try {
                   await deleteTodo(tasksDetailItem.id);
-                  setTasksList((prev) => prev.filter((x) => x.id !== tasksDetailItem.id));
+                  removeTaskFromSummary(tasksDetailItem.id);
                   setTasksDetailItem(null);
                 } catch { /* empty */ }
               }}
@@ -3850,7 +4393,7 @@ export function Header() {
                 if (!tasksDetailItem) return;
                 try {
                   await updateTodo(tasksDetailItem.id, { status: "finished" });
-                  setTasksList((prev) => prev.filter((x) => x.id !== tasksDetailItem.id));
+                  removeTaskFromSummary(tasksDetailItem.id);
                   setTasksDetailItem(null);
                 } catch { /* empty */ }
               }}

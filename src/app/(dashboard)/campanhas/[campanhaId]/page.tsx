@@ -2,7 +2,7 @@
 
 import { formatDateTime } from "@/lib/format";
 
-import React, { useState, useEffect, useCallback, useRef } from "react";
+import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { useTranslations } from "next-intl";
 import { displayContactIdentity } from "@/lib/contact-identity";
 import { useParams, useRouter } from "next/navigation";
@@ -28,13 +28,15 @@ import {
   Table, TableHeader, TableBody, TableHead, TableRow, TableCell,
 } from "@/components/ui/table";
 import {
-  Users, ArrowLeft, Search, RefreshCw, Plus, Trash2, ChevronDown, Loader2,
+  Users, ArrowLeft, Search, RefreshCw, Plus, Trash2, ChevronDown, Loader2, Reply,
 } from "lucide-react";
 import { toast } from "sonner";
 import {
   fetchCampaign, fetchCampaignContacts, addCampaignContacts,
   deleteCampaignContact, deleteAllCampaignContacts, fetchContactsReportCampaign,
+  getCampaignReplies, indexCampaignReplies, type CampaignRepliesResponse,
 } from "@/services/campaigns";
+import { DispatchRepliesHint, DispatchReplyTicketLink, replyRatePercent } from "@/components/common/dispatch-replies";
 import { fetchTags } from "@/services/tags";
 import { fetchAllUsers } from "@/services/users";
 import { estadosBR } from "@/lib/constants";
@@ -435,12 +437,18 @@ function AddContactsDialog({ open, campaignId, onClose, onAdded }: AddContactsDi
 
 // ─── Main Page ────────────────────────────────────────────────────────────────
 
+// A checagem de acesso fica fora do componente com os hooks: se a permissão mudar com a
+// página aberta (refresh de 30 s), trocar o componente inteiro não quebra a ordem dos hooks.
 export default function CampanhaDetalhePage() {
+  const allowed = usePageAccess("campanhas");
+  if (!allowed) return <AccessDenied />;
+  return <CampanhaDetalheContent />;
+}
+
+function CampanhaDetalheContent() {
   const params = useParams();
   const router = useRouter();
   const t = useTranslations("campanhasDetailPage");
-  const allowed = usePageAccess("campanhas");
-  if (!allowed) return <AccessDenied />;
   const [loading, setLoading] = useState(true);
   const [campaign, setCampaign] = useState<CampaignDetail | null>(null);
   const [contacts, setContacts] = useState<CampaignContact[]>([]);
@@ -449,13 +457,29 @@ export default function CampanhaDetalhePage() {
   const [deletingId, setDeletingId] = useState<number | null>(null);
   const [clearAllOpen, setClearAllOpen] = useState(false);
   const [clearingAll, setClearingAll] = useState(false);
+  const tReplies = useTranslations("dispatchReplies");
+  // Quem respondeu: leitura à parte, em segundo plano (backend anterior = 404 e a tela fica como era).
+  const [repliesData, setRepliesData] = useState<CampaignRepliesResponse | null>(null);
+  const repliesReqRef = useRef(0);
 
   const campaignId = Number(params.campanhaId);
 
   const canEdit = campaign?.status === "pending" || campaign?.status === "canceled" || !campaign?.status;
 
+  const loadReplies = useCallback(() => {
+    const req = ++repliesReqRef.current;
+    getCampaignReplies(campaignId)
+      .then((res) => {
+        if (req === repliesReqRef.current) setRepliesData(res.data ?? null);
+      })
+      .catch(() => {
+        if (req === repliesReqRef.current) setRepliesData(null);
+      });
+  }, [campaignId]);
+
   const loadData = useCallback(async () => {
     setLoading(true);
+    loadReplies();
     try {
       const [campRes, contactsRes] = await Promise.all([
         fetchCampaign(campaignId),
@@ -472,9 +496,16 @@ export default function CampanhaDetalhePage() {
     } finally {
       setLoading(false);
     }
-  }, [campaignId]);
+  }, [campaignId, loadReplies]);
 
   useEffect(() => { loadData(); }, [loadData]);
+
+  const repliesIndex = useMemo(() => indexCampaignReplies(repliesData), [repliesData]);
+  const repliesFailed =
+    !!repliesData && repliesData.available !== true && repliesData.reason !== "no_channel";
+  const replyRate = repliesIndex
+    ? replyRatePercent(repliesIndex.summary.count, repliesIndex.summary.checked)
+    : null;
 
   const handleDeleteContact = async (contactId: number) => {
     setDeletingId(contactId);
@@ -543,7 +574,7 @@ export default function CampanhaDetalhePage() {
   return (
     <div className="space-y-6">
       <PageHeader
-        title={campaign?.name || `${t("title").replace("#{id}", String(campaignId))}`}
+        title={campaign?.name || t("title", { id: campaignId })}
         description={`${t("idLabel")} ${campaignId} · ${total} ${t("contactsCountLabel")}`}
         help={{
           description: t("helpDesc"),
@@ -581,7 +612,7 @@ export default function CampanhaDetalhePage() {
       ) : (
         <>
           {/* Stats cards */}
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+          <div className={`grid grid-cols-2 gap-4 ${repliesIndex ? "md:grid-cols-5" : "md:grid-cols-4"}`}>
             <Card>
               <CardContent className="p-4">
                 <p className="text-sm text-muted-foreground">{t("total")}</p>
@@ -606,7 +637,24 @@ export default function CampanhaDetalhePage() {
                 <p className="text-2xl font-bold text-red-500">{failed}</p>
               </CardContent>
             </Card>
+            {repliesIndex && (
+              <Card>
+                <CardContent className="p-4">
+                  <p className="flex items-center gap-1 text-sm text-muted-foreground">
+                    {tReplies("replied")}
+                    <DispatchRepliesHint windowDays={repliesIndex.summary.windowDays} />
+                  </p>
+                  <p className="text-2xl font-bold text-emerald-600">{repliesIndex.summary.count}</p>
+                  {replyRate !== null && (
+                    <p className="text-xs text-muted-foreground">{tReplies("rate", { percent: replyRate })}</p>
+                  )}
+                </CardContent>
+              </Card>
+            )}
           </div>
+          {repliesFailed && (
+            <p className="text-xs text-amber-700 dark:text-amber-400">{tReplies("unavailable")}</p>
+          )}
 
           <Card>
             <CardHeader className="pb-2">
@@ -674,11 +722,14 @@ export default function CampanhaDetalhePage() {
                       <TableHead>{t("colNumber")}</TableHead>
                       <TableHead>{t("colTags")}</TableHead>
                       <TableHead>{t("colSendStatus")}</TableHead>
+                      {repliesIndex && <TableHead>{tReplies("column")}</TableHead>}
                       {canEdit && <TableHead className="w-16">{t("colAction")}</TableHead>}
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {filtered.map((contact) => (
+                    {filtered.map((contact) => {
+                      const reply = repliesIndex?.byContact.get(contact.id);
+                      return (
                       <TableRow key={contact.id}>
                         <TableCell className="font-medium">{contact.name || "—"}</TableCell>
                         <TableCell>{displayContactIdentity(contact)}</TableCell>
@@ -688,6 +739,23 @@ export default function CampanhaDetalhePage() {
                         <TableCell>
                           <Badge variant={getAckVariant(contact)}>{getAckLabel(contact)}</Badge>
                         </TableCell>
+                        {repliesIndex && (
+                          <TableCell className="text-sm">
+                            {reply ? (
+                              <span className="inline-flex items-center gap-1 font-medium text-emerald-700 dark:text-emerald-400">
+                                <Reply className="h-3.5 w-3.5 shrink-0" />
+                                <span className="tabular-nums">
+                                  {tReplies("repliedAt", { date: formatDate(reply.repliedAt) })}
+                                </span>
+                                {reply.ticketId > 0 && (
+                                  <DispatchReplyTicketLink ticketId={reply.ticketId} label={tReplies("openTicket")} />
+                                )}
+                              </span>
+                            ) : (
+                              <span className="text-muted-foreground">—</span>
+                            )}
+                          </TableCell>
+                        )}
                         {canEdit && (
                           <TableCell>
                             <Button
@@ -702,7 +770,8 @@ export default function CampanhaDetalhePage() {
                           </TableCell>
                         )}
                       </TableRow>
-                    ))}
+                      );
+                    })}
                   </TableBody>
                 </Table>
               </CardContent>

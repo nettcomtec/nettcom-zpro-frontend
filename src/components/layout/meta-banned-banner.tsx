@@ -21,6 +21,7 @@ interface PhoneHealthRow {
   phoneNumberId: string;
   displayPhoneNumber?: string | null;
   phoneStatus?: string | null;
+  whatsappId?: number | null;
 }
 
 const DISMISS_KEY = "metaBannedBannerDismissedSig";
@@ -42,7 +43,9 @@ export function MetaBannedBanner() {
       try {
         const resp = await api.get("/meta/phone-health");
         const rows: PhoneHealthRow[] = Array.isArray(resp.data) ? resp.data : [];
-        const probs = rows.filter((r) => isWabaPhoneStatusProblem(r.phoneStatus));
+        // Registro sem canal (cadastro antigo do número ou canal excluído) não para
+        // canal nenhum. O backend novo já não os devolve; isto cobre o backend antigo.
+        const probs = rows.filter((r) => r.whatsappId != null && isWabaPhoneStatusProblem(r.phoneStatus));
         setAffected(probs);
 
         const banned = probs.filter((r) => classifyWabaPhoneStatus(r.phoneStatus) === "banned");

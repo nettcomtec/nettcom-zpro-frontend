@@ -248,7 +248,7 @@ export function Dialog360CreateChannelDialog({
                 {t("manualDescription")}
               </p>
               <p className="text-xs text-muted-foreground">
-                Os campos (D360-API-KEY, Phone Number ID, WABA ID) são preenchidos diretamente no popup seguro hospedado em oauth.techprovider.com.br, com validação de licença antes do envio. Clique abaixo para abrir.
+                {t("manualPopupNote")}
               </p>
               <Button onClick={handleSubmitManual} disabled={submitting} className="w-full">
                 {submitting && <Loader2 className="w-4 h-4 mr-2 animate-spin" />}

@@ -31,6 +31,8 @@ export interface LoginResponse {
   sipUsername?: string;
   sipPassword?: string;
   sipTransport?: "ws" | "wss";
+  /** Keep-alive do WebPhone em segundos (null = padrão, 0 = desligado; ausente = backend antigo). */
+  sipKeepAliveInterval?: number | null;
   phone?: string;
   // Extras que podem vir do backend
   restrictedUser?: string | boolean;

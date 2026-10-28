@@ -65,6 +65,7 @@ export interface ICustomPermissions {
   private_chat_audit: boolean;
   scheduled_messages_manage: boolean;
   booking_manage: boolean;
+  forms_manage: boolean;
   tags_manage: boolean;
   closure_reasons_manage: boolean;
   business_hours_manage: boolean;
@@ -73,6 +74,8 @@ export interface ICustomPermissions {
   chat_flow_manage: boolean;
   ai_agents_manage: boolean;
   ai_credits_manage: boolean;
+  // Aplicativos personalizados (PLANO_APLICATIVOS_PERSONALIZADOS D14)
+  custom_apps_manage: boolean;
   ratings_view: boolean;
   notifications_manage: boolean;
 
@@ -136,6 +139,7 @@ export const DEFAULT_CUSTOM_PERMISSIONS: ICustomPermissions = {
   private_chat_audit: false,
   scheduled_messages_manage: false,
   booking_manage: false,
+  forms_manage: false,
   tags_manage: false,
   closure_reasons_manage: false,
   business_hours_manage: false,
@@ -144,6 +148,7 @@ export const DEFAULT_CUSTOM_PERMISSIONS: ICustomPermissions = {
   chat_flow_manage: false,
   ai_agents_manage: false,
   ai_credits_manage: false,
+  custom_apps_manage: false,
   ratings_view: false,
   notifications_manage: false,
   api_service_access: false,

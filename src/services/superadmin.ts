@@ -210,15 +210,35 @@ export async function deleteAppYouTube(id: number) {
   return api.delete(`/app-youtube/${id}`);
 }
 
-// App Google (Phase 16 — unified app for Gmail + Calendar + YouTube)
+// App Google (Phase 16 — unified app for Gmail + Calendar + YouTube + Perfil da Empresa)
+export interface AppGoogleDTO {
+  id: number;
+  clientId?: string;
+  /** Para quem não é superadmin o backend devolve "********" (o segredo nunca volta). */
+  clientSecret?: string;
+  gmailEnabled?: boolean;
+  calendarEnabled?: boolean;
+  youtubeEnabled?: boolean;
+  /** Perfil da Empresa no Google (avaliações). Backend antigo não manda = desligado. */
+  businessEnabled?: boolean;
+  gmailScopes?: string | null;
+  calendarScopes?: string | null;
+  youtubeScopes?: string | null;
+  youtubePollIntervalSeconds?: number;
+  description?: string;
+  /** null = app global da plataforma (só superadmin altera). */
+  tenantId?: number | null;
+  isActive?: boolean;
+}
+
 export async function fetchAppGoogles() {
-  return api.get("/app-google");
+  return api.get<AppGoogleDTO[]>("/app-google");
 }
 export async function createAppGoogle(data: Record<string, unknown>) {
-  return api.post("/app-google", data);
+  return api.post<AppGoogleDTO>("/app-google", data);
 }
 export async function updateAppGoogle(id: number, data: Record<string, unknown>) {
-  return api.put(`/app-google/${id}`, data);
+  return api.put<AppGoogleDTO>(`/app-google/${id}`, data);
 }
 export async function deleteAppGoogle(id: number) {
   return api.delete(`/app-google/${id}`);

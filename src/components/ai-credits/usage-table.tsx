@@ -32,8 +32,8 @@ type Mode = "daily" | "detail";
 
 // Origem vinda de um servidor mais novo não tem tradução: mostra o valor cru.
 const KNOWN_SOURCES = new Set<string>([
-  "agent", "agent_summary", "kb_embedding", "kb_query", "chatgpt",
-  "copilot", "transcription", "speech", "vision",
+  "agent", "agent_summary", "agent_qualify", "kb_embedding", "kb_query",
+  "chatgpt", "copilot", "transcription", "speech", "vision",
 ]);
 
 const DEFAULT_WINDOW_DAYS = 30;

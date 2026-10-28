@@ -94,12 +94,12 @@ function ProfileForm() {
   // Não se usa `hasPermission("users_manage")` do auth-store aqui: ele diverge desse gate nas
   // duas pontas — devolve true para QUALQUER perfil não-custom (auth-store.ts:453, o que
   // liberaria `super` e `user`, justamente os que sofrem strip) e exige `customProfileEnabled`
-  // (auth-store.ts:455), que o backend não exige neste ponto (isAuthZPRO popula
-  // `customPermissions` direto do CustomProfile, independente da flag do tenant). Espelhar o
-  // backend é o mesmo caminho já adotado em atendimento/page.tsx para `tickets_view_all`.
+  // (auth-store.ts:455). Desde 16/10/2026 o backend também exige a flag: com o recurso
+  // desligado o isAuthZPRO zera as permissões do custom (EffectiveCustomPermissionsZPRO).
   const canEditEmail =
     user?.profile === "admin" ||
     (user?.profile === "custom" &&
+      user?.customProfileEnabled === true &&
       (user?.customProfile?.customPermissions as unknown as { users_manage?: boolean } | undefined)
         ?.users_manage === true);
 

@@ -1,28 +1,30 @@
 "use client";
 
-import { useEffect, useRef, useCallback } from "react";
+import { useEffect, useRef } from "react";
 import { getSocket } from "@/lib/socket";
 import { useAuthStore } from "@/stores/auth-store";
 import { useTicketStore, type Ticket } from "@/stores/ticket-store";
 import { useNotificationStore } from "@/stores/notification-store";
 import { useBrandingStore } from "@/stores/branding-store";
-import { fetchTickets } from "@/services/tickets";
-import { normalizeTickets, normalizeTicket } from "@/lib/normalize-ticket";
+import { normalizeTicket } from "@/lib/normalize-ticket";
 import { getNotificationSoundUrl, getPwaIconUrl } from "@/lib/branding-urls";
 import { toast } from "sonner";
 import { useTranslations } from "next-intl";
 import { safeJsonParse } from "@/lib/safe-json-parse";
 import { playNotificationSound } from "@/lib/notification-audio";
+import { isGroupTicketPayload, isNotificationSoundMutedForMe } from "@/lib/notification-sound-mute";
 import { canUserSeeTicket, isTicketInBotFlow, type TicketVisibilityData } from "@/lib/can-user-see-ticket";
 import { useLiveModeStore } from "@/stores/live-mode-store";
 import { useTicketFilterStore } from "@/stores/ticket-filter-store";
 import { matchesActiveFilter, type MatchesFilterTicket } from "@/lib/matches-active-filter";
-import { getTicketLastMessagePreview } from "@/lib/template-preview";
 import {
   ensurePendingTicketNotification,
   pickTicketVisibilityPatch,
   syncTicketNotificationVisibility,
 } from "@/lib/ticket-notification-visibility";
+import { isClosedTicketRatingReply } from "@/lib/evaluation-score";
+import { notifyInbound as notifyWabaAgentGroupInbound } from "@/lib/waba-agent-grouping";
+import { rememberTicketAdReferral, withPendingAdReferral } from "@/lib/ad-referral";
 
 function passesActiveUiFilter(ticket: MatchesFilterTicket): boolean {
   const filter = useTicketFilterStore.getState();
@@ -111,7 +113,6 @@ export function useSocketTickets() {
   const t = useTranslations("useSocketTickets");
   const tLive = useTranslations("liveMode");
   const { user, isAuthenticated } = useAuthStore();
-  const setTickets = useTicketStore((s) => s.setTickets);
   const updateTicket = useTicketStore((s) => s.updateTicket);
   const addTicket = useTicketStore((s) => s.addTicket);
   const removeTicket = useTicketStore((s) => s.removeTicket);
@@ -129,71 +130,8 @@ export function useSocketTickets() {
   const userId = user?.userId;
   const profile = user?.profile;
   const initialized = useRef(false);
-  const debounceTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const inProgress = useRef(false);
   // Tracks real message IDs recently processed to prevent socket double-emit duplicates
   const recentMsgIds = useRef<Set<string>>(new Set());
-
-  const debouncedRefreshTickets = useCallback(async () => {
-    if (inProgress.current) return;
-    if (debounceTimer.current) clearTimeout(debounceTimer.current);
-
-    debounceTimer.current = setTimeout(async () => {
-      inProgress.current = true;
-      const contactLabel = t("contactFallback");
-      const newMsgLabel = t("newMessageFallback");
-      try {
-        const { data } = await fetchTickets({
-          searchParam: "",
-          pageNumber: 1,
-          status: ["open", "pending"],
-        });
-
-        const raw = data?.tickets || [];
-        const freshTickets = normalizeTickets(raw);
-
-        // Merge: atualiza/adiciona tickets da página 1, mas preserva tickets de páginas
-        // anteriores já carregados pelo usuário — evita que eventos de socket resetem a lista paginada.
-        const freshIds = new Set(freshTickets.map((tk: { id: number }) => tk.id));
-        const currentTickets = useTicketStore.getState().tickets;
-        const preserved = currentTickets.filter((tk) => !freshIds.has(tk.id));
-        setTickets([...freshTickets, ...preserved]);
-
-        const currentUser = useAuthStore.getState().user;
-        const visibilityConfig = buildVisibilityConfig();
-        const isVisibleForUser = (tk: TicketVisibilityData) =>
-          canUserSeeTicket(tk, currentUser, visibilityConfig);
-
-        const openTickets = freshTickets.filter((tk: TicketVisibilityData & { status: string; unreadMessages: number }) => {
-          if (tk.status !== "open" || (tk.unreadMessages ?? 0) <= 0) return false;
-          return isVisibleForUser(tk);
-        });
-        const pendingTickets = freshTickets.filter((tk: TicketVisibilityData & { status: string }) =>
-          tk.status === "pending" && isVisibleForUser(tk)
-        );
-        const allTicketNotifications = [
-          ...openTickets,
-          ...pendingTickets.filter((tk: { id: number }) => !openTickets.some((o: { id: number }) => o.id === tk.id)),
-        ];
-
-        const { notifications: prevNotifications, setNotifications } = useNotificationStore.getState();
-        const readIds = new Set(prevNotifications.filter((n) => n.read).map((n) => n.id));
-        setNotifications(
-          allTicketNotifications.map((tk: { id: number; contact?: { name?: string }; lastMessage?: string; updatedAt: string; unreadMessages?: number }) => ({
-            id: tk.id,
-            message: `${tk.contact?.name || contactLabel}: ${getTicketLastMessagePreview(tk.lastMessage) || newMsgLabel}`,
-            read: readIds.has(tk.id) || (tk.unreadMessages ?? 0) === 0,
-            createdAt: tk.updatedAt ?? new Date().toISOString(),
-            ticketId: tk.id,
-          }))
-        );
-      } catch {
-        // silenciar erros de timeout
-      } finally {
-        inProgress.current = false;
-      }
-    }, 500);
-  }, [userId, profile, setTickets, t]);
 
   useEffect(() => {
     // Se o modo otimizado estiver ativo, o hook use-socket-tickets-otm assume o controle
@@ -205,12 +143,38 @@ export function useSocketTickets() {
     initialized.current = true;
 
     const handleTicketList = (data: { type: string; payload: Record<string, unknown> }) => {
+      // Selo "Anúncio" (docs/PLANO_ANUNCIO_ORIGEM_CONVERSA.md): o backend avisa quando registra
+      // o anúncio de um atendimento. Só preenche atendimento que já está na tela e ainda não
+      // tem selo (o selo é o PRIMEIRO anúncio: um 2º não troca o que aparece), nunca insere
+      // atendimento, e sai antes dos demais ramos. O aviso fica guardado para o atendimento
+      // que só entrar na lista depois (inserção abaixo, `withPendingAdReferral`).
+      if (data.type === "ticket:adReferral") {
+        const adPayload = (data.payload ?? {}) as { ticketId?: unknown; adReferral?: unknown };
+        const adTicketId = Number(adPayload.ticketId);
+        const rawAd = adPayload.adReferral;
+        if (Number.isInteger(adTicketId) && adTicketId > 0 && rawAd && typeof rawAd === "object" && !Array.isArray(rawAd)) {
+          const ad = rawAd as Record<string, unknown>;
+          const adText = (v: unknown): string | null =>
+            typeof v === "string" && v.trim() ? v : typeof v === "number" && Number.isFinite(v) ? String(v) : null;
+          const adValue = { adId: adText(ad.adId), adTitle: adText(ad.adTitle), channel: adText(ad.channel) };
+          rememberTicketAdReferral(adTicketId, adValue);
+          const { tickets: listNow, currentTicket: openNow } = useTicketStore.getState();
+          const inList = listNow.find((tk) => tk.id === adTicketId);
+          const isOpen = openNow?.id === adTicketId;
+          const alreadyHas = !!inList?.adReferral || (isOpen && !!openNow?.adReferral);
+          if ((inList || isOpen) && !alreadyHas) {
+            updateTicket({ id: adTicketId, adReferral: adValue });
+          }
+        }
+        return;
+      }
+
       if (data.type === "chat:ack" || data.type === "chat:delete" || data.type === "chat:update") {
         const payload = data.payload as {
           id?: string | number;
           messageId?: string;
           ack?: number;
-          statusError?: { code?: number | string; title?: string; details?: string } | null;
+          statusError?: { code?: number | string; subcode?: number | string; title?: string; details?: string } | null;
           status?: string;
           isDeleted?: boolean;
           reaction?: string;
@@ -223,7 +187,9 @@ export function useSocketTickets() {
           dataJson?: string;
           mediaType?: string;
           sentVia?: string | null;
+          wabaPricingCategory?: string | null;
           ticketLastMessage?: string;
+          quotedMsgId?: string | null;
         };
         const currentTicket = useTicketStore.getState().currentTicket;
         const msgTicketId = payload.ticketId;
@@ -267,6 +233,17 @@ export function useSocketTickets() {
                     // sentVia atualizado (linked_pending -> linked_baileys). Sem mesclar
                     // aqui, o selo "roteada" só apareceria após refresh (REST re-fetch).
                     ...(payload.sentVia !== undefined ? { sentVia: payload.sentVia } : {}),
+                    // WhatsApp oficial: a Meta confirmou a entrega pela Marketing Messages API
+                    // (selo na bolha). Só texto preenchido entra: ausente (backend antigo) ou
+                    // null (status lido sem a coluna) nunca apaga um selo já mostrado.
+                    ...(typeof payload.wabaPricingCategory === "string" && payload.wabaPricingCategory
+                      ? { wabaPricingCategory: payload.wabaPricingCategory }
+                      : {}),
+                    // Bomba da UAzapi: citação que não chegou ao celular (quotedMsgId nulo) sai da bolha.
+                    ...(payload.quotedMsgId === null && m.quotedMsg &&
+                      (String(currentTicket?.channel ?? "").toLowerCase() === "uazapi" || payload.sentVia === "linked_baileys")
+                      ? { quotedMsg: null }
+                      : {}),
                   }
                 : m
             );
@@ -303,6 +280,7 @@ export function useSocketTickets() {
               if (payload.ack != null) (patch as { ack?: number }).ack = payload.ack;
               if (payload.status != null) (patch as { status?: string }).status = payload.status;
               if (payload.sentVia !== undefined) (patch as { sentVia?: string | null }).sentVia = payload.sentVia;
+              if (typeof payload.wabaPricingCategory === "string" && payload.wabaPricingCategory) (patch as { wabaPricingCategory?: string | null }).wabaPricingCategory = payload.wabaPricingCategory;
               return { ...m, ...patch };
             });
             setMessages(updated);
@@ -402,7 +380,7 @@ export function useSocketTickets() {
             // logo abaixo — usuario continua sendo avisado fora do filtro ativo.
             const tkNormalized = normalizeTicket(tkCreate);
             if (passesActiveUiFilter(tkNormalized as MatchesFilterTicket)) {
-              addTicket(tkNormalized);
+              addTicket(withPendingAdReferral(tkNormalized));
             }
             // Sync notification badge: add entry for new pending ticket (aplicando filtros de visibilidade)
             if (tkCreate.status === "pending") {
@@ -461,6 +439,9 @@ export function useSocketTickets() {
               // Sem isto, o ticket que caía em pendentes só tocava som + badge — o popup do SO
               // (Web Notification) nunca era criado, então atendente sem áudio não era avisado.
               // A tag compartilhada colapsa popups simultâneos (não empilha spam).
+              // Som desligado pelo usuário no botão do topo (lib/notification-sound-mute.ts):
+              // o popup continua, sem som do sistema.
+              const isGroupCreate = isGroupTicketPayload(tkCreate);
               if (!suppressBotNotif && soundEnabled && typeof Notification !== "undefined" && Notification.permission === "granted") {
                 const liveState = useLiveModeStore.getState();
                 const isLive = liveState.envEnabled && liveState.active;
@@ -472,12 +453,13 @@ export function useSocketTickets() {
                     body: isLive ? tLive("notificationBodyHidden") : t("newMessageFallback"),
                     icon: getPwaIconUrl("icon-192x192.png"),
                     tag: "zpro-notification",
+                    ...(isNotificationSoundMutedForMe({ group: isGroupCreate }) ? { silent: true } : {}),
                   },
                 );
               }
               const recording = safeJsonParse(localStorage.getItem("recording"), false);
               if (!suppressBotNotif && soundEnabled && !recording) {
-                playNotificationSound(getNotificationSoundUrl("ticket", soundTimestampsRef.current.ticket || undefined));
+                playNotificationSound(getNotificationSoundUrl("ticket", soundTimestampsRef.current.ticket || undefined), { group: isGroupCreate });
               }
             }
           }
@@ -513,9 +495,6 @@ export function useSocketTickets() {
               buildVisibilityConfig(),
             );
             // ── Aviso na TRANSIÇÃO p/ pendente na fila (paridade c/ ticket:create) ──
-            // ticket:create só avisa na criação; aqui cobrimos bot→fila / transferência /
-            // redirecionamento: avisa quando o ticket PASSA a ser "notificável"
-            // (pendente + visível + fora do bot). Mesma flag notifyOnlyHumanTickets do create.
             {
               const notifyOnlyHuman =
                 useAuthStore.getState().getConfigValue("notifyOnlyHumanTickets") === "enabled";
@@ -610,7 +589,7 @@ export function useSocketTickets() {
             passesActiveUiFilter(tkNormalizedUpd as MatchesFilterTicket) ||
             useTicketStore.getState().currentTicket?.id === tkNormalizedUpd.id
           ) {
-            addTicket(tkNormalizedUpd);
+            addTicket(withPendingAdReferral(tkNormalizedUpd));
           }
           return;
         }
@@ -666,6 +645,9 @@ export function useSocketTickets() {
         // do usuário, shared, wallet e grupo. A conversa aberta na tela nunca é filtrada.
         const ticketsRainEnabledChat = safeJsonParse(localStorage.getItem("ticketsRain"), null) === "enabled";
         const messageTicketId = payload.ticketId ?? payload.ticket?.id;
+        // WABA: o cliente escreveu — o texto do atendente que esperava para juntar sai
+        // agora, antes da resposta dele (lib/waba-agent-grouping; sem grupo, nada acontece).
+        if (payload.fromMe === false && messageTicketId != null) notifyWabaAgentGroupInbound(messageTicketId);
         if (ticketsRainEnabledChat && payload.ticket) {
           const openTicketId = useTicketStore.getState().currentTicket?.id;
           const isForOpenTicket =
@@ -712,6 +694,11 @@ export function useSocketTickets() {
             contact: payload.contact,
             emailMetadata: payload.emailMetadata ?? undefined,
           };
+          // UAzapi: a citação gravada pelo servidor é a que chegou ao celular (null =
+          // saiu sem citação) e vence a da bolha provisória (lib/uazapi-quote-window).
+          const serverQuoteWins =
+            Object.prototype.hasOwnProperty.call(payload, "quotedMsg") &&
+            String(currentTicket?.channel ?? "").toLowerCase() === "uazapi";
 
           // Guard: ignore if we already processed this real message ID (double-emit protection)
           if (realId && recentMsgIds.current.has(realId)) {
@@ -741,7 +728,7 @@ export function useSocketTickets() {
                 mediaUrl: realMessage.mediaUrl || optimistic?.mediaUrl,
                 mediaType: mergedMediaType,
                 fileName: realMessage.fileName || optimistic?.fileName,
-                quotedMsg: realMessage.quotedMsg || optimistic?.quotedMsg,
+                quotedMsg: serverQuoteWins ? realMessage.quotedMsg : (realMessage.quotedMsg || optimistic?.quotedMsg),
                 dataJson: realMessage.dataJson || optimistic?.dataJson,
                 ack: Math.max(realMessage.ack ?? 0, optimistic?.ack ?? 0) || undefined,
               };
@@ -761,7 +748,9 @@ export function useSocketTickets() {
               // tardio do MESMO idFront é legítimo.)
               const currentMsgs = useTicketStore.getState().messages;
               const pendingOptimistics = currentMsgs.filter(
-                (m) => m.id.startsWith("front-") && m.fromMe && m.ack !== -1
+                // O balão do texto que espera para juntar (WABA) também fica fora: ainda
+                // não saiu, e um eco de outra mensagem o trocaria (sumiria o texto).
+                (m) => m.id.startsWith("front-") && m.fromMe && m.ack !== -1 && !m.groupingPending
               );
               // 1) Try exact body match (text messages)
               const byBody = pendingOptimistics.find((m) => m.body === realMessage.body && !!m.body);
@@ -776,7 +765,7 @@ export function useSocketTickets() {
                   mediaUrl: realMessage.mediaUrl || optimistic.mediaUrl,
                   mediaType: realMessage.mediaType || optimistic.mediaType,
                   fileName: realMessage.fileName || optimistic.fileName,
-                  quotedMsg: realMessage.quotedMsg || optimistic.quotedMsg,
+                  quotedMsg: serverQuoteWins ? realMessage.quotedMsg : (realMessage.quotedMsg || optimistic.quotedMsg),
                   dataJson: realMessage.dataJson || optimistic.dataJson,
                   ack: Math.max(realMessage.ack ?? 0, optimistic.ack ?? 0) || undefined,
                 };
@@ -798,7 +787,13 @@ export function useSocketTickets() {
         const isWindowFocused =
           typeof document !== "undefined" && typeof document.hasFocus === "function" && document.hasFocus();
         const suppressSoundForActiveChat = isForCurrentTicket && isWindowFocused;
-        if (!payload.fromMe && !suppressSoundForActiveChat && messageTicketId != null) {
+        // Nota do cliente num atendimento fechado: sem som, aviso do navegador nem sino
+        // (lib/evaluation-score). A bolha e a última mensagem do card seguem atualizando.
+        const isClosedRatingReply = isClosedTicketRatingReply(
+          payload,
+          useAuthStore.getState().getConfigValue("ratingMaxScore"),
+        );
+        if (!payload.fromMe && !suppressSoundForActiveChat && messageTicketId != null && !isClosedRatingReply) {
           // Gate de visibilidade: o som/notif sistema só toca quando o usuário pode ver o ticket
           // (respeita fila, whatsappAllowed, NotViewTicketsChatBot, DirectTicketsToWallets, etc.).
           // Antes, o gate era apenas `userId === me || !userId`, o que deixava o som tocar
@@ -818,6 +813,8 @@ export function useSocketTickets() {
             const suppressBotNotif =
               useAuthStore.getState().getConfigValue("notifyOnlyHumanTickets") === "enabled" &&
               isTicketInBotFlow(payload.ticket as { chatFlowId?: number | null; queueId?: number | null; userId?: number | null });
+            // Som desligado pelo usuário no botão do topo: popup sem som do sistema.
+            const isGroupMessage = isGroupTicketPayload(payload.ticket);
             if (!suppressBotNotif && notificationSilenced && typeof Notification !== "undefined" && Notification.permission === "granted") {
               const liveState = useLiveModeStore.getState();
               const isLive = liveState.envEnabled && liveState.active;
@@ -831,13 +828,14 @@ export function useSocketTickets() {
                 body: notifBody,
                 icon: getPwaIconUrl("icon-192x192.png"),
                 tag: "zpro-notification",
+                ...(isNotificationSoundMutedForMe({ group: isGroupMessage }) ? { silent: true } : {}),
               });
             }
  // Front legado — toca áudio se não estiver gravando e notificação não estiver silenciada
             if (!suppressBotNotif && notificationSilenced) {
               const recording = safeJsonParse(localStorage.getItem("recording"), false);
               if (!recording) {
-                playNotificationSound(getNotificationSoundUrl("ticket", soundTimestampsRef.current.ticket || undefined));
+                playNotificationSound(getNotificationSoundUrl("ticket", soundTimestampsRef.current.ticket || undefined), { group: isGroupMessage });
               }
             }
           }
@@ -851,7 +849,9 @@ export function useSocketTickets() {
           return;
         }
         // Update only the relevant ticket's lastMessage in-store — avoids full setTickets re-render
-        if (messageTicketId != null) {
+        // Divisória de transferência não vira prévia do card nem o sobe: o ticket:update do
+        // servidor traz a prévia certa (docs/PLANO_HISTORICO_TRANSFERENCIAS_ATENDIMENTO.md 5.9).
+        if (messageTicketId != null && payload.mediaType !== "transfer") {
           // Gate de filtro de UI: ticket fora do filtro atualiza lastMessage mas
           // NAO bumpa updatedAt — evita re-flutuar pro topo da lista filtrada.
           // Se o usuario limpar o filtro, o lastMessage ja esta correto; quando o ticket
@@ -866,6 +866,12 @@ export function useSocketTickets() {
           };
           if (bumpsUpdatedAt) {
             lastMessagePatch.updatedAt = new Date().toISOString();
+            // Data da última mensagem gravada pelo servidor (ticket aninhado do chat:create):
+            // selo do card e ordem da lista com "Listar atendimentos pela última mensagem".
+            const nestedLastMessageAt = (payload.ticket as { lastMessageAt?: unknown } | undefined)?.lastMessageAt;
+            if ((typeof nestedLastMessageAt === "number" || typeof nestedLastMessageAt === "string") && Number(nestedLastMessageAt) > 0) {
+              lastMessagePatch.lastMessageAt = nestedLastMessageAt;
+            }
           }
           // Janela 24h (WABA/BSP/IG/Messenger): mensagem inbound do cliente REABRE a janela.
           // O backend já gravou lastMessageReceived e o inclui no ticket do payload de
@@ -944,7 +950,7 @@ export function useSocketTickets() {
           }
         }
         // Sync notification badge: add/update entry for new unread message (aplicando filtros de visibilidade)
-        if (!payload.fromMe && !isForCurrentTicket && messageTicketId != null) {
+        if (!payload.fromMe && !isForCurrentTicket && messageTicketId != null && !isClosedRatingReply) {
           // Fail-closed: payload sem ticket aninhado não permite avaliar visibilidade e
           // canUserSeeTicket devolveria true para o tenant inteiro (ver hasNestedTicket).
           const ticketForCheck = ticketVisibilityFromChatPayload(payload.ticket, messageTicketId);
@@ -1012,7 +1018,7 @@ export function useSocketTickets() {
           const soundEnabled = useAuthStore.getState().getConfigValue("notificationSilenced") === "enabled";
           const recording = safeJsonParse(localStorage.getItem("recording"), false);
           if (soundEnabled && !recording) {
-            playNotificationSound(getNotificationSoundUrl("ticket", soundTimestampsRef.current.ticket || undefined));
+            playNotificationSound(getNotificationSoundUrl("ticket", soundTimestampsRef.current.ticket || undefined), { group: isGroupTicketPayload(tkNotif) });
           }
         }
         return;
@@ -1043,10 +1049,19 @@ export function useSocketTickets() {
         | {
             id?: number;
             profilePicUrl?: string | null;
+            telegramId?: string | number | null;
             tags?: { id: number; tag?: string; name?: string; color?: string }[];
           }
         | undefined;
       if (contact?.id == null) return;
+      // Telegram ligado pelo link de convite: o botão "Convidar para o Telegram" do
+      // atendimento some na hora. Campo presente e vazio = Telegram tirado do cadastro
+      // (o botão volta); evento sem o campo não mexe.
+      const telegramId: string | null | undefined = !Object.prototype.hasOwnProperty.call(contact, "telegramId")
+        ? undefined
+        : contact.telegramId != null && String(contact.telegramId) !== ""
+          ? String(contact.telegramId)
+          : null;
       const tags = Array.isArray(contact.tags)
         ? contact.tags
             .filter((tg, i, arr) => tg?.id != null && arr.findIndex((x) => x?.id === tg.id) === i)
@@ -1063,8 +1078,23 @@ export function useSocketTickets() {
         typeof contact.profilePicUrl === "string" && contact.profilePicUrl.startsWith("http")
           ? contact.profilePicUrl
           : undefined;
-      if (!tags && !profilePicUrl) return;
       const state = useTicketStore.getState();
+      // Limpeza só conta quando o store tinha o Telegram: sem isso, todo contact:update
+      // de contato sem Telegram atualizaria os tickets dele à toa.
+      const hadTelegram =
+        state.tickets.some((tk) => tk.contact?.id === contact.id && !!tk.contact?.telegramId) ||
+        (state.currentTicket?.contact?.id === contact.id && !!state.currentTicket.contact?.telegramId);
+      const telegramChange = telegramId === null && !hadTelegram ? undefined : telegramId;
+      if (!tags && !profilePicUrl && telegramChange === undefined) return;
+      // Foto de quem mandou no grupo: a bolha lê a foto de `msg.contact`, e o participante
+      // nunca é o contato do atendimento aberto — sem isto, só com F5.
+      if (profilePicUrl && state.messages.some((m) => m.contact?.id === contact.id && m.contact?.profilePicUrl !== profilePicUrl)) {
+        useTicketStore.setState((s) => ({
+          messages: s.messages.map((m) =>
+            m.contact && m.contact.id === contact.id ? { ...m, contact: { ...m.contact, profilePicUrl } } : m
+          ),
+        }));
+      }
       const affected = state.tickets.filter((tk) => tk.contact?.id === contact.id).map((tk) => tk.id);
       if (state.currentTicket?.contact?.id === contact.id && !affected.includes(state.currentTicket.id)) {
         affected.push(state.currentTicket.id);
@@ -1080,6 +1110,7 @@ export function useSocketTickets() {
                   ...tk.contact,
                   ...(tags ? { tags } : {}),
                   ...(profilePicUrl ? { profilePicUrl } : {}),
+                  ...(telegramChange !== undefined ? { telegramId: telegramChange } : {}),
                 },
               }
             : {}),
@@ -1115,8 +1146,7 @@ export function useSocketTickets() {
       socket.off(`${tenantId}:contactList`, handleContactList);
       socket.io.off("reconnect_attempt", onReconnectAttempt);
       socket.io.off("reconnect", onReconnect);
-      if (debounceTimer.current) clearTimeout(debounceTimer.current);
       initialized.current = false;
     };
-  }, [isAuthenticated, tenantId, userId, profile, socketModelOptimized, debouncedRefreshTickets, addTicketMessage, addNotification, signalTicketListRefresh, signalCurrentTicketRefresh, updateTicket]);
+  }, [isAuthenticated, tenantId, userId, profile, socketModelOptimized, addTicketMessage, addNotification, signalTicketListRefresh, signalCurrentTicketRefresh, updateTicket]);
 }

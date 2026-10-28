@@ -1,7 +1,5 @@
 "use client";
 
-import { formatCurrencyBRL } from "@/lib/format";
-
 import React, { useState, useEffect, useRef } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -17,6 +15,7 @@ import { usePageAccess } from "@/hooks/use-page-access";
 import { AccessDenied } from "@/components/layout/access-denied";
 import { PageHeader } from "@/components/layout/page-header";
 import { FunnelDashboardCharts } from "@/components/funil/funnel-dashboard-charts";
+import { useRegion } from "@/hooks/use-region";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -239,6 +238,8 @@ export default function FunilDashboardPage() {
     total: 0, open: 0, won: 0, lost: 0, avgTicket: 0, winRate: 0, totalValue: 0, wonValue: 0, etapas: [],
   });
   const requestRef = useRef(0);
+  // Valores das oportunidades são gravados sem moeda: aparecem na moeda e no formato do país da empresa.
+  const { formatMoney } = useRegion();
 
   const range = resolveRange(period, customFrom, customTo);
   const customIncomplete = period === "custom" && !range;
@@ -372,7 +373,7 @@ export default function FunilDashboardPage() {
     },
     {
       label: t("avgTicket"),
-      value: `R$ ${stats.avgTicket.toFixed(2)}`,
+      value: formatMoney(stats.avgTicket),
       icon: DollarSign,
       color: "text-emerald-500",
     },
@@ -488,7 +489,7 @@ export default function FunilDashboardPage() {
         </div>
       )}
 
-      {/* Financial totals — total oportunidades R$ and total ganhos R$ */}
+      {/* Financial totals — total oportunidades and total ganhos (moeda da empresa) */}
       {!loading && (
         <div className="grid gap-4 sm:grid-cols-2">
           <Card className="border-2 border-amber-200 dark:border-amber-800">
@@ -500,7 +501,7 @@ export default function FunilDashboardPage() {
             </CardHeader>
             <CardContent className="px-5 pb-4">
               <div className="text-2xl font-bold text-amber-600">
-                {formatCurrencyBRL(stats.totalValue)}
+                {formatMoney(stats.totalValue)}
               </div>
               <p className="text-xs text-muted-foreground mt-1">{t("totalValueDesc", { count: stats.total })}</p>
             </CardContent>
@@ -514,7 +515,7 @@ export default function FunilDashboardPage() {
             </CardHeader>
             <CardContent className="px-5 pb-4">
               <div className="text-2xl font-bold text-green-600">
-                {formatCurrencyBRL(stats.wonValue)}
+                {formatMoney(stats.wonValue)}
               </div>
               <p className="text-xs text-muted-foreground mt-1">{t("wonValueDesc", { count: stats.won })}</p>
             </CardContent>
@@ -539,7 +540,7 @@ export default function FunilDashboardPage() {
                 <div className="flex items-center justify-between">
                   <span className="text-sm font-medium truncate">{etapa.name}</span>
                   <span className="text-sm font-bold text-green-600 ml-2 shrink-0">
-                    R$ {etapa.value.toFixed(2)}
+                    {formatMoney(etapa.value)}
                   </span>
                 </div>
                 <div className="w-full bg-muted rounded-full h-2">
@@ -619,6 +620,7 @@ interface AggregateCardProps {
 }
 
 function AggregateCard({ title, empty, icon, rows }: AggregateCardProps) {
+  const { formatMoney } = useRegion();
   return (
     <Card>
       <CardHeader className="pb-2 pt-4 px-5">
@@ -636,7 +638,7 @@ function AggregateCard({ title, empty, icon, rows }: AggregateCardProps) {
                 <span className="truncate">{row.label}</span>
               </span>
               <span className="ml-2 shrink-0 tabular-nums text-muted-foreground">
-                {row.count} · {formatCurrencyBRL(row.value)}
+                {row.count} · {formatMoney(row.value)}
               </span>
             </div>
             <div className="w-full bg-muted rounded-full h-1.5">

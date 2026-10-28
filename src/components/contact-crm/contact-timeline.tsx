@@ -3,9 +3,10 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ElementType, type ReactNode } from "react";
 import { useTranslations } from "next-intl";
 import {
-  Activity, AlertTriangle, ArrowLeftRight, Bot, CalendarClock, CircleCheck, Clock, Handshake, Hash, History, Kanban,
-  ListOrdered, ListTodo, Megaphone, MessageSquarePlus, MessagesSquare, Paperclip, Phone, PhoneIncoming, PhoneOutgoing,
-  RotateCcw, RotateCw, Smartphone, SquareCheckBig, Star, StickyNote, Tag, Target, UserCheck, UserPen, Wallet,
+  Activity, AlertTriangle, ArrowLeftRight, Bot, CalendarClock, CircleCheck, ClipboardList, Clock, Globe, Handshake, Hash, History, Kanban,
+  Link2Off, ListOrdered, ListTodo, Megaphone, MessageSquarePlus, MessagesSquare, Paperclip, Phone, PhoneIncoming,
+  PhoneOutgoing, RotateCcw, RotateCw, Send, Smartphone, SquareCheckBig, Star, StickyNote, Tag, Target, Unlink, UserCheck,
+  UserPen, Wallet,
 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -13,7 +14,9 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { EmptyState } from "@/components/layout/empty-state";
 import { useLiveMode } from "@/hooks/use-live-mode";
-import { formatCurrencyBRL, formatDate, formatTime } from "@/lib/format";
+import { useRegion } from "@/hooks/use-region";
+import { formatDate, formatTime } from "@/lib/format";
+import { formatTaskDeadline } from "@/lib/task-deadline";
 import { cn } from "@/lib/utils";
 import {
   loadContactTimeline, type ContactTimelineGroup, type ContactTimelineItem,
@@ -61,6 +64,12 @@ const OPPORTUNITY_STATUSES = new Set(["open", "win", "lose"]);
 const CONTACT_FIELDS = new Set([
   "name", "number", "email", "cpf", "birthdayDate", "businessName", "firstName", "lastName",
   "cep", "logradouro", "numeroEndereco", "complemento", "bairro", "cidade", "estado",
+]);
+// Canal do contato que veio de anúncio (evento ad_referral); canal desconhecido fica sem meta.
+const AD_REFERRAL_CHANNEL_KEYS = new Map([
+  ["instagram", "events.ad_referral_instagram"],
+  ["messenger", "events.ad_referral_messenger"],
+  ["waba", "events.ad_referral_waba"],
 ]);
 
 type Translate = ReturnType<typeof useTranslations>;
@@ -147,23 +156,22 @@ function safeColor(value: unknown): string | null {
   return null;
 }
 
-/** Prazo de tarefa é data pura (mesma leitura de /tarefas): nunca escorrega um dia pelo fuso. */
-function formatDeadline(value: unknown): string | null {
-  const day = (asText(value) ?? "").slice(0, 10);
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return null;
-  const [year, month, date] = day.split("-").map(Number);
-  return formatDate(new Date(year, month - 1, date));
-}
-
 function groupOf(item: ContactTimelineItem): ContactTimelineGroup | null {
   const type = String(item.type || "");
   switch (item.source) {
     case "event":
       if (type.startsWith("opportunity_")) return "funnel";
-      if (type.startsWith("tag_") || type === "kanban_changed" || type === "wallet_changed" || type === "contact_updated") {
+      if (
+        type.startsWith("tag_") || type === "kanban_changed" || type === "wallet_changed" || type === "contact_updated" ||
+        type === "channel_linked" || type === "channel_link_conflict" ||
+        type === "webchat_linked" || type === "webchat_unlinked"
+      ) {
         return "contact";
       }
-      if (type.startsWith("ai_agent_") || type === "ticket_reopened") return "tickets";
+      // Formulário enviado pelo contato (PLANO_FORMULARIOS_ATENDIMENTO D19): abre ou entra
+      // num atendimento, por isso fica no filtro "Atendimentos".
+      if (type.startsWith("ai_agent_") || type === "ticket_reopened" || type === "form_submitted") return "tickets";
+      if (type === "ad_referral") return "campaigns";
       return null;
     case "log":
     case "system":
@@ -191,8 +199,14 @@ function iconOf(item: ContactTimelineItem): ElementType {
       if (type === "kanban_changed") return Kanban;
       if (type === "wallet_changed") return Wallet;
       if (type === "contact_updated") return UserPen;
+      if (type === "channel_linked") return Send;
+      if (type === "channel_link_conflict") return Link2Off;
+      if (type === "webchat_linked") return Globe;
+      if (type === "webchat_unlinked") return Unlink;
       if (type.startsWith("ai_agent_")) return Bot;
       if (type === "ticket_reopened") return RotateCcw;
+      if (type === "ad_referral") return Megaphone;
+      if (type === "form_submitted") return ClipboardList;
       return Activity;
     case "log":
       switch (type) {
@@ -282,6 +296,8 @@ export function ContactTimeline({
     (g) => (g !== "funnel" || showFunnel) && (g !== "calls" || showCalls) && (g !== "relationship" || showRelationship)
   );
   const t = useTranslations("contactTimeline");
+  // Valor de oportunidade é dinheiro de negócio: moeda e formato da Região da empresa.
+  const { formatMoney } = useRegion();
   const { isLiveMode } = useLiveMode();
   const blur = isLiveMode;
 
@@ -402,7 +418,7 @@ export function ContactTimeline({
 
   const moneySegment = (value: unknown): Segment => {
     const n = asNumber(value);
-    return n == null ? { text: emptyValue } : { text: formatCurrencyBRL(n), sensitive: true };
+    return n == null ? { text: emptyValue } : { text: formatMoney(n), sensitive: true };
   };
 
   const statusLabel = (value: unknown): string | null => {
@@ -550,6 +566,51 @@ export function ContactTimeline({
             }
             break;
           }
+          case "channel_linked": {
+            // Link de convite do Telegram usado (origem "mensagem do cliente"). Outro
+            // cadastro só do Telegram que não pôde ser juntado pede a mescla manual; com
+            // cadastros juntados, a quantidade; senão só o vínculo.
+            const merged = asNumber(data.merged);
+            if (data.pendingMerge === true) content.lines.push(t("events.channel_linked_pending"));
+            else if (merged != null && merged > 0) content.lines.push(t("events.channel_linked_merged", { count: merged }));
+            else content.lines.push(t("events.channel_linked"));
+            break;
+          }
+          case "channel_link_conflict": {
+            // O mesmo Telegram já está em outro cadastro com telefone: nada foi ligado.
+            // Id em texto (número formatado ganharia separador de milhar).
+            // role "holder" = este cadastro já tem o Telegram e o convite era do outro;
+            // sem role (evento antigo) ou "invited" = este cadastro foi o convidado.
+            const otherId = asNumber(data.otherContactId);
+            const conflictKey =
+              data.role === "holder" ? "events.channel_link_conflict_holder" : "events.channel_link_conflict";
+            content.lines.push(
+              t(conflictKey, { otherContactId: otherId != null ? String(otherId) : emptyValue })
+            );
+            break;
+          }
+          case "webchat_linked":
+            // O cliente abriu o WebChat pelo link de convite (PLANO_WEBCHAT_LINK_CONVITE D10):
+            // as mensagens de lá passam a cair neste cadastro.
+            content.lines.push(t("events.webchat_linked"));
+            break;
+          case "webchat_unlinked": {
+            // "Desligar navegadores do WebChat" no cadastro (D16): quantos foram desligados.
+            const removed = asNumber(data.count);
+            content.lines.push(t("events.webchat_unlinked", { count: removed != null && removed > 0 ? removed : 0 }));
+            break;
+          }
+          case "ad_referral": {
+            // Contato que chegou por anúncio da Meta. O título é do anúncio da empresa, não
+            // dado do cliente: fica sem o borrão do modo apresentação.
+            const adTitle = asText(data.adTitle);
+            content.lines.push(
+              adTitle ? t("events.ad_referral", { title: adTitle }) : t("events.ad_referral_untitled")
+            );
+            const channelKey = AD_REFERRAL_CHANNEL_KEYS.get(asText(data.channel)?.toLowerCase() ?? "");
+            if (channelKey) content.meta.push(t(channelKey));
+            break;
+          }
           case "ai_agent_armed":
           case "ai_agent_released":
           case "ai_agent_blocked_contact":
@@ -559,6 +620,11 @@ export function ContactTimeline({
             if (agentName) content.meta.push(agentName);
             break;
           }
+          case "form_submitted":
+            // Nome do formulário é da empresa, não dado do cliente: fica sem o borrão do
+            // modo apresentação (as respostas ficam no cartão do atendimento).
+            content.lines.push(t("events.form_submitted", { name: asText(data.formName) ?? unnamed }));
+            break;
           default:
             content.lines.push(t("unknown"));
         }
@@ -617,7 +683,8 @@ export function ContactTimeline({
       case "task": {
         if (type === "task_created" || type === "task_completed") {
           content.lines.push(msg(type, { name: { text: asText(data.name) ?? unnamed, sensitive: true } }));
-          const deadline = formatDeadline(data.limitDate);
+          // Dia inteiro pelo dia civil gravado; com hora (limitHasTime), data e hora locais.
+          const deadline = formatTaskDeadline({ limitDate: asText(data.limitDate), limitHasTime: data.limitHasTime === true });
           if (deadline) {
             content.details.push({ text: deadline });
             content.detailsLead = <CalendarClock aria-hidden className="mr-1 inline-block h-3 w-3 align-[-2px]" />;

@@ -22,9 +22,12 @@ import {
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
+import {
+  Tooltip, TooltipContent, TooltipProvider, TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { EmptyState } from "@/components/layout/empty-state";
 import { BusinessHoursEditor } from "@/components/business-hours-editor";
-import { Search, Plus, Pencil, Trash2, ListOrdered, Info, Loader2 } from "lucide-react";
+import { Search, Plus, Pencil, Trash2, ListOrdered, Info, Loader2, HelpCircle } from "lucide-react";
 import { toast } from "sonner";
 import {
   fetchQueues,
@@ -66,6 +69,87 @@ function makeQueueSchema(msgs: { nameRequired: string; colorRequired: string; li
 }
 
 type QueueForm = z.infer<ReturnType<typeof makeQueueSchema>>;
+
+// Horário salvo sem algum dos 7 dias (gravado pela API ou dado antigo): a tela trocava
+// o horário inteiro pelo padrão e o Salvar apagava os dias que existiam. Mesmo critério
+// de /usuarios: o dia que existe fica como veio (só campo ausente é completado, como a
+// tela sempre fez), o que falta entra com o padrão de fila nova, de domingo a sábado.
+// Sem lista, o padrão inteiro, como antes.
+function withAllBusinessDays(raw: unknown, defaults: BusinessHour[]): BusinessHour[] {
+  if (!Array.isArray(raw) || raw.length === 0) return defaults;
+  const entries = raw as Array<{ day?: unknown } | null | undefined>;
+  return defaults.map((fallback): BusinessHour => {
+    // Mesma busca do servidor (dia numérico, a primeira que casa). Dia gravado como
+    // texto ("1") só entra na falta dela, já como número: assim o servidor o acha.
+    const found =
+      entries.find((h) => h?.day === fallback.day) ??
+      entries.find((h) => {
+        const day = h?.day;
+        return typeof day === "string" && /^\d+$/.test(day.trim()) && Number(day) === fallback.day;
+      });
+    if (!found) return fallback;
+    const bh = found as Partial<BusinessHour>;
+    return {
+      day: fallback.day,
+      label: bh.label ?? fallback.label,
+      type: bh.type ?? "O",
+      hr1: bh.hr1 ?? "08:00",
+      hr2: bh.hr2 ?? "12:00",
+      hr3: bh.hr3 ?? "14:00",
+      hr4: bh.hr4 ?? "18:00",
+    };
+  });
+}
+
+// Minutos do dia de um horário "HH:mm" (ou "H:mm"), no mesmo formato que o servidor
+// lê ao conferir o horário da fila; null = hora vazia ou ilegível.
+function parseShiftMinutes(value: string | null | undefined): number | null {
+  const match = /^(\d{1,2}):(\d{1,2})\s*$/.exec(String(value ?? ""));
+  if (!match) return null;
+  const hours = Number(match[1]);
+  const minutes = Number(match[2]);
+  if (hours > 23 || minutes > 59) return null;
+  return hours * 60 + minutes;
+}
+
+// Ajuda do turno que vira a noite. O tooltip não abre por toque (o Radix fecha no
+// clique), então o clique abre e tocar fora fecha: sem isso, no celular a explicação
+// nunca apareceria.
+function OvernightShiftTip({ text }: { text: string }) {
+  const [open, setOpen] = useState(false);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  return (
+    <TooltipProvider delayDuration={150}>
+      <Tooltip open={open} onOpenChange={setOpen}>
+        <TooltipTrigger asChild>
+          <button
+            ref={triggerRef}
+            type="button"
+            aria-label={text}
+            onPointerDown={(e) => e.preventDefault()}
+            onClick={(e) => {
+              e.preventDefault();
+              setOpen(true);
+            }}
+            className="inline-flex shrink-0 items-center text-muted-foreground hover:text-foreground"
+          >
+            <HelpCircle className="h-3.5 w-3.5" />
+          </button>
+        </TooltipTrigger>
+        <TooltipContent
+          side="top"
+          collisionPadding={16}
+          className="max-w-[18rem] whitespace-normal leading-relaxed"
+          onPointerDownOutside={(e) => {
+            if (triggerRef.current?.contains(e.target as Node)) e.preventDefault();
+          }}
+        >
+          {text}
+        </TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
+  );
+}
 
 export default function FilasPage() {
   const t = useTranslations("filasPage");
@@ -176,21 +260,7 @@ export default function FilasPage() {
       distributionStrategy: q.distributionStrategy ?? "B",
     });
     setIsActive(q.isActive ?? true);
-    if (q.businessHours && q.businessHours.length === 7) {
-      // Ensure all required fields are present (backward compat with old single start/end format)
-      const normalized = q.businessHours.map((bh, i) => ({
-        day: bh.day ?? i,
-        label: bh.label ?? DAY_LABELS[bh.day ?? i],
-        type: bh.type ?? "O",
-        hr1: bh.hr1 ?? "08:00",
-        hr2: bh.hr2 ?? "12:00",
-        hr3: bh.hr3 ?? "14:00",
-        hr4: bh.hr4 ?? "18:00",
-      })) as BusinessHour[];
-      setBusinessHours(normalized);
-    } else {
-      setBusinessHours(getDefaultBusinessHours());
-    }
+    setBusinessHours(withAllBusinessDays(q.businessHours, getDefaultBusinessHours()));
     setDialogOpen(true);
   };
 
@@ -204,29 +274,32 @@ export default function FilasPage() {
     setDialogOpen(false);
   };
 
-  const timeToMinutes = (time: string) => {
-    const [h, m] = time.split(":").map(Number);
-    return h * 60 + m;
-  };
-
   const hasEmptyTime = (bh: BusinessHour) => {
     if (bh.type !== "H") return false;
     return !bh.hr1 || !bh.hr2 || !bh.hr3 || !bh.hr4;
   };
 
+  // Hora ilegível fica com o aviso de período inválido.
   const hasOverlap = (bh: BusinessHour) => {
     if (bh.type !== "H") return false;
     if (hasEmptyTime(bh)) return false;
-    return timeToMinutes(bh.hr2) >= timeToMinutes(bh.hr3);
+    const end1 = parseShiftMinutes(bh.hr2);
+    const start2 = parseShiftMinutes(bh.hr3);
+    if (end1 === null || start2 === null) return false;
+    return end1 >= start2;
   };
 
+  // Início maior que o fim é turno que vira a noite (22:00–02:00), e o servidor o
+  // entende, no recebimento e na distribuição automática: naquele dia da semana, da
+  // meia-noite até o fim e do início até o fim do dia. Continuam recusados o
+  // intervalo vazio (início igual ao fim) e a hora ilegível (antes um "abc" passava
+  // e a fila ficava fechada naquele turno sem aviso).
   const hasInvalidPeriod = (bh: BusinessHour) => {
     if (bh.type !== "H") return false;
     if (hasEmptyTime(bh)) return false;
-    return (
-      timeToMinutes(bh.hr1) >= timeToMinutes(bh.hr2) ||
-      timeToMinutes(bh.hr3) >= timeToMinutes(bh.hr4)
-    );
+    const [start1, end1, start2, end2] = [bh.hr1, bh.hr2, bh.hr3, bh.hr4].map(parseShiftMinutes);
+    if (start1 === null || end1 === null || start2 === null || end2 === null) return true;
+    return start1 === end1 || start2 === end2;
   };
 
   const onSubmit = async (values: QueueForm) => {
@@ -509,12 +582,16 @@ export default function FilasPage() {
             {/* Business Hours */}
             <div className="space-y-3">
               <div>
-                <Label className="text-base">{t("businessHoursLabel")}</Label>
+                <div className="flex items-center gap-1.5">
+                  <Label className="text-base">{t("businessHoursLabel")}</Label>
+                  <OvernightShiftTip text={t("overnightShiftTip")} />
+                </div>
                 <p className="text-sm text-muted-foreground mt-1">
                   {t("businessHoursDescription")}
                 </p>
               </div>
-              <BusinessHoursEditor value={businessHours} onChange={setBusinessHours} />
+              {/* Mesmas regras de turno do Salvar (hasInvalidPeriod/hasOverlap acima). */}
+              <BusinessHoursEditor value={businessHours} onChange={setBusinessHours} allowOvernight />
             </div>
 
             {/* Auto-Distribuicao por Fila (feature opt-in) */}

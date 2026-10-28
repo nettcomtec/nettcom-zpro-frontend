@@ -39,7 +39,21 @@ export interface PublicEventType {
   formFields: PublicBookingFormField[];
 }
 
+/**
+ * Região EFETIVA da empresa dona da página (país, moeda e idioma). Vem no topo das
+ * respostas da página e do gerenciar; ausente = backend antigo (a página segue como
+ * antes: pt, BRL e país pelo fuso). `languageConfigured` = a empresa (ou o padrão
+ * geral) define idioma — só então o idioma entra na escolha da página.
+ */
+export interface PublicBookingRegion {
+  country: string;
+  currency: string;
+  language: string;
+  languageConfigured: boolean;
+}
+
 export interface PublicBookingPage {
+  region?: PublicBookingRegion;
   page: {
     slug: string;
     title: string;
@@ -114,6 +128,7 @@ export async function createPublicBooking(
 // --- Gerenciamento por token (F5) ---
 
 export interface ManageBooking {
+  region?: PublicBookingRegion;
   id: number;
   title: string;
   startAt: string;

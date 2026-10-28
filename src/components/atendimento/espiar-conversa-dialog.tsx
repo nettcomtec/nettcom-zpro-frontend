@@ -190,6 +190,8 @@ export function EspiarConversaDialog({
         isForwarded?: boolean;
         isStatusReply?: boolean;
         createdAt?: string;
+        // Divisória de transferência, cartão de formulário, anúncio de origem e afins leem daqui.
+        dataJson?: string;
       };
       const msgTicketId = payload.ticketId ?? (payload.ticket as { id?: number } | undefined)?.id;
       if (msgTicketId !== ticket.id) return;
@@ -207,6 +209,7 @@ export function EspiarConversaDialog({
         isForwarded: payload.isForwarded,
         isStatusReply: payload.isStatusReply,
         createdAt: payload.createdAt ?? new Date().toISOString(),
+        dataJson: payload.dataJson,
       });
 
       setMessages((prev) => {

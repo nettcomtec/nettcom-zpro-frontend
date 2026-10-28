@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { useForm } from "react-hook-form";
+import { useForm, useWatch } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import {
@@ -21,7 +21,7 @@ import {
 import {
   Collapsible, CollapsibleContent, CollapsibleTrigger,
 } from "@/components/ui/collapsible";
-import { X, Plus, Trash2, RefreshCw, Bot, Loader2, ChevronDown, AtSign } from "lucide-react";
+import { X, Plus, Trash2, RefreshCw, Bot, Loader2, ChevronDown, AtSign, AlertTriangle } from "lucide-react";
 import { toast } from "sonner";
 import { useTranslations } from "next-intl";
 import {
@@ -34,7 +34,37 @@ import { fetchWallets, type Wallet } from "@/services/wallets";
 import { fetchQueues, type Queue } from "@/services/queues";
 import { cn } from "@/lib/utils";
 import { formatBirthdayInput } from "@/lib/birthday-format";
+import { isTagNotFound, parseContactFieldError, getBackendErrorCode } from "@/lib/backend-error-code";
 import { ContactAddressFields, addressPayloadFrom, isAddressBlockDirty } from "@/components/contatos/contact-address-fields";
+import { useRegion } from "@/hooks/use-region";
+import { examplePhone, looksLikeMissingDialCode } from "@/lib/region";
+import { getBrPhoneVariants } from "@/lib/phone-utils";
+
+// Ids que o `number` pode carregar sem ser telefone: o LID e os ids de outros canais (contato
+// antigo do Telegram com number = telegramId etc. — mesma regra D18 do backend,
+// helpers/ContactChannelIdentityZPRO.ts). Nesses o aviso de "falta o código do país" enganaria.
+const NON_PHONE_ID_FIELDS = [
+  "lid", "telegramId", "messengerId", "webchatId", "instagramPK",
+  "hubSms", "hubTelegram", "hubWhatsapp", "hubWidget", "hubWebchat", "hubEmail",
+  "hubMercadolivre", "hubTiktok", "hubLikedin", "hubOlx", "hubIfood", "hubTwitter", "hubYoutube",
+  "mercadolivreId", "linkedinId", "youtubeChannelId", "tiktokId",
+] as const;
+
+// Mesmo telefone para o servidor: mesmos digitos ou variante do 9o digito.
+function isSameLoadedPhone(typed: string, loaded: string): boolean {
+  if (!typed || !loaded) return false;
+  return typed === loaded || getBrPhoneVariants(typed).includes(loaded) || getBrPhoneVariants(loaded).includes(typed);
+}
+
+function loadedNumberIsNotPhone(c: Record<string, unknown>): boolean {
+  const number = String(c.number ?? "").trim();
+  if (!number) return false;
+  if (c.isLid) return true;
+  return NON_PHONE_ID_FIELDS.some((field) => {
+    const value = c[field];
+    return value !== null && value !== undefined && String(value).trim() === number;
+  });
+}
 
 // Validation messages are set dynamically in the component via useTranslations
 const contactSchema = z.object({
@@ -84,6 +114,16 @@ const contactSchema = z.object({
 
 type ContactForm = z.infer<typeof contactSchema>;
 
+// Mesma lista e regra de /contatos: ids de canal, `lid` e `isLid` só vão no PUT quando o
+// atendente os mudou nesta abertura (aí "" apaga). Sem mexer ficam fora, e um id ganho no
+// servidor com o diálogo aberto ("Atualizar LID", convite do Telegram) não é sobrescrito.
+const CONTACT_EDIT_CHANNEL_FIELDS: readonly (keyof ContactForm)[] = [
+  "lid", "isLid", "messengerId", "instagramPK", "hubWhatsapp",
+  "telegramId", "webchatId", "mercadolivreId", "linkedinId", "youtubeChannelId", "tiktokId",
+  "hubMercadolivre", "hubTiktok", "hubLikedin", "hubOlx", "hubYoutube", "hubIfood", "hubTwitter",
+  "hubSms", "hubTelegram", "hubWidget", "hubWebchat", "hubEmail",
+];
+
 interface ContactEditDialogProps {
   contactId: number | null;
   open: boolean;
@@ -94,6 +134,14 @@ interface ContactEditDialogProps {
 export function ContactEditDialog({ contactId, open, onClose, onSaved }: ContactEditDialogProps) {
   const t = useTranslations("contactEditDialog");
   const tErrors = useTranslations("errors");
+  const tPhone = useTranslations("phoneInput");
+  const tCommon = useTranslations("common");
+  const tContacts = useTranslations("contatosPage");
+  const contactFieldErrorText = (fieldError: NonNullable<ReturnType<typeof parseContactFieldError>>): string => {
+    const field = fieldError.labelKey ? tContacts(fieldError.labelKey) : fieldError.field;
+    return fieldError.kind === "tooLong" ? tContacts("fieldTooLong", { field }) : tContacts("fieldInvalid", { field });
+  };
+  const { country: regionCountry } = useRegion();
   const [tags, setTags] = useState<Tag[]>([]);
   const [wallets, setWallets] = useState<Wallet[]>([]);
   const [queues, setQueues] = useState<Queue[]>([]);
@@ -113,6 +161,17 @@ export function ContactEditDialog({ contactId, open, onClose, onSaved }: Contact
   // conversa sem numero.
   const [loadedHasNumber, setLoadedHasNumber] = useState(false);
   const [loadedUsername, setLoadedUsername] = useState("");
+  // `number` carregado que não é telefone (LID, id de outro canal): enquanto o campo seguir com
+  // ele, o aviso de DDI não aparece.
+  const [loadedNonPhoneNumber, setLoadedNonPhoneNumber] = useState<string | null>(null);
+  // Telegram do contato CARREGADO: apagar o campo desliga o Telegram (o envio manda "" só
+  // quando havia um — campo vazio de quem nunca teve continua fora do payload, senão um
+  // diálogo aberto antes do vínculo pelo convite apagaria o vínculo ao salvar).
+  const [loadedTelegramId, setLoadedTelegramId] = useState("");
+  // Vinculo com o WhatsApp oficial (identificador/@usuario) do contato CARREGADO: gravar
+  // outro numero apaga o vinculo no servidor (era da pessoa do numero anterior).
+  const [loadedWabaIdentity, setLoadedWabaIdentity] = useState(false);
+  const [loadedNumberDigits, setLoadedNumberDigits] = useState("");
 
   // Contato que ja tinha telefone continua exigindo o minimo — assim ninguem apaga
   // por engano o numero de quem tem. Contato que chegou sem telefone salva sem ele.
@@ -141,6 +200,26 @@ export function ContactEditDialog({ contactId, open, onClose, onSaved }: Contact
     },
   });
 
+  // Campo cru (R2 do PLANO_REGIAO_MOEDA_IDIOMA): o valor segue para o backend exatamente como
+  // digitado. Exemplo no país da empresa só com dígitos (o formato gravado no contato: alguns
+  // caminhos do backend persistem o texto sem reformatar) e aviso NÃO bloqueante quando o número
+  // parece nacional, sem o código do país.
+  const numberValue = (useWatch({ control: form.control, name: "number" }) as string | undefined) ?? "";
+  // Telegram que o contato tinha e o atendente esvaziou: aviso do efeito antes de salvar.
+  const telegramValue = (useWatch({ control: form.control, name: "telegramId" }) as string | undefined) ?? "";
+  const telegramCleared = !!loadedTelegramId && telegramValue.trim() === "";
+  const numberExample = examplePhone(regionCountry).replace(/\D/g, "");
+  const showMissingDialCode =
+    !isLidForm &&
+    !(loadedNonPhoneNumber !== null && numberValue.trim() === loadedNonPhoneNumber) &&
+    looksLikeMissingDialCode(numberValue, regionCountry);
+  // Mesma regra do servidor: so outro telefone de verdade apaga o vinculo (variante do
+  // 9o digito e numero carregado que nao e telefone — LID, id de canal — mantem).
+  const typedNumberDigits = numberValue.replace(/\D/g, "");
+  const showWabaIdentityNote =
+    loadedHasNumber && loadedWabaIdentity && loadedNonPhoneNumber === null &&
+    !!typedNumberDigits && !isSameLoadedPhone(typedNumberDigits, loadedNumberDigits);
+
   // Load tags & wallets once on mount
   useEffect(() => {
     fetchTags().then(({ data }) => setTags(Array.isArray(data) ? data : (data as { data?: Tag[] }).data ?? [])).catch(() => { toast.error(tErrors("loadFailed")); });
@@ -157,6 +236,10 @@ export function ContactEditDialog({ contactId, open, onClose, onSaved }: Contact
     setLoadFailed(false);
     setLoadedHasNumber(false);
     setLoadedUsername("");
+    setLoadedNonPhoneNumber(null);
+    setLoadedTelegramId("");
+    setLoadedWabaIdentity(false);
+    setLoadedNumberDigits("");
     fetchContact(contactId)
       .then(({ data }) => {
         if (seq !== loadSeqRef.current) return;
@@ -165,6 +248,14 @@ export function ContactEditDialog({ contactId, open, onClose, onSaved }: Contact
         setIsLidForm(!!c.isLid);
         setLoadedHasNumber(!!(c.number as string | undefined));
         setLoadedUsername((c.username as string) || "");
+        setLoadedNonPhoneNumber(loadedNumberIsNotPhone(c) ? String(c.number).trim() : null);
+        setLoadedTelegramId(c.telegramId != null ? String(c.telegramId).trim() : "");
+        // Gupshup guarda os digitos do identificador no `number` de quem chegou sem telefone
+        setLoadedWabaIdentity(
+          !!(c.bsuid || c.parentBsuid || c.username) &&
+          String(c.number ?? "").replace(/\D/g, "") !== String(c.bsuid ?? "").replace(/\D/g, "")
+        );
+        setLoadedNumberDigits(String(c.number ?? "").replace(/\D/g, ""));
         form.reset({
           name: (c.name as string) || "",
           number: (c.number as string) || "",
@@ -247,11 +338,11 @@ export function ContactEditDialog({ contactId, open, onClose, onSaved }: Contact
       toast.success(t("success.nameUpdated"));
       onSaved?.();
     } catch (err: unknown) {
-      const backendMsg =
-        (err as { response?: { data?: { error?: string; message?: string } } })?.response?.data?.error
-        ?? (err as { response?: { data?: { error?: string; message?: string } } })?.response?.data?.message;
-      if (backendMsg) {
-        toast.error(backendMsg);
+      // Só códigos conhecidos viram mensagem própria; o resto (500, validação em inglês)
+      // cai no texto traduzido da tela.
+      const fieldError = parseContactFieldError(err);
+      if (fieldError) {
+        toast.error(contactFieldErrorText(fieldError));
       } else {
         toast.error(t("errors.updateName"));
       }
@@ -266,19 +357,23 @@ export function ContactEditDialog({ contactId, open, onClose, onSaved }: Contact
       return;
     }
     try {
-      await updateContactNumber(contactId, value);
+      const { data: savedNumberContact } = await updateContactNumber(contactId, value);
+      // O servidor pode ter apagado o vinculo com o WhatsApp oficial: a nota segue o gravado.
+      const saved = (savedNumberContact ?? {}) as Record<string, unknown>;
+      setLoadedWabaIdentity(!!(saved.bsuid || saved.parentBsuid || saved.username));
+      setLoadedNumberDigits(String(saved.number ?? value).replace(/\D/g, ""));
       toast.success(t("success.numberUpdated"));
       onSaved?.();
     } catch (err: unknown) {
-      const backendMsg =
-        (err as { response?: { data?: { error?: string; message?: string } } })?.response?.data?.error
-        ?? (err as { response?: { data?: { error?: string; message?: string } } })?.response?.data?.message;
-      if (backendMsg === "ERR_CONTACT_NUMBER_ALREADY_EXISTS") {
+      // O interceptor entrega o corpo em `err.data` (nunca em `err.response.data`).
+      const backendMsg = getBackendErrorCode(err);
+      const fieldError = parseContactFieldError(err);
+      if (fieldError) {
+        toast.error(contactFieldErrorText(fieldError));
+      } else if (backendMsg === "ERR_CONTACT_NUMBER_ALREADY_EXISTS") {
         toast.error(t("errors.numberAlreadyExists"));
-      } else if (backendMsg === "ERR_NO_CONTACT_FOUND") {
+      } else if (backendMsg.startsWith("ERR_NO_CONTACT_FOUND")) {
         toast.error(t("errors.loadContact"));
-      } else if (backendMsg) {
-        toast.error(backendMsg);
       } else {
         toast.error(t("errors.updateNumber"));
       }
@@ -300,48 +395,32 @@ export function ContactEditDialog({ contactId, open, onClose, onSaved }: Contact
       return;
     }
     try {
-      // Strings vazias viram undefined: evita escrever "" em colunas que devem ficar NULL
-      // (webchatId="" some do list de contatos por causa do filtro IS NULL).
-      // `number` entra no blank() pelo mesmo motivo, com um agravante: "" no telefone
-      // colide no indice unico (tenantId, number) e funde contatos sem telefone.
-      // Omitido, o PUT parcial preserva o que estiver gravado.
+      // `number` vazio fica fora do PUT (o parcial preserva o gravado): "" no telefone colide
+      // no indice unico (tenantId, number) e funde contatos sem telefone.
       // name e required (validado pelo schema) e passa direto.
       const blank = (v: string | undefined) => (v && v.length > 0 ? v : undefined);
+      // Campos pessoais: o que o atendente mexeu vai cru, então apagar o e-mail (CPF, nome…)
+      // grava vazio. Até aqui o vazio virava undefined e o servidor mantinha o valor antigo
+      // ("Contato atualizado" com o e-mail de volta ao reabrir). Sem mexer, regra de antes.
+      const personal = (field: "email" | "cpf" | "birthDate" | "firstName" | "lastName" | "businessName") =>
+        form.getFieldState(field).isDirty ? (values[field] ?? "") : blank(values[field]);
+      const channelPayload: Record<string, unknown> = {};
+      for (const field of CONTACT_EDIT_CHANNEL_FIELDS) {
+        if (form.getFieldState(field).isDirty) channelPayload[field] = values[field] ?? "";
+      }
       const payload: Partial<ContactPayload> & Record<string, unknown> = {
         name: values.name,
         number: blank(values.number),
-        email: blank(values.email),
-        cpf: blank(values.cpf),
-        birthdayDate: blank(values.birthDate),
-        firstName: blank(values.firstName),
-        lastName: blank(values.lastName),
-        businessName: blank(values.businessName),
-        lid: blank(values.lid),
-        isLid: values.isLid,
-        messengerId: blank(values.messengerId),
-        instagramPK: blank(values.instagramPK),
-        hubWhatsapp: blank(values.hubWhatsapp),
+        email: personal("email"),
+        cpf: personal("cpf"),
+        birthdayDate: personal("birthDate"),
+        firstName: personal("firstName"),
+        lastName: personal("lastName"),
+        businessName: personal("businessName"),
         // Endereço fora do blank(): vai o bloco inteiro, cru, só quando algum campo dele foi
         // mexido — aí "" apaga de verdade. Sem mexer, nada do bloco vai e o que está gravado fica.
         ...(isAddressBlockDirty(form) ? addressPayloadFrom(values) : {}),
-        telegramId: blank(values.telegramId),
-        webchatId: blank(values.webchatId),
-        mercadolivreId: blank(values.mercadolivreId),
-        linkedinId: blank(values.linkedinId),
-        youtubeChannelId: blank(values.youtubeChannelId),
-        tiktokId: blank(values.tiktokId),
-        hubMercadolivre: blank(values.hubMercadolivre),
-        hubTiktok: blank(values.hubTiktok),
-        hubLikedin: blank(values.hubLikedin),
-        hubOlx: blank(values.hubOlx),
-        hubYoutube: blank(values.hubYoutube),
-        hubIfood: blank(values.hubIfood),
-        hubTwitter: blank(values.hubTwitter),
-        hubSms: blank(values.hubSms),
-        hubTelegram: blank(values.hubTelegram),
-        hubWidget: blank(values.hubWidget),
-        hubWebchat: blank(values.hubWebchat),
-        hubEmail: blank(values.hubEmail),
+        ...channelPayload,
       };
       // Always send wallets and extraInfo so backend removes them when empty
       payload.wallets = selectedWalletId != null ? [selectedWalletId] : [];
@@ -354,13 +433,14 @@ export function ContactEditDialog({ contactId, open, onClose, onSaved }: Contact
       onClose();
       onSaved?.();
     } catch (err: unknown) {
-      const backendMsg =
-        (err as { response?: { data?: { error?: string; message?: string } } })?.response?.data?.error
-        ?? (err as { response?: { data?: { error?: string; message?: string } } })?.response?.data?.message;
-      if (backendMsg === "ERR_CONTACT_NUMBER_ALREADY_EXISTS") {
+      const backendMsg = getBackendErrorCode(err);
+      const fieldError = parseContactFieldError(err);
+      if (isTagNotFound(err)) {
+        toast.error(tCommon("tagNotFoundReload"));
+      } else if (fieldError) {
+        toast.error(contactFieldErrorText(fieldError));
+      } else if (backendMsg === "ERR_CONTACT_NUMBER_ALREADY_EXISTS") {
         toast.error(t("errors.numberAlreadyExists"));
-      } else if (backendMsg) {
-        toast.error(backendMsg);
       } else {
         toast.error(t("errors.updateContact"));
       }
@@ -403,13 +483,27 @@ export function ContactEditDialog({ contactId, open, onClose, onSaved }: Contact
                     rotulo traduzido sai junto para nao prometer o contrario. */}
                 <Label>{loadedHasNumber ? t("labels.number") : t("labels.number").replace(/\s*\*\s*$/, "")}</Label>
                 <div className="flex gap-2">
-                  <Input {...form.register("number")} placeholder="5511999999999" />
+                  <Input {...form.register("number")} placeholder={numberExample} />
                   <Button type="button" variant="ghost" size="icon" title={t("refreshNumberTitle")} onClick={handleUpdateNumber} disabled={loadFailed}>
                     <RefreshCw className="h-4 w-4" />
                   </Button>
                 </div>
                 {form.formState.errors.number && <p className="text-xs text-destructive">{t(`validation.${form.formState.errors.number.message}`)}</p>}
+                {showMissingDialCode ? (
+                  <p className="flex items-start gap-1 text-xs text-amber-600 dark:text-amber-400" role="status">
+                    <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" aria-hidden />
+                    <span>{tPhone("missingCountryCodeHint", { example: numberExample })}</span>
+                  </p>
+                ) : (
+                  <p className="text-xs text-muted-foreground">{t("numberCountryCodeHint")}</p>
+                )}
                 {!loadedHasNumber && <p className="text-xs text-muted-foreground">{t("numberOptionalNote")}</p>}
+                {showWabaIdentityNote && (
+                  <p className="flex items-start gap-1 text-xs text-amber-600 dark:text-amber-400" role="status">
+                    <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" aria-hidden />
+                    <span>{t("numberChangeClearsWabaIdentity")}</span>
+                  </p>
+                )}
               </div>
               {!loadedHasNumber && !!loadedUsername && (
                 <div className="space-y-1 rounded-md border bg-muted/40 px-3 py-2 sm:col-span-2">
@@ -481,6 +575,12 @@ export function ContactEditDialog({ contactId, open, onClose, onSaved }: Contact
                   <div className="space-y-2">
                     <Label>{t("labels.telegramId")}</Label>
                     <Input {...form.register("telegramId")} placeholder={t("placeholders.telegramId")} />
+                    {telegramCleared && (
+                      <p className="flex items-start gap-1 text-xs text-amber-600 dark:text-amber-400" role="status">
+                        <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" aria-hidden />
+                        <span>{t("telegramClearHint")}</span>
+                      </p>
+                    )}
                   </div>
                   <div className="space-y-2">
                     <Label>{t("labels.webchatId")}</Label>
@@ -556,7 +656,7 @@ export function ContactEditDialog({ contactId, open, onClose, onSaved }: Contact
                   <Switch
                     id="isLid"
                     checked={isLidForm}
-                    onCheckedChange={(v) => { setIsLidForm(v); form.setValue("isLid", v); }}
+                    onCheckedChange={(v) => { setIsLidForm(v); form.setValue("isLid", v, { shouldDirty: true }); }}
                   />
                   <Label htmlFor="isLid" className="cursor-pointer">
                     <Bot className="inline h-4 w-4 mr-1" /> {t("labels.isLid")}

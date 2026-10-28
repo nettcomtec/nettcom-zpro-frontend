@@ -10,7 +10,7 @@ import { motion, type PanInfo } from "framer-motion";
 import { X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
-import { useWebphoneStore } from "@/stores/webphone-store";
+import { isSipCallActive, useWebphoneStore } from "@/stores/webphone-store";
 import { AsteriskWebphone } from "./asterisk-webphone";
 import { useAuthStore } from "@/stores/auth-store";
 import { useTranslations } from "next-intl";
@@ -29,6 +29,7 @@ export function WebphoneModal() {
   const t = useTranslations("webphoneModal");
   const tCommon = useTranslations("common");
   const { isVisible, toggleVisibility, callStatus } = useWebphoneStore();
+  const sipLinkState = useWebphoneStore((s) => s.sipLinkState);
   const { user } = useAuthStore();
   const [position, setPosition] = useState({ x: 0, y: 0 });
   const constraintsRef = useRef<HTMLDivElement>(null);
@@ -87,10 +88,22 @@ export function WebphoneModal() {
         >
           <div className="flex items-center justify-between border-b p-3">
             <div className="flex items-center gap-2">
-              <div className="h-2 w-2 rounded-full bg-success animate-pulse" />
+              {/* Cor da conexão do ramal: verde registrado, âmbar conectando/reconectando, vermelho erro. */}
+              <div
+                className={
+                  sipLinkState === "registered"
+                    ? "h-2 w-2 rounded-full bg-success animate-pulse"
+                    : sipLinkState === "error"
+                      ? "h-2 w-2 rounded-full bg-destructive"
+                      : sipLinkState === "idle"
+                        ? "h-2 w-2 rounded-full bg-muted-foreground"
+                        : "h-2 w-2 rounded-full bg-amber-500 animate-pulse"
+                }
+              />
               <span className="text-sm font-semibold">{t("title")}</span>
             </div>
-            {callStatus === "idle" && (
+            {/* Fechar só fora de chamada (antes só em "idle": registrado, reconectando ou com erro não fechava). */}
+            {!isSipCallActive(callStatus) && (
               <Button
                 variant="ghost"
                 size="sm"
@@ -104,7 +117,7 @@ export function WebphoneModal() {
           </div>
 
           <AsteriskWebphone
-            server={sipConfig.domain || sipConfig.server}
+            server={(sipConfig.domain || "").trim() || (sipConfig.server || "").trim()}
             port={sipConfig.port}
             username={sipConfig.username}
             password={sipConfig.password}

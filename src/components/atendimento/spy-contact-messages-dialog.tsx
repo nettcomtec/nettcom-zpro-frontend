@@ -15,6 +15,7 @@ import { useLiveMode } from "@/hooks/use-live-mode";
 import { cn } from "@/lib/utils";
 import { MessageBubble } from "@/components/atendimento/message-bubble";
 import type { Message } from "@/stores/ticket-store";
+import { getBackendErrorCode } from "@/lib/backend-error-code";
 
 export interface SpyMessage {
   id?: number;
@@ -85,13 +86,26 @@ function extractSpyPage(data: { messages?: Record<string, ChannelData> } | undef
   return { list, ticketChannels };
 }
 
-export function useSpyMessages(open: boolean, contactId: number | null, onError: () => void) {
+export function useSpyMessages(
+  open: boolean,
+  contactId: number | null,
+  onError: () => void,
+  opts?: { silentNotFound?: boolean }
+) {
   const t = useTranslations("spyContactMessages");
   const [messages, setMessages] = useState<SpyMessage[]>([]);
   const [lastTicket, setLastTicket] = useState<SpyLastTicket | null>(null);
   const [loading, setLoading] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [hasMore, setHasMore] = useState(false);
+  // Contato sem atendimento com canal: o backend responde 404 ERR_NO_TICKET_FOUND_113.
+  // Com `silentNotFound` (ficha da oportunidade) isso vira estado vazio, sem toast.
+  const [notFound, setNotFound] = useState(false);
+  // Backend escondeu o atendimento ATIVO de outro atendente ("não ver atendimentos de
+  // outros"): quem usa o lastTicket para responder/transferir tem de travar, senão a
+  // resposta sairia pelo último atendimento visível enquanto o colega atende.
+  const [hiddenActiveTicket, setHiddenActiveTicket] = useState(false);
+  const silentNotFound = opts?.silentNotFound === true;
   const pageRef = useRef(1);
   // Invalidates in-flight "carregar anteriores" quando o alvo troca/fecha
   const loadSeqRef = useRef(0);
@@ -101,6 +115,8 @@ export function useSpyMessages(open: boolean, contactId: number | null, onError:
     pageRef.current = 1;
     setHasMore(false);
     setLoadingMore(false);
+    setNotFound(false);
+    setHiddenActiveTicket(false);
     if (!open || !contactId) {
       setMessages([]);
       setLastTicket(null);
@@ -115,6 +131,7 @@ export function useSpyMessages(open: boolean, contactId: number | null, onError:
         const { list, ticketChannels } = extractSpyPage(data);
         setMessages(list);
         setHasMore(!!data?.hasMore);
+        setHiddenActiveTicket(data?.hiddenActiveTicket === true);
         // lastTicket vem da página 1 (mais recente) — páginas antigas não mudam isso
         const lastWithTicket = [...list].reverse().find((m) => m.ticketId != null);
         setLastTicket(
@@ -122,10 +139,16 @@ export function useSpyMessages(open: boolean, contactId: number | null, onError:
             ? { id: lastWithTicket.ticketId, channel: ticketChannels[lastWithTicket.ticketId] }
             : null
         );
-      } catch {
+      } catch (err) {
         if (!cancelled) {
-          toast.error(t("errorLoading"));
-          onError();
+          if (silentNotFound && getBackendErrorCode(err) === "ERR_NO_TICKET_FOUND_113") {
+            setMessages([]);
+            setLastTicket(null);
+            setNotFound(true);
+          } else {
+            toast.error(t("errorLoading"));
+            onError();
+          }
         }
       } finally {
         if (!cancelled) setLoading(false);
@@ -134,7 +157,7 @@ export function useSpyMessages(open: boolean, contactId: number | null, onError:
     return () => {
       cancelled = true;
     };
-  }, [open, contactId, t, onError]);
+  }, [open, contactId, t, onError, silentNotFound]);
 
   const loadPrevious = React.useCallback(async () => {
     if (!contactId || loading || loadingMore || !hasMore) return;
@@ -164,7 +187,7 @@ export function useSpyMessages(open: boolean, contactId: number | null, onError:
     setMessages((prev) => [...prev, m]);
   }, []);
 
-  return { messages, loading, loadingMore, hasMore, loadPrevious, lastTicket, appendMessage };
+  return { messages, loading, loadingMore, hasMore, loadPrevious, lastTicket, appendMessage, notFound, hiddenActiveTicket };
 }
 
 export function SpyMessagesPanel({

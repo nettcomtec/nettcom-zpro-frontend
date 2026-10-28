@@ -50,10 +50,11 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { useAuthStore } from "@/stores/auth-store";
 import { fetchGallery, type GalleryItem } from "@/services/gallery";
 import { createTicket, updateTicket } from "@/services/tickets";
-import { sendWabaTemplateComponents, sendWabaTemplateMarketingComponents } from "@/services/messages";
+import { sendWabaTemplateComponents } from "@/services/messages";
 import { parseBulkPhoneList, getBrPhoneVariants, detectBrPhoneAmbiguity, normalizeBrPhone } from "@/lib/phone-utils";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { formatBulkSendError } from "@/lib/bulk-send-error-format";
+import { isMetaTokenUnauthorized, metaRateLimitedMessage } from "@/lib/backend-error-code";
 import { WabaTemplateMobilePreview } from "@/components/meta/waba-template-mobile-preview";
 // W3-B: picker agnostico de BSP. Renderiza o picker correto para o canal
 // selecionado (waba | dialog360 | gupshup). Para WABA o caller pode manter o
@@ -370,6 +371,7 @@ export default function MassaTemplatePage() {
   const tCsv = useTranslations("bulkCsvImport");
   const tOrder = useTranslations("orderDetails");
   const tAddr = useTranslations("addressFilter");
+  const tCommon = useTranslations("common");
   const allowed = usePageAccess("massa");
   if (!allowed) return <AccessDenied />;
   const { isLiveMode } = useLiveMode();
@@ -844,8 +846,8 @@ export default function MassaTemplatePage() {
         a.name.toLowerCase().localeCompare(b.name.toLowerCase())
       );
       setTemplates(sorted);
-    } catch {
-      toast.error(t("errorLoadingTemplates"));
+    } catch (err) {
+      toast.error(metaRateLimitedMessage(err, tCommon) ?? (isMetaTokenUnauthorized(err) ? tCommon("metaTokenInvalidReconnect") : t("errorLoadingTemplates")));
       setTemplates([]);
     } finally {
       setLoadingTemplates(false);
@@ -949,7 +951,7 @@ export default function MassaTemplatePage() {
       }
     }
 
-    throw new Error(`Não foi possível criar contato: ${number}`);
+    throw new Error(t("errorCreateContact", { number }));
   };
 
   /** Cria ou obtém ticket existente (trata 409); `created` = nasceu neste disparo.
@@ -982,7 +984,7 @@ export default function MassaTemplatePage() {
         if ((t as { id?: number })?.id) return { id: (t as { id: number }).id, created: false };
       }
     }
-    throw new Error(`Não foi possível criar ticket para contato ${contactId}`);
+    throw new Error(t("errorCreateTicket", { contactId }));
   };
 
   /** Aplica o destino pós-envio (pendente/fila/usuário). Plano B: se falhar num
@@ -1004,7 +1006,9 @@ export default function MassaTemplatePage() {
     }
   };
 
-  const handleSend = async (isMarketing = false) => {
+  // Um só caminho de envio: o backend escolhe a rota pela categoria do template
+  // (marketing sai pela Marketing Messages API quando a conta aceitou os termos).
+  const handleSend = async () => {
     // Camada 1c — guard sincrono: segundo clique enquanto o primeiro ainda esta
     // em voo retorna silenciosamente. Cobre janela ate setSending(true) propagar.
     if (sendingRef.current) return;
@@ -1091,7 +1095,7 @@ export default function MassaTemplatePage() {
     let bulkDispatchId: number | null = null;
     try {
       const dr = await createDispatch({
-        dispatchType: isMarketing ? "template_marketing" : "template",
+        dispatchType: "template",
         totalMessages: numbers.length,
         whatsappId: selectedConnection.id,
         templateName: selectedTemplate.name,
@@ -1331,8 +1335,6 @@ export default function MassaTemplatePage() {
             bulkDispatchId,
             ...orderDetailsField,
           });
-        } else if (isMarketing) {
-          await sendWabaTemplateMarketingComponents(payload);
         } else {
           await sendWabaTemplateComponents(payload);
         }
@@ -1499,11 +1501,11 @@ export default function MassaTemplatePage() {
             </div>
             <div className="space-y-2">
               <Label>{t("minSeconds")}</Label>
-              <Input placeholder="Ex: 1" value={minDelay} onChange={(e) => setMinDelay(e.target.value)} />
+              <Input placeholder={t("minSecondsPlaceholder")} value={minDelay} onChange={(e) => setMinDelay(e.target.value)} />
             </div>
             <div className="space-y-2">
               <Label>{t("maxSeconds")}</Label>
-              <Input placeholder="Ex: 3" value={maxDelay} onChange={(e) => setMaxDelay(e.target.value)} />
+              <Input placeholder={t("maxSecondsPlaceholder")} value={maxDelay} onChange={(e) => setMaxDelay(e.target.value)} />
             </div>
           </div>
 
@@ -1953,7 +1955,7 @@ export default function MassaTemplatePage() {
                     <span className="text-yellow-600 font-medium">{t("dispatchPaused")} — </span>
                   ) : null}
                   {t("messagesSent")}: {sentCount} {t("of")} {totalMessages}
-                  {failedCount > 0 && <span className="text-destructive ml-2">— {t("notifications.failed")}: {failedCount}</span>}
+                  {failedCount > 0 && <span className="text-destructive ml-2">— {t("failedLabel")}: {failedCount}</span>}
                   {skippedCount > 0 && <span className="text-amber-600 dark:text-amber-500 ml-2">— {t("skippedLabel")}: {skippedCount}</span>}
                 </p>
                 {!isPaused ? (
@@ -2145,12 +2147,9 @@ export default function MassaTemplatePage() {
           </div>
 
           <DialogFooter className="gap-2 pt-2">
-            <Button disabled={!selectedTemplate || sending} onClick={() => handleSend(false)}>
+            <Button disabled={!selectedTemplate || sending} onClick={() => handleSend()}>
               {sending ? <RefreshCw className="mr-2 h-4 w-4 animate-spin" /> : <Send className="mr-2 h-4 w-4" />}
               {t("send")}
-            </Button>
-            <Button variant="secondary" disabled={!selectedTemplate || sending} onClick={() => handleSend(true)}>
-              {t("sendMarketing")}
             </Button>
             <Button variant="outline" onClick={() => setShowModal(false)}>
               {t("cancel")}

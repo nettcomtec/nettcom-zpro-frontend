@@ -86,6 +86,7 @@ const MENU_GROUPS: { id: string; keys: string[] }[] = [
       "etiquetas",
       "fechamento",
       "filas",
+      "formularios",
       "horarioAtendimento",
       "motivos-pausa",
       "notas",
@@ -113,7 +114,7 @@ const MENU_GROUPS: { id: string; keys: string[] }[] = [
   },
   {
     id: "admin",
-    keys: ["configuracoes", "creditos-ia", "equipes", "usuarios"].sort(),
+    keys: ["aplicativos", "configuracoes", "creditos-ia", "equipes", "usuarios"].sort(),
   },
 ];
 
@@ -158,7 +159,12 @@ const MENU_REQUIRES: Partial<Record<string, PermissionKey[]>> = {
   "auto-resposta": ["chat_flow_manage"],
   "agentes-ia": ["ai_agents_manage"],
   "creditos-ia": ["ai_credits_manage"],
+  // A tela /aplicativos só gerencia (quem vê cada app é decidido no cadastro dela):
+  // sem a permission o item nem aparece no menu.
+  aplicativos: ["custom_apps_manage"],
   "agendamento-publico": ["booking_manage"],
+  // Todas as rotas de /formularios exigem forms_manage (requireFormsManage no backend).
+  formularios: ["forms_manage"],
   funil: ["funnel_manage"],
   agenda: ["scheduled_messages_manage"],
   sessoes: ["sessions_manage"],
@@ -246,6 +252,8 @@ const PERMISSION_GROUPS: { id: string; keys: PermissionKey[] }[] = [
         "catalog_view",
         "chat_flow_manage",
         "closure_reasons_manage",
+        "custom_apps_manage",
+        "forms_manage",
         "gallery_manage",
         "gallery_view",
         "groups_manage",

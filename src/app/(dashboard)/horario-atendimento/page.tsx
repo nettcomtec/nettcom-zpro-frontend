@@ -1,9 +1,12 @@
 "use client";
 
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useRef } from "react";
 import { useTranslations } from "next-intl";
 import { PageHeader } from "@/components/layout/page-header";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import {
+  Tooltip, TooltipContent, TooltipProvider, TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -18,7 +21,7 @@ import {
   Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogFooter,
 } from "@/components/ui/dialog";
 import {
-  Clock, Settings, CalendarOff, Plus, Pencil, Trash2, Info,
+  Clock, Settings, CalendarOff, Plus, Pencil, Trash2, Info, HelpCircle,
 } from "lucide-react";
 import { toast } from "sonner";
 import {
@@ -49,6 +52,56 @@ function formatDate(dateStr: string): string {
   if (!dateStr) return "";
   const [year, month, day] = dateStr.split("-");
   return `${day}/${month}/${year}`;
+}
+
+// Minutos do dia de um horário "HH:mm" (ou "H:mm"), no mesmo formato que o servidor
+// lê ao conferir o horário e aceita ao salvar; null = hora vazia ou ilegível.
+function parseShiftMinutes(value: string | null | undefined): number | null {
+  const match = /^(\d{1,2}):(\d{1,2})\s*$/.exec(String(value ?? ""));
+  if (!match) return null;
+  const hours = Number(match[1]);
+  const minutes = Number(match[2]);
+  if (hours > 23 || minutes > 59) return null;
+  return hours * 60 + minutes;
+}
+
+// Ajuda do turno que vira a noite. O tooltip não abre por toque (o Radix fecha no
+// clique), então o clique abre e tocar fora fecha: sem isso, no celular a explicação
+// nunca apareceria.
+function OvernightShiftTip({ text }: { text: string }) {
+  const [open, setOpen] = useState(false);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  return (
+    <TooltipProvider delayDuration={150}>
+      <Tooltip open={open} onOpenChange={setOpen}>
+        <TooltipTrigger asChild>
+          <button
+            ref={triggerRef}
+            type="button"
+            aria-label={text}
+            onPointerDown={(e) => e.preventDefault()}
+            onClick={(e) => {
+              e.preventDefault();
+              setOpen(true);
+            }}
+            className="inline-flex shrink-0 items-center text-muted-foreground hover:text-foreground"
+          >
+            <HelpCircle className="h-3.5 w-3.5" />
+          </button>
+        </TooltipTrigger>
+        <TooltipContent
+          side="top"
+          collisionPadding={16}
+          className="max-w-[18rem] whitespace-normal leading-relaxed"
+          onPointerDownOutside={(e) => {
+            if (triggerRef.current?.contains(e.target as Node)) e.preventDefault();
+          }}
+        >
+          {text}
+        </TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
+  );
 }
 
 export default function HorarioAtendimentoPage() {
@@ -126,16 +179,27 @@ export default function HorarioAtendimentoPage() {
     return !day.hr1 || !day.hr2 || !day.hr3 || !day.hr4;
   };
 
+  // Em minutos, como o período: a comparação de texto errava com "9:00" (que o
+  // servidor aceita). Hora ilegível fica com o aviso de período inválido.
   const hasOverlap = (day: DaySchedule): boolean => {
     if (day.type !== "H") return false;
     if (hasEmptyTime(day)) return false;
-    return day.hr2 >= day.hr3;
+    const end1 = parseShiftMinutes(day.hr2);
+    const start2 = parseShiftMinutes(day.hr3);
+    if (end1 === null || start2 === null) return false;
+    return end1 >= start2;
   };
 
+  // Início maior que o fim é turno que vira a noite (22:00–02:00), e o servidor o
+  // entende: naquele dia da semana, da meia-noite até o fim e do início até o fim
+  // do dia. Continuam recusados o intervalo vazio (início igual ao fim) e a hora
+  // ilegível, que o servidor nunca conta como dentro do horário.
   const hasInvalidPeriod = (day: DaySchedule): boolean => {
     if (day.type !== "H") return false;
     if (hasEmptyTime(day)) return false;
-    return day.hr1 >= day.hr2 || day.hr3 >= day.hr4;
+    const [start1, end1, start2, end2] = [day.hr1, day.hr2, day.hr3, day.hr4].map(parseShiftMinutes);
+    if (start1 === null || end1 === null || start2 === null || end2 === null) return true;
+    return start1 === end1 || start2 === end2;
   };
 
   const handleSaveAll = async () => {
@@ -232,9 +296,12 @@ export default function HorarioAtendimentoPage() {
           {/* Horários por Dia */}
           <Card>
             <CardHeader>
-              <CardTitle className="flex items-center gap-2 text-base">
-                <Clock className="h-5 w-5" /> {t("scheduleByDay")}
-              </CardTitle>
+              <div className="flex items-center gap-2">
+                <CardTitle className="flex items-center gap-2 text-base">
+                  <Clock className="h-5 w-5" /> {t("scheduleByDay")}
+                </CardTitle>
+                <OvernightShiftTip text={t("overnightShiftTip")} />
+              </div>
             </CardHeader>
             <CardContent className="space-y-3">
               {schedule.map((day, index) => {

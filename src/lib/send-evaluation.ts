@@ -7,6 +7,8 @@ import {
   sendTextGupshup,
 } from "@/services/messages";
 import { createEvaluation, resolveExternalRatingUrl, type EvaluationConfig } from "@/services/evaluations";
+import { ensureRegionTexts, getRegionNow, getRegionText } from "@/hooks/use-region";
+import { flushPendingWabaText } from "@/lib/waba-agent-grouping";
 
 /** Canais que suportam a pesquisa de satisfação automática (têm captura da nota no backend). */
 export const EVALUATION_CHANNELS = [
@@ -33,12 +35,38 @@ export interface EvaluationTicketLike {
 export interface SendEvaluationOptions {
   /** Config de avaliação já carregado (evita novo GET). Passe sempre que possível. */
   config?: EvaluationConfig | null;
-  /** Rótulo da pergunta ("Avalie este atendimento:") já traduzido. Default PT. */
+  /**
+   * Rótulo da pergunta ("Avalie este atendimento:") já traduzido. Default PT. Só vale
+   * quando a empresa não tem pergunta própria nem idioma da Região configurado.
+   */
   questionLabel?: string;
 }
 
 const DEFAULT_QUESTION_LABEL = "Avalie este atendimento:";
 const DEFAULT_SCALE = ["Ruim", "Regular", "Bom", "Muito Bom", "Excelente", "Incrível"];
+/** Teto da espera pelos textos da Região: estourado, a pesquisa sai com o fallback de hoje. */
+const REGION_TEXTS_WAIT_MS = 3000;
+
+/**
+ * Com idioma da Região configurado, garante os textos ao cliente carregados (voo único,
+ * normalmente já vieram no boot do painel). Nunca lança nem segura o envio além do teto.
+ */
+async function waitRegionTexts(): Promise<void> {
+  if (!getRegionNow().languageConfigured) return;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      ensureRegionTexts(),
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, REGION_TEXTS_WAIT_MS);
+      }),
+    ]);
+  } catch {
+    // sem os textos: segue o fallback
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
 
 /**
  * Monta e envia a pesquisa de satisfação de um ticket e registra a avaliação pendente.
@@ -58,14 +86,30 @@ export async function sendEvaluationForTicket(
   // Grupo não recebe pesquisa: sem esta trava a pergunta sairia no grupo antes de o
   // backend recusar a avaliação.
   if (ticket.isGroup) throw new Error("ERR_GROUP_NOT_SUPPORTED");
-  const label = opts.questionLabel || DEFAULT_QUESTION_LABEL;
+  // WABA: o texto do atendente que esperava para juntar sai antes da pesquisa.
+  await flushPendingWabaText(ticket.id);
   const config = opts.config ?? null;
+
+  // Pergunta (vai ao CLIENTE), mesma ordem do envio automático no backend: a da empresa
+  // (/avaliacoes) → a padrão no idioma da Região, só quando ela define idioma → o rótulo
+  // no idioma do atendente, como sempre foi (sem Região configurada nada muda) → PT.
+  await waitRegionTexts();
+  const customQuestion = String(config?.ratingQuestion || "").trim();
+  const label =
+    customQuestion ||
+    getRegionText("evaluation.question", undefined, "") ||
+    opts.questionLabel ||
+    DEFAULT_QUESTION_LABEL;
 
   const maxScore = typeof config?.ratingMaxScore === "number" ? config.ratingMaxScore : 5;
   const ratings = (config?.rating ?? []).filter((r) => r.rating <= maxScore);
+  // Escala padrão (empresa sem rótulos salvos): mesma regra da pergunta.
   const ratingBody = ratings.length
     ? `${label}\n${ratings.map((r) => `${r.rating} - ${r.label}`).join("\n")}`
-    : `${label}\n${[0, 1, 2, 3, 4, 5].filter((r) => r <= maxScore).map((r) => `${r} - ${DEFAULT_SCALE[r]}`).join("\n")}`;
+    : `${label}\n${[0, 1, 2, 3, 4, 5]
+        .filter((r) => r <= maxScore)
+        .map((r) => `${r} - ${getRegionText(`evaluation.scale.${r}`, undefined, DEFAULT_SCALE[r])}`)
+        .join("\n")}`;
 
   const ratingMode = config?.ratingMode || "native";
   const ratingExternalUrl = config?.ratingExternalUrl || "";

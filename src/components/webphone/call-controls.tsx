@@ -55,7 +55,7 @@ export function CallControls({
             <TooltipTrigger asChild>
               <Button
                 size="lg"
-                className="h-14 w-14 rounded-full bg-success hover:bg-success/90"
+                className="h-14 w-14 rounded-full p-0 bg-success hover:bg-success/90"
                 onClick={onAccept}
                 aria-label={t("acceptTooltip")}
               >
@@ -68,7 +68,7 @@ export function CallControls({
             <TooltipTrigger asChild>
               <Button
                 size="lg"
-                className="h-14 w-14 rounded-full bg-destructive hover:bg-destructive/90"
+                className="h-14 w-14 rounded-full p-0 bg-destructive hover:bg-destructive/90"
                 onClick={onReject}
                 aria-label={t("rejectTooltip")}
               >
@@ -83,15 +83,17 @@ export function CallControls({
   }
 
   if (callStatus === "established" || callStatus === "calling") {
+    // Atendida no SIP são 5 botões: 4 × 44 + 48 + 4 × 12 = 272px, dentro dos 284px úteis do
+    // cartão de 320px. O `p-0` tira o `px-8` do size "lg", que alargava cada botão para 66px.
     return (
       <TooltipProvider delayDuration={200}>
-        <div className="flex items-center justify-center gap-4">
+        <div className="flex flex-wrap items-center justify-center gap-3">
           <Tooltip>
             <TooltipTrigger asChild>
               <Button
                 variant="outline"
                 size="lg"
-                className={cn("h-12 w-12 rounded-full", isMuted && "bg-destructive/10 border-destructive")}
+                className={cn("h-11 w-11 rounded-full p-0", isMuted && "bg-destructive/10 border-destructive")}
                 onClick={toggleMute}
                 aria-label={isMuted ? t("unmuteTooltip") : t("muteTooltip")}
               >
@@ -112,7 +114,7 @@ export function CallControls({
                   size="lg"
                   disabled={holdPending}
                   className={cn(
-                    "h-12 w-12 rounded-full",
+                    "h-11 w-11 rounded-full p-0",
                     isOnHold && "bg-warning/10 border-warning"
                   )}
                   onClick={onToggleHold}
@@ -134,7 +136,7 @@ export function CallControls({
                 <Button
                   variant="outline"
                   size="lg"
-                  className="h-12 w-12 rounded-full"
+                  className="h-11 w-11 rounded-full p-0"
                   onClick={onToggleKeypad}
                   aria-label={t("keypadTooltip")}
                 >
@@ -150,7 +152,7 @@ export function CallControls({
                 <Button
                   variant="outline"
                   size="lg"
-                  className="h-12 w-12 rounded-full"
+                  className="h-11 w-11 rounded-full p-0"
                   onClick={onTransfer}
                   aria-label={t("transferTooltip")}
                 >
@@ -164,7 +166,7 @@ export function CallControls({
             <TooltipTrigger asChild>
               <Button
                 size="lg"
-                className="h-14 w-14 rounded-full bg-destructive hover:bg-destructive/90"
+                className="h-12 w-12 rounded-full p-0 bg-destructive hover:bg-destructive/90"
                 onClick={onHangup}
                 aria-label={t("hangupTooltip")}
               >
@@ -185,7 +187,7 @@ export function CallControls({
           <TooltipTrigger asChild>
             <Button
               size="lg"
-              className="h-14 w-14 rounded-full bg-success hover:bg-success/90"
+              className="h-14 w-14 rounded-full p-0 bg-success hover:bg-success/90"
               onClick={onDial}
               aria-label={t("dialTooltip")}
             >
@@ -198,7 +200,7 @@ export function CallControls({
           <TooltipTrigger asChild>
             <Button
               size="lg"
-              className="h-14 w-14 rounded-full bg-destructive hover:bg-destructive/90"
+              className="h-14 w-14 rounded-full p-0 bg-destructive hover:bg-destructive/90"
               onClick={onHangup}
               aria-label={t("hangupTooltip")}
             >

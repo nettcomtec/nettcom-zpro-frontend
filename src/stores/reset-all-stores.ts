@@ -10,6 +10,7 @@ import { useBrandingStore } from "./branding-store";
 import { useUIStore } from "./ui-store";
 import { useNotificationStore } from "./notification-store";
 import { useSupportChatStore } from "./support-chat-store";
+import { useTaskSummaryStore } from "./task-summary-store";
 
 export function resetAllStores(): void {
   useTicketStore.getState().resetTickets();
@@ -24,4 +25,5 @@ export function resetAllStores(): void {
   useUIStore.getState().reset();
   useNotificationStore.getState().clearAll();
   useSupportChatStore.getState().reset();
+  useTaskSummaryStore.getState().reset();
 }

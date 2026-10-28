@@ -32,6 +32,9 @@ import {
 } from "@/components/layout/sidebar";
 import { CONFIG_TAB_GROUPS } from "@/lib/config-links";
 import { TOUR_RESTART_EVENT } from "@/components/tour/AppTour";
+import { isSafePanelAppUrl, usePanelAppsManageVisible, type PanelAppNavEntry } from "@/lib/panel-apps";
+import { useVisiblePanelApps } from "@/stores/panel-apps-store";
+import { openPanelAppLaunch } from "@/lib/panel-app-launch";
 
 interface RecentPage {
   name: string;
@@ -42,6 +45,17 @@ interface RecentPage {
 /** Itens "achatados" de uma categoria (subgrupos da sidebar viram lista única). */
 function flatItems(cat: NavCategory): NavItem[] {
   return cat.subgroups ? cat.subgroups.flatMap((sg) => sg.items) : cat.items;
+}
+
+/**
+ * Valor do item no cmdk (busca + identidade da seleção). Item com `key` (app
+ * personalizada) leva a chave no fim: duas apps com o mesmo nome na mesma categoria,
+ * ou uma app com o nome de um item nativo, ficariam selecionadas juntas (Ag1-16).
+ * Itens nativos: o mesmo valor de antes.
+ */
+function navItemValue(categoryLabel: string, item: NavItem): string {
+  const base = `${categoryLabel} ${item.name}`;
+  return item.key ? `${base} ${item.key}` : base;
 }
 
 export function CommandPalette() {
@@ -60,8 +74,22 @@ export function CommandPalette() {
 
   const { user, menuVisibility, tenantMenuVisibility, isRestrictedUser, paymentOverdue, canViewPayments, planFeatures } = useAuthStore();
   const wavoipEnabled = useAuthStore((s) => s.isWavoipEnabled());
+  // Mesmo gate do botão Nova Conversa do header (personalizado sem permissão não inicia conversa).
+  const canStartConversation = useAuthStore((s) => s.canStartConversation());
   // Mesmo gate da sidebar (fail-closed): sem ele o builder esconde "Créditos de IA".
   const aiCreditsVisible = useAiCreditsNavVisible();
+  // Aplicativos personalizados: mesma fonte da sidebar (seletor único + dono) e o
+  // mesmo gate fail-closed do item "Aplicativos".
+  const { apps: panelApps } = useVisiblePanelApps();
+  const panelAppsManageVisible = usePanelAppsManageVisible();
+  // Fase 2: app "nova aba" com variáveis abre pelo lançamento, como no menu lateral.
+  const tPanelAppLaunch = useTranslations("panelAppLaunch");
+  const launchPanelAppFromMenu = React.useCallback(
+    (app: PanelAppNavEntry) => {
+      void openPanelAppLaunch({ app, placement: "menu", t: tPanelAppLaunch });
+    },
+    [tPanelAppLaunch],
+  );
   const profile = (user?.profile || "user") as ProfileType;
   const isRestricted = isRestrictedUser();
   const isSuperAdmin = profile === "superadmin";
@@ -85,9 +113,12 @@ export function CommandPalette() {
         wavoipEnabled,
         tenantMenuVisibility: tenantMenuVisibility || {},
         aiCreditsVisible,
+        panelApps,
+        panelAppsManageVisible,
+        onLaunchPanelApp: launchPanelAppFromMenu,
       }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [profile, menuVisibility, tenantMenuVisibility, isRestricted, planFeatures, paymentOverdue, showPayments, user?.mustChangePassword, user?.resellerTermsPending, wavoipEnabled, aiCreditsVisible]
+    [profile, menuVisibility, tenantMenuVisibility, isRestricted, planFeatures, paymentOverdue, showPayments, user?.mustChangePassword, user?.resellerTermsPending, wavoipEnabled, aiCreditsVisible, panelApps, panelAppsManageVisible, launchPanelAppFromMenu]
   );
 
   // Hub /configuracoes indexado no palette — MESMO gate do layout do hub
@@ -116,12 +147,22 @@ export function CommandPalette() {
 
   // Conjunto de rotas listáveis HOJE para este usuário (nav gated + hub) —
   // usado para gatear os Recentes: recente que aponta p/ rota oculta não aparece.
+  // App embutida (`/ferramentas/<id>`) entra aqui só enquanto está no menu do usuário:
+  // app apagada, sem acesso ou escondida pelo /tenants some dos Recentes.
   const allowedHrefs = useMemo(() => {
     const set = new Set<string>();
     navCategories.forEach((cat) => flatItems(cat).forEach((i) => { if (!i.external) set.add(i.href); }));
     configLinks.forEach((l) => set.add(l.href));
     return set;
   }, [navCategories, configLinks]);
+
+  // Nome ATUAL das apps embutidas para o rótulo dos Recentes (a app pode ter sido
+  // renomeada depois da visita gravada).
+  const panelAppNameByHref = useMemo(() => {
+    const map = new Map<string, string>();
+    navCategories.forEach((cat) => flatItems(cat).forEach((i) => { if (i.key && !i.external) map.set(i.href, i.name); }));
+    return map;
+  }, [navCategories]);
 
   const isPathAllowed = (path: string): boolean => {
     for (const href of allowedHrefs) {
@@ -175,6 +216,25 @@ export function CommandPalette() {
     setOpen(false);
   };
 
+  // Item de nova aba (app personalizada "nova aba"): `router.push` de URL absoluta
+  // trocaria a própria aba do painel. Abre em outra aba, só com endereço seguro.
+  // App com variáveis (`onSelect`): lança no próprio clique/Enter — a janela abre nele.
+  const runItem = (item: NavItem) => {
+    if (item.onSelect) {
+      item.onSelect();
+      setOpen(false);
+      return;
+    }
+    if (item.external) {
+      if (isSafePanelAppUrl(item.href, "new_tab")) {
+        window.open(item.href, "_blank", "noopener,noreferrer");
+      }
+      setOpen(false);
+      return;
+    }
+    run(item.href);
+  };
+
   const handleConfirmLogout = async (setOffline: boolean) => {
     setLoggingOut(true);
     // Mesmo fluxo do UserMenu/Sidebar (confirmação mantida via dialog abaixo).
@@ -196,16 +256,19 @@ export function CommandPalette() {
         {visibleRecents.length > 0 && (
           <>
             <CommandGroup heading={t("group.recent")}>
-              {visibleRecents.map((page) => (
-                <CommandItem
-                  key={page.path}
-                  value={page.name}
-                  onSelect={() => run(page.path)}
-                >
-                  <Clock className="mr-2 h-4 w-4 shrink-0 opacity-70" />
-                  <span>{page.label || page.name}</span>
-                </CommandItem>
-              ))}
+              {visibleRecents.map((page) => {
+                const appName = panelAppNameByHref.get(page.path);
+                return (
+                  <CommandItem
+                    key={page.path}
+                    value={appName ? `${appName} ${page.path}` : page.name}
+                    onSelect={() => run(page.path)}
+                  >
+                    <Clock className="mr-2 h-4 w-4 shrink-0 opacity-70" />
+                    <span>{appName || page.label || page.name}</span>
+                  </CommandItem>
+                );
+              })}
             </CommandGroup>
             <CommandSeparator />
           </>
@@ -241,7 +304,7 @@ export function CommandPalette() {
               )}
               {/* Nova Conversa — mesmo gate do botão do header; o header reavalia
                   o gate no listener (não confia no emissor) */}
-              {!isSuperAdmin && !isRestricted && (
+              {!isSuperAdmin && !isRestricted && canStartConversation && (
                 <CommandItem
                   value={`${actionsHeading} ${tHeader("tooltips.newConversation")}`}
                   onSelect={() => {
@@ -279,9 +342,9 @@ export function CommandPalette() {
                   const Icon = item.icon;
                   return (
                     <CommandItem
-                      key={item.href}
-                      value={`${category.label} ${item.name}`}
-                      onSelect={() => run(item.href)}
+                      key={item.key ?? item.href}
+                      value={navItemValue(category.label, item)}
+                      onSelect={() => runItem(item)}
                     >
                       <Icon className="mr-2 h-4 w-4 shrink-0" />
                       <span>{item.name}</span>

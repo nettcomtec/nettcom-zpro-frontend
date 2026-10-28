@@ -6,7 +6,8 @@ import React, { useState, useEffect, useCallback, useRef } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { sanitize } from "@/lib/sanitize";
 import { canonicalChannelType, getEffectiveTypeLimit } from "@/lib/channel-types";
-import { channelCreateErrorKey } from "@/lib/channel-create-error";
+import { channelCreateErrorKey, channelCreateErrorDetail } from "@/lib/channel-create-error";
+import { isMetaTokenUnauthorized, getBackendErrorCode, metaRateLimitedMessage } from "@/lib/backend-error-code";
 import {
   CHATGPT_MODELS, OPENAI_VOICES,
   GROK_MODELS, GEMINI_MODELS, DEEPSEEK_MODELS,
@@ -125,6 +126,8 @@ import {
   Link2,
   Unlink,
   KeyRound,
+  ShieldAlert,
+  Clock,
 } from "lucide-react";
 import {
   Collapsible,
@@ -165,10 +168,15 @@ import {
   confirmWebhookRevalidation,
   updateBaileysLib,
   updateBaileysAuthStore,
+  fetchBaileysAuthStoreAvailability,
   migrateBaileysToZapo,
+  getTelegramInviteTexts,
+  updateTelegramInviteTexts,
   type Whatsapp,
   type BaileysLib,
   type BaileysAuthStore,
+  type TelegramInviteTexts,
+  type TelegramInviteTextsUpdate,
 } from "@/services/whatsapp";
 import { fetchQueues } from "@/services/queues";
 import { transferAllTicketsChannel } from "@/services/tickets";
@@ -176,16 +184,24 @@ import { fetchAllUsers } from "@/services/users";
 import { fetchChatFlows } from "@/services/chatflow";
 import { fetchSettings } from "@/services/settings";
 import { fetchAppWooCommerces, registerWooCommerceWebhooks, fetchAppNuvemshops, registerNuvemshopWebhooks } from "@/services/superadmin";
-import api from "@/lib/api";
+import api, { isFeatureNotInPlanError } from "@/lib/api";
 import { cn, isValidHttpUrl } from "@/lib/utils";
+import { AGENT_GROUP_MAX_SECONDS, AGENT_GROUP_MIN_SECONDS } from "@/lib/waba-text-grouping";
+import { channelHasChatgptCredentials } from "@/lib/chatgpt-channel-credentials";
 import { DiagnoseModal } from "@/components/sessoes/diagnose-modal";
 import { WabaSendHealthNotice } from "@/components/sessoes/waba-send-health-notice";
+import {
+  WabaMarketingMessagesNotice,
+  useWabaMarketingMessagesStatuses,
+} from "@/components/sessoes/waba-marketing-messages-notice";
+import type { MarketingMessagesChannelStatus } from "@/services/meta-marketing-messages";
 import { FarewellMediaManager, FAREWELL_MEDIA_TYPES } from "@/components/sessoes/farewell-media-manager";
 import { InactivityConfigManager } from "@/components/sessoes/inactivity-config-manager";
 import { FarewellTemplateManager, FAREWELL_TEMPLATE_TYPES } from "@/components/sessoes/farewell-template-manager";
 import { RegisterPinDialog } from "@/components/sessoes/register-pin-dialog";
 import { WabaPinPendingBadge } from "@/components/sessoes/waba-pin-pending-badge";
-import { useWabaPinPending } from "@/hooks/use-waba-pin-pending";
+import { useWabaPinPending, invalidateWabaPinPendingCache } from "@/hooks/use-waba-pin-pending";
+import { fetchInstagramTokenStates, type InstagramTokenState } from "@/services/instagram-token-states";
 import { usePageAccess } from "@/hooks/use-page-access";
 import { AccessDenied } from "@/components/layout/access-denied";
 import { getSocket } from "@/lib/socket";
@@ -201,7 +217,13 @@ import { GalleryPickerWithUploadDialog, wabaHeaderFormatToGalleryParams } from "
 import { requestUazapiHistorySync } from "@/services/uazapi-interactive";
 import { takeoverRegistry } from "@/lib/registry-hijack";
 import { OpenAIBaseUrlField } from "@/components/copilot/openai-base-url-field";
-import type { MetaProxyHijackPayload } from "@/hooks/use-meta-proxy-popup";
+import {
+  metaProxySuccessHasPhone,
+  readMetaProxyOnboardingUpdate,
+  describeMetaProxyOnboardingUpdate,
+  type MetaProxyHijackPayload,
+  type MetaProxySuccessPayload,
+} from "@/hooks/use-meta-proxy-popup";
 import { HijackTakeoverDialog } from "@/components/common/hijack-takeover-dialog";
 import { Dialog360CreateChannelDialog } from "@/components/sessoes/dialog360-create-channel-dialog";
 import { GupshupCreateChannelDialog } from "@/components/sessoes/gupshup-create-channel-dialog";
@@ -260,6 +282,10 @@ type SmtpConfig = {
   provider?: string;
   rejectUnauthorized?: boolean;
 };
+// Senha do canal de e-mail como chega a quem não é administrador: o servidor troca o
+// valor real por esta máscara, e salvar com ela mantém a senha gravada (espelho do
+// EMAIL_SECRET_MASK do backend — mudar um exige o outro).
+const EMAIL_PASSWORD_MASK = "***";
 
 // ─── Channel Logos ────────────────────────────────────────
 const CHANNEL_LOGOS: Record<string, string> = {
@@ -354,6 +380,8 @@ const CHANNEL_TYPES: { labelKey: string; value: string; group: string }[] = [
 // Settings keys for AI integrations (mirrors the legacy front's listarConfiguracoes)
 interface IntegrationSettings {
   chatgpt: boolean;
+  // "Habilitar para todos os tickets" (página ChatGPT): só para o alerta de canal sem chave.
+  chatgptAllTickets: boolean;
   typebot: boolean;
   dify: boolean;
   n8n: boolean;
@@ -546,6 +574,7 @@ function selfHealMetaProfilePic(id: number) {
 // ─── Status Label ─────────────────────────────────────────
 function StatusLabel({ item, onRenewActivation }: { item: Whatsapp; onRenewActivation?: (item: Whatsapp) => void }) {
   const t = useTranslations("sessoesPage");
+  const tCommon = useTranslations("common");
   const { status, type } = item;
 
   if (status === "qrcode") {
@@ -589,7 +618,7 @@ function StatusLabel({ item, onRenewActivation }: { item: Whatsapp; onRenewActiv
   if (status === "CONNECTED") {
     let connInfo = "";
     if (isHubType(type) || type === "whatsapp" || type === "baileys" || type === "zapo") {
-      connInfo = item.number || "Carregando...";
+      connInfo = item.number || tCommon("loading");
     } else if (type === "evo") {
       connInfo = item.number || item.wabaId || "";
     } else if (type === "evogo") {
@@ -744,7 +773,13 @@ function SessionCard({
   onShowWebhookInfo,
   onWaLink,
   onUnlinkHybrid,
+  onInstagramReconnect,
+  igTokenState,
+  marketingMessagesStatus,
+  isIgReconnecting = false,
   allChannels,
+  aiAgents = null,
+  chatgptAllTicketsActive = false,
   isRegisteringWoo = false,
   isConnecting = false,
   isQrLoading = false,
@@ -754,6 +789,10 @@ function SessionCard({
   queues: QueueOpt[];
   users: UserOpt[];
   chatFlows: ChatFlow[];
+  /** Agentes de IA da empresa (selo do card); null = não carregou. */
+  aiAgents?: AiAgentSummary[] | null;
+  /** ChatGPT ligado com "Habilitar para todos os tickets": alerta de canal sem chave. */
+  chatgptAllTicketsActive?: boolean;
   onEdit: (item: Whatsapp) => void;
   onDelete: (item: Whatsapp) => void;
   onConnect: (item: Whatsapp) => void;
@@ -774,6 +813,13 @@ function SessionCard({
   onShowWebhookInfo?: (item: Whatsapp) => void;
   onWaLink?: (item: Whatsapp) => void;
   onUnlinkHybrid?: (item: Whatsapp) => void;
+  /** Instagram (login pelo Instagram): abre a janela do Instagram para entrar de novo. */
+  onInstagramReconnect?: (item: Whatsapp) => void;
+  /** Validade do acesso do Instagram (renovação automática); null/undefined = desconhecida. */
+  igTokenState?: InstagramTokenState | null;
+  /** WABA: termos da Marketing Messages API (selo só com "eligible"); null/undefined = sem selo. */
+  marketingMessagesStatus?: MarketingMessagesChannelStatus | null;
+  isIgReconnecting?: boolean;
   allChannels?: Whatsapp[];
   isRegisteringWoo?: boolean;
   isConnecting?: boolean;
@@ -788,6 +834,9 @@ function SessionCard({
     bmToken: item.bmToken,
     wabaVersion: item.wabaVersion,
     webhookOrigin: item.webhookOrigin,
+    // Canal do Embedded Signup: o pendente sai da mesma consulta de qualidade do
+    // card (que só roda com o canal conectado) — sem chamada própria.
+    wabaId: item.status === "CONNECTED" ? item.wabaId : null,
   });
   // Coexistência: itens de sync do app só fazem sentido se o número ainda está
   // no app WhatsApp Business (is_on_biz_app) — em Cloud API puro a Graph retorna
@@ -812,6 +861,60 @@ function SessionCard({
       cancelled = true;
     };
   }, [item.type, item.status, item.bmToken, item.tokenAPI, item.wabaId, item.number, item.wabaVersion]);
+  // Coexistência recém-conectada: a Meta só aceita pedir o histórico e os contatos
+  // do app nas primeiras 24 h depois da conexão — nota destacada com os atalhos.
+  const coexSyncWindowOpen = (() => {
+    if (item.type !== "waba" || !wabaIsCoex || !item.createdAt) return false;
+    const created = new Date(item.createdAt).getTime();
+    if (!Number.isFinite(created)) return false;
+    const age = Date.now() - created;
+    return age >= 0 && age < 24 * 60 * 60 * 1000;
+  })();
+
+  // Instagram pelo login do Instagram (token IGAA): acesso que vence e é renovado
+  // pelo servidor. O sabor vem do próprio token já carregado na lista (nunca exibido).
+  const isIgLogin =
+    item.type === "instagram" &&
+    typeof item.bmToken === "string" &&
+    item.bmToken.startsWith("IGAA");
+  const igAlertsActive = isIgLogin && item.status !== "DISCONNECTED";
+  // Acesso vencido: o aviso do canal OU o estado da renovação marcado como morto
+  // (o aviso pode ter sido limpo por um save antigo; o estado só sai com token novo).
+  const igAuthExpired =
+    igAlertsActive &&
+    ((item.smtpConfig as Record<string, any> | undefined)?.oauth2?.authExpired === true ||
+      igTokenState?.fatal === true);
+  const igExpiry = (() => {
+    if (!igAlertsActive || igAuthExpired || !igTokenState || igTokenState.fatal) {
+      return { expiresInDays: null as number | null, renewFailing: false };
+    }
+    const now = Date.now();
+    const DAY = 24 * 60 * 60 * 1000;
+    let expiresInDays: number | null = null;
+    if (igTokenState.expiresAt) {
+      const exp = new Date(igTokenState.expiresAt).getTime();
+      // "Vence em X dias" só quando falta pouco (< 7 dias): longe disso a renovação
+      // automática cuida sozinha e o aviso seria ruído.
+      if (Number.isFinite(exp) && exp - now < 7 * DAY) {
+        expiresInDays = Math.max(0, Math.ceil((exp - now) / DAY));
+      }
+    }
+    // Renovação falhando: erro registrado numa tentativa dos últimos 7 dias e depois
+    // da última renovação que deu certo.
+    const lastAttempt = igTokenState.lastAttemptAt ? new Date(igTokenState.lastAttemptAt).getTime() : NaN;
+    const lastRefresh = igTokenState.lastRefreshAt ? new Date(igTokenState.lastRefreshAt).getTime() : NaN;
+    const renewFailing =
+      igTokenState.lastErrorCode !== null &&
+      igTokenState.lastErrorCode !== undefined &&
+      String(igTokenState.lastErrorCode) !== "" &&
+      Number.isFinite(lastAttempt) &&
+      now - lastAttempt < 7 * DAY &&
+      (!Number.isFinite(lastRefresh) || lastAttempt > lastRefresh);
+    return { expiresInDays, renewFailing };
+  })();
+  const igNeedsReconnect =
+    igAlertsActive && (igAuthExpired || igExpiry.expiresInDays !== null || igExpiry.renewFailing);
+
   const showQrBtn = isQrType(item.type) && item.status === "qrcode";
   const showNewQrBtn = isQrType(item.type) && item.status === "DISCONNECTED";
   // Passkey nativo (Evolution Go): quando a conta esta travada por passkey, o canal
@@ -971,6 +1074,22 @@ function SessionCard({
     integrityIssues.push(t("integrityImportQueueDeleted", { id: Number(item.queueIdImportMessages) }));
   }
 
+  // Agente de IA vinculado (o tipo local não declara a coluna; a lista do servidor a traz).
+  const linkedAiAgentId = Number((item as Whatsapp & { aiAgentId?: number | null }).aiAgentId) || null;
+  const linkedAiAgent = linkedAiAgentId ? aiAgents?.find((a) => Number(a.id) === linkedAiAgentId) ?? null : null;
+  // O servidor só arma agente ativo (e com o recurso no plano: lista vazia). Lista que
+  // não carregou = não dá para saber, conta como respondendo (sem alarme falso).
+  const linkedAgentAnswers = linkedAiAgentId
+    ? aiAgents === null || (!!linkedAiAgent && linkedAiAgent.isActive !== false)
+    : false;
+  // "Todos os tickets" ligado num canal que aceita ChatGPT, sem chave e sem agente que
+  // responda: o ChatGPT não responde aqui (o servidor não o liga nos atendimentos dele).
+  const chatgptMissingKey =
+    chatgptAllTicketsActive &&
+    supportsAI(item.type) &&
+    !linkedAgentAnswers &&
+    !channelHasChatgptCredentials(item);
+
   return (
     <Card id={`session-card-${item.id}`} data-channel-id={item.id} className="flex flex-col scroll-mt-24">
       <div className="flex items-center gap-3 p-4">
@@ -1067,6 +1186,22 @@ function SessionCard({
               </Tooltip>
             </TooltipProvider>
           )}
+          {chatgptMissingKey && (
+            <TooltipProvider>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <KeyRound
+                    aria-label={t("chatgptNoKeyTitle")}
+                    className="w-3.5 h-3.5 text-amber-500 dark:text-amber-400 flex-shrink-0 cursor-default"
+                  />
+                </TooltipTrigger>
+                <TooltipContent className="max-w-xs">
+                  <p className="font-medium">{t("chatgptNoKeyTitle")}</p>
+                  <p className="mt-1">{t("chatgptNoKeyTooltip")}</p>
+                </TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
+          )}
           {item.chatgptBaseUrl && item.chatgptBaseUrl.trim() && (
             <TooltipProvider>
               <Tooltip>
@@ -1151,6 +1286,7 @@ function SessionCard({
               bmToken={item.bmToken}
               wabaVersion={item.wabaVersion}
               webhookOrigin={item.webhookOrigin}
+              wabaId={item.status === "CONNECTED" ? item.wabaId : null}
               asIcon
               onClick={onRegisterPin ? () => onRegisterPin(item) : undefined}
             />
@@ -1361,6 +1497,16 @@ function SessionCard({
                     {t("revalidateWebhookInstagram")}
                   </DropdownMenuItem>
                 )}
+                {isIgLogin && onInstagramReconnect && (
+                  <DropdownMenuItem
+                    onClick={() => onInstagramReconnect(item)}
+                    disabled={isIgReconnecting}
+                    title={t("igReconnectTooltip")}
+                  >
+                    <Instagram className={cn("w-4 h-4 mr-2", igNeedsReconnect && "text-warning")} />
+                    {t("igReconnect")}
+                  </DropdownMenuItem>
+                )}
                 {item.type === "messenger" && (
                   <DropdownMenuItem onClick={() => onWebhook(item, "messenger")}>
                     <RefreshCw className="w-4 h-4 mr-2" />
@@ -1370,7 +1516,7 @@ function SessionCard({
                 {(item.type === "dialog360" || item.type === "gupshup") && onShowWebhookInfo && (
                   <DropdownMenuItem onClick={() => onShowWebhookInfo(item)}>
                     <Info className="w-4 h-4 mr-2" />
-                    Mostrar webhook info
+                    {t("showWebhookInfo")}
                   </DropdownMenuItem>
                 )}
                 {CAT_CHANNEL_TYPES.includes(item.type) && needsActivationAction(item) && (
@@ -1462,8 +1608,107 @@ function SessionCard({
             <SessionStatusBadge status={item.status} />
             <StatusLabel item={item} onRenewActivation={onRefreshActivationTicket} />
             {item.type === "waba" && <WabaSendHealthNotice whatsappId={item.id} variant="card" />}
+            {item.type === "waba" && (
+              <WabaMarketingMessagesNotice status={marketingMessagesStatus} variant="card" />
+            )}
+            {igAlertsActive && (igAuthExpired || igExpiry.expiresInDays !== null || igExpiry.renewFailing) && (
+              <div className="flex flex-wrap gap-1 mt-1.5">
+                {igAuthExpired && (
+                  <TooltipProvider>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <Badge
+                          variant="outline"
+                          className="gap-1 text-xs border-destructive/40 bg-destructive/10 text-destructive cursor-default"
+                        >
+                          <ShieldAlert className="w-3 h-3" />
+                          {t("igAccessExpired")}
+                        </Badge>
+                      </TooltipTrigger>
+                      <TooltipContent className="max-w-xs text-xs">{t("igAccessExpiredTooltip")}</TooltipContent>
+                    </Tooltip>
+                  </TooltipProvider>
+                )}
+                {igExpiry.expiresInDays !== null && (
+                  <TooltipProvider>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <Badge
+                          variant="outline"
+                          className="gap-1 text-xs border-amber-300 bg-amber-50 text-amber-700 dark:border-amber-700 dark:bg-amber-950/30 dark:text-amber-400 cursor-default"
+                        >
+                          <Clock className="w-3 h-3" />
+                          {t("igAccessExpiresIn", { days: igExpiry.expiresInDays })}
+                        </Badge>
+                      </TooltipTrigger>
+                      <TooltipContent className="max-w-xs text-xs">{t("igAccessExpiresTooltip")}</TooltipContent>
+                    </Tooltip>
+                  </TooltipProvider>
+                )}
+                {igExpiry.renewFailing && (
+                  <TooltipProvider>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <Badge
+                          variant="outline"
+                          className="gap-1 text-xs border-amber-300 bg-amber-50 text-amber-700 dark:border-amber-700 dark:bg-amber-950/30 dark:text-amber-400 cursor-default"
+                        >
+                          <AlertTriangle className="w-3 h-3" />
+                          {t("igRenewFailing")}
+                        </Badge>
+                      </TooltipTrigger>
+                      <TooltipContent className="max-w-xs text-xs">{t("igAccessExpiresTooltip")}</TooltipContent>
+                    </Tooltip>
+                  </TooltipProvider>
+                )}
+              </div>
+            )}
           </div>
         </div>
+        {coexSyncWindowOpen && (
+          <div className="mt-2 rounded-md border border-amber-300 bg-amber-50 p-2 text-xs text-amber-800 dark:border-amber-700 dark:bg-amber-950/30 dark:text-amber-300">
+            <div className="flex items-start gap-1.5">
+              <History className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" />
+              <p className="flex-1 min-w-0">{t("coexSyncWindowHint")}</p>
+              <TooltipProvider>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <button
+                      type="button"
+                      aria-label={t("coexSyncWindowTooltip")}
+                      className="flex-shrink-0 opacity-80 hover:opacity-100"
+                    >
+                      <Info className="w-3.5 h-3.5" />
+                    </button>
+                  </TooltipTrigger>
+                  <TooltipContent className="max-w-xs text-xs">{t("coexSyncWindowTooltip")}</TooltipContent>
+                </Tooltip>
+              </TooltipProvider>
+            </div>
+            <div className="mt-1.5 flex flex-wrap gap-1.5">
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                className="h-auto min-h-7 py-1 px-2 text-xs gap-1 whitespace-normal text-left bg-background/70"
+                onClick={() => onWebhook(item, "smbsynchistory")}
+              >
+                <History className="w-3 h-3" />
+                {t("smbSyncHistory")}
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                className="h-auto min-h-7 py-1 px-2 text-xs gap-1 whitespace-normal text-left bg-background/70"
+                onClick={() => onWebhook(item, "smbsynccontacts")}
+              >
+                <Users className="w-3 h-3" />
+                {t("smbSyncContacts")}
+              </Button>
+            </div>
+          </div>
+        )}
         <p className="text-xs text-muted-foreground mt-2">{t("updatedAt")} {updatedAt}</p>
         <div className="flex gap-1 mt-2 flex-wrap">
           {item.chatFlowId && (
@@ -1507,6 +1752,31 @@ function SessionCard({
                 </TooltipTrigger>
                 <TooltipContent>
                   {users.find((u) => u.id === item.userId)?.name ?? `ID: ${item.userId}`}
+                </TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
+          )}
+          {linkedAiAgentId && (
+            <TooltipProvider>
+              <Tooltip>
+                <TooltipTrigger>
+                  <Badge
+                    variant="outline"
+                    className={cn("gap-1 text-xs", !linkedAgentAnswers && "text-warning")}
+                  >
+                    <Sparkles className="w-3 h-3" />
+                    {t("aiAgentBadge")}
+                  </Badge>
+                </TooltipTrigger>
+                <TooltipContent className="max-w-xs">
+                  <p className="font-medium">
+                    {linkedAiAgent
+                      ? linkedAiAgent.isActive === false
+                        ? t("aiAgentBadgeInactive", { name: linkedAiAgent.name })
+                        : linkedAiAgent.name
+                      : `ID: ${linkedAiAgentId}`}
+                  </p>
+                  <p className="mt-1 text-xs opacity-80">{t("aiAgentBadgeTooltip")}</p>
                 </TooltipContent>
               </Tooltip>
             </TooltipProvider>
@@ -1624,6 +1894,28 @@ function SessionCard({
             }
             {t("connect")}
           </Button>
+        )}
+        {igNeedsReconnect && onInstagramReconnect && (
+          <TooltipProvider>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => onInstagramReconnect(item)}
+                  className="gap-1 border-amber-300 text-amber-700 hover:text-amber-800 dark:border-amber-700 dark:text-amber-400"
+                  disabled={isIgReconnecting}
+                >
+                  {isIgReconnecting
+                    ? <Loader2 className="w-4 h-4 animate-spin" />
+                    : <Instagram className="w-4 h-4" />
+                  }
+                  {t("igReconnect")}
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent className="max-w-xs text-xs">{t("igReconnectTooltip")}</TooltipContent>
+            </Tooltip>
+          </TooltipProvider>
         )}
         {item.status === "OPENING" && (
           <div className="flex items-center gap-2 text-sm text-muted-foreground">
@@ -2057,12 +2349,64 @@ function QrCodeModal({
 }
 
 // ─── Form helpers ─────────────────────────────────────────
-function Field({ label, children, className }: { label: React.ReactNode; children: React.ReactNode; className?: string }) {
+// `labelAddon` fica na linha do rótulo, mas FORA do <label>: um botão dentro de um
+// <label> sem `htmlFor` vira o controle dele, e o clique no texto do rótulo (ou em
+// outro ícone dentro dele) abriria a dica. Sem `labelAddon`, sai igual a antes.
+function Field({ label, children, className, labelAddon }: { label: React.ReactNode; children: React.ReactNode; className?: string; labelAddon?: React.ReactNode }) {
   return (
     <div className={cn("space-y-1", className)}>
-      <Label className="text-sm font-medium">{label}</Label>
+      {labelAddon ? (
+        <div className="flex items-center gap-1.5">
+          <Label className="text-sm font-medium">{label}</Label>
+          {labelAddon}
+        </div>
+      ) : (
+        <Label className="text-sm font-medium">{label}</Label>
+      )}
       {children}
     </div>
+  );
+}
+
+// Dica curta ao lado de um campo do formulário de canal. O Tooltip do Radix não abre
+// por toque (ignora o ponteiro de toque e fecha no clique), então aqui o clique abre e
+// tocar fora fecha: sem isso, no celular/PWA a explicação nunca apareceria. Com a dica
+// já aberta pelo mouse, o gatilho e a camada de fora fechariam no pointerdown e o
+// clique reabriria — por isso os dois preventDefault.
+function ChannelFormTip({ text, icon = "help" }: { text: string; icon?: "help" | "lock" }) {
+  const [open, setOpen] = useState(false);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const Icon = icon === "lock" ? Lock : HelpCircle;
+  return (
+    <TooltipProvider delayDuration={150}>
+      <Tooltip open={open} onOpenChange={setOpen}>
+        <TooltipTrigger asChild>
+          <button
+            ref={triggerRef}
+            type="button"
+            aria-label={text}
+            onPointerDown={(e) => e.preventDefault()}
+            onClick={(e) => {
+              e.preventDefault();
+              setOpen(true);
+            }}
+            className="inline-flex shrink-0 items-center text-muted-foreground hover:text-foreground"
+          >
+            <Icon className="h-3.5 w-3.5" />
+          </button>
+        </TooltipTrigger>
+        <TooltipContent
+          side="top"
+          collisionPadding={16}
+          className="max-w-[18rem] whitespace-normal leading-relaxed"
+          onPointerDownOutside={(e) => {
+            if (triggerRef.current?.contains(e.target as Node)) e.preventDefault();
+          }}
+        >
+          {text}
+        </TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
   );
 }
 
@@ -2178,6 +2522,12 @@ function CollapseSection({
 
 const WABA_VERSIONS = ["v17.0", "v18.0", "v19.0", "v20.0", "v21.0", "v22.0", "v23.0", "v24.0", "v25.0", "v26.0"];
 
+// Textos que o bot do Telegram responde ao link de convite (seção do form em edição):
+// campos editáveis e teto por campo (o backend corta no mesmo tamanho).
+type TelegramInviteTextFields = { confirmText: string; expiredText: string; conflictText: string };
+const TELEGRAM_INVITE_TEXT_KEYS = ["confirmText", "expiredText", "conflictText"] as const;
+const TELEGRAM_INVITE_TEXT_MAX = 1000;
+
 // Baileys import date helpers: backend stores "dd/MM/yyyy HH:mm" in importOldMessages / importRecentMessages
 function formatImportDateTime(date: string, time: string): string {
   if (!date) return "";
@@ -2198,6 +2548,17 @@ function parseImportDateTime(val: string | null | undefined): { date: string; ti
   } catch {
     return { date: "", time: "" };
   }
+}
+
+// "Juntar textos do atendente (segundos)" do canal WABA: vazio = 0 (desligado); aceita
+// 0 ou de 2 a 15, inteiro. `null` = valor inválido (o servidor recusaria com 400).
+function parseWabaGroupSecondsText(text: string): number | null {
+  const v = String(text ?? "").trim();
+  if (v === "") return 0;
+  if (!/^\d+$/.test(v)) return null;
+  const n = Number(v);
+  if (n === 0) return 0;
+  return n >= AGENT_GROUP_MIN_SECONDS && n <= AGENT_GROUP_MAX_SECONDS ? n : null;
 }
 
 function emptyForm(): Omit<Partial<Whatsapp>, "messageQueue"> & { smtpConfig?: SmtpConfig; messageQueue?: string } {
@@ -2348,8 +2709,19 @@ function ChannelModal({
   // Validacao inline do submit: espelha os 4 gates do handleSubmit (toast permanece).
   // Chave por campo -> mensagem; o erro some ao digitar no campo e trocar o tipo de
   // canal limpa todos (o form re-renderiza outro conjunto de campos).
-  type ChannelFormErrors = { name?: string; type?: string; tokenAPI?: string; linkedChannelId?: string; bdHeaderLink?: string };
+  type ChannelFormErrors = { name?: string; type?: string; tokenAPI?: string; linkedChannelId?: string; bdHeaderLink?: string; wabaGroupAgentSeconds?: string };
   const [formErrors, setFormErrors] = useState<ChannelFormErrors>({});
+  // WABA "Economia de mensagens" (docs/PLANO_WABA_JUNTAR_MENSAGENS.md): o bloco só existe
+  // na edição de canal cujo GET já trouxe as chaves — chave ausente = backend sem suporte,
+  // e aí nada vai no PUT. O campo de segundos guarda o texto digitado (validado no salvar).
+  const wabaGroupingAvailable =
+    isEdit &&
+    String(form.type || "") === "waba" &&
+    !!initial &&
+    (Object.prototype.hasOwnProperty.call(initial, "wabaGroupBotMessages") ||
+      Object.prototype.hasOwnProperty.call(initial, "wabaGroupAgentSeconds"));
+  const [wabaGroupSecondsText, setWabaGroupSecondsText] = useState("0");
+  const wabaGroupSecondsFieldRef = useRef<HTMLInputElement>(null);
   const nameFieldRef = useRef<HTMLInputElement>(null);
   const typeTriggerRef = useRef<HTMLButtonElement>(null);
   const wabaTokenFieldRef = useRef<HTMLInputElement>(null);
@@ -2404,6 +2776,13 @@ function ChannelModal({
     (initial?.baileysAuthStore as BaileysAuthStore) || "files"
   );
   const [authStoreSaving, setAuthStoreSaving] = useState(false);
+  // SQLite disponível no servidor? null = não sabe (backend antigo/erro) → a
+  // seção fica como antes, sem trava nem aviso.
+  const [sqliteAuthAvailable, setSqliteAuthAvailable] = useState<boolean | null>(null);
+  // Store gravado no canal (edição) ou escolhido no formulário (criação).
+  const markedAuthStore: BaileysAuthStore = isEdit
+    ? ((initial?.baileysAuthStore as BaileysAuthStore) || "files")
+    : ((form.baileysAuthStore as BaileysAuthStore) || "files");
   // PLANO_ZAPO §13 (F12) — migração baileys→zapo sem novo QR (edição apenas).
   const [zapoMigrateSaving, setZapoMigrateSaving] = useState(false);
   const [zapoMigrateConfirmOpen, setZapoMigrateConfirmOpen] = useState(false);
@@ -2453,6 +2832,12 @@ function ChannelModal({
   const { customDomain: oauthCustomDomain } = useOAuthProxyDomain();
   const sdkScriptRef = useRef<HTMLScriptElement | null>(null);
   const proxyPopupRef = useRef<Window | null>(null);
+  // Última janela da Meta aberta por este formulário e o tipo dela. A escuta do popup
+  // só aceita mensagem dessa janela (D12d: os popups do Gupshup/Dialog360 vêm da mesma
+  // origem e usam os mesmos tipos). A janela continua valendo depois do sucesso: o
+  // resultado do registro automático do número chega depois (`proxy:onboarding-update`).
+  const proxyPopupLastRef = useRef<Window | null>(null);
+  const proxyPopupKindRef = useRef<"waba" | "instagram" | "facebook" | null>(null);
   // Popup do gate de licenca (canal direto) — ref proprio, isolado do proxyPopupRef
   // dos fluxos Meta, para nao colidir com o listener de mensagens `proxy:*`.
   const licenseGatePopupRef = useRef<Window | null>(null);
@@ -2522,6 +2907,11 @@ function ChannelModal({
       } else {
         setForm(emptyForm());
       }
+      // Segundos do atendente (WABA): parte do que o servidor devolveu; sem valor = 0.
+      const initialGroupSeconds = (initial as { wabaGroupAgentSeconds?: unknown } | null)?.wabaGroupAgentSeconds;
+      setWabaGroupSecondsText(
+        typeof initialGroupSeconds === "number" && Number.isFinite(initialGroupSeconds) ? String(initialGroupSeconds) : "0"
+      );
       // F7.7 — sincronizar os selects de lib Baileys / auth store, que são useState
       // separados do `form`. O initializer do useState só roda no 1o mount; sem este
       // reset, editar um canal salvo como v7/infiniteapi carregava o default stale
@@ -2541,6 +2931,22 @@ function ChannelModal({
       fetchAiAgents()
         .then((list) => setAiAgents(Array.isArray(list) ? list : []))
         .catch(() => setAiAgents(null));
+      // Sonda do armazenamento SQLite (1x por abertura, só onde a seção pode
+      // aparecer): canal novo ou Baileys.
+      setSqliteAuthAvailable(null);
+      if (!initial || initial.type === "baileys") {
+        fetchBaileysAuthStoreAvailability()
+          .then(({ data }) => {
+            const available = typeof data?.sqliteAvailable === "boolean" ? data.sqliteAvailable : null;
+            setSqliteAuthAvailable(available);
+            // Canal novo: SQLite escolhido antes de a resposta chegar volta para
+            // Arquivos — o servidor não tem como usá-lo.
+            if (available === false && !initial) {
+              setForm((prev) => (prev.baileysAuthStore === "sqlite" ? { ...prev, baileysAuthStore: "files" } : prev));
+            }
+          })
+          .catch(() => setSqliteAuthAvailable(null));
+      }
       const rawVer = initial?.wabaVersion || "";
       const strippedVer = rawVer.replace(/^v/i, "");
       setManualWabaVersion(!!strippedVer && !["17.0","18.0","19.0","20.0","21.0","22.0","23.0","24.0","25.0"].includes(strippedVer));
@@ -2637,6 +3043,47 @@ function ChannelModal({
     }
   }, [open, initial]);
 
+  // ── Textos do link de convite do Telegram (PLANO_TELEGRAM_LINK_CONVITE D4b/D14b/D16)
+  // Só na EDIÇÃO de canal Telegram. Os textos ficam fora do cadastro do canal, em rota
+  // própria: carregados ao abrir e gravados DEPOIS do save do canal, só quando algum
+  // mudou. null = seção escondida (backend antigo → 404, perfil sem acesso → 403,
+  // banco sem as colunas → available:false). Falha ao gravar não desfaz o save do canal.
+  const isTelegramEdit = isEdit && initial?.type === "telegram";
+  const [tgInviteTexts, setTgInviteTexts] = useState<TelegramInviteTexts | null>(null);
+  const [tgInviteDraft, setTgInviteDraft] = useState<TelegramInviteTextFields>({
+    confirmText: "", expiredText: "", conflictText: "",
+  });
+  useEffect(() => {
+    setTgInviteTexts(null);
+    setTgInviteDraft({ confirmText: "", expiredText: "", conflictText: "" });
+    if (!open || !isTelegramEdit || !initial?.id) return;
+    let alive = true;
+    getTelegramInviteTexts(initial.id)
+      .then(({ data }) => {
+        if (!alive || !data || data.available !== true) return;
+        setTgInviteTexts(data);
+        setTgInviteDraft({
+          confirmText: data.confirmText ?? "",
+          expiredText: data.expiredText ?? "",
+          conflictText: data.conflictText ?? "",
+        });
+      })
+      .catch(() => { /* 404 (backend antigo), 403 ou falha: a seção fica escondida */ });
+    return () => { alive = false; };
+  }, [open, isTelegramEdit, initial?.id]);
+
+  // Só os campos que mudaram em relação ao que o servidor devolveu ("" = volta ao padrão).
+  const buildTelegramInviteTextsUpdate = (): TelegramInviteTextsUpdate | null => {
+    if (!tgInviteTexts) return null;
+    const body: TelegramInviteTextsUpdate = {};
+    TELEGRAM_INVITE_TEXT_KEYS.forEach((key) => {
+      const saved = (tgInviteTexts[key] ?? "").trim();
+      const next = tgInviteDraft[key].trim();
+      if (next !== saved) body[key] = next;
+    });
+    return Object.keys(body).length > 0 ? body : null;
+  };
+
   // Reset launching when OAuth type changes (e.g. switching between waba/instagram/facebook)
   useEffect(() => {
     setLaunching(false);
@@ -2708,8 +3155,27 @@ function ChannelModal({
   useEffect(() => {
     function handleProxyMessage(event: MessageEvent) {
       if (event.origin !== OAUTH_PROXY_URL) return;
+      // D12d: só a janela da Meta aberta por este formulário. Os popups do Gupshup e do
+      // Dialog360 (mesma origem, mesmos tipos de mensagem) têm escuta própria.
+      const source = event.source;
+      if (!source || (source !== proxyPopupRef.current && source !== proxyPopupLastRef.current)) return;
       const metaExpectedOrigin = OAUTH_PROXY_URL;
       const { type, error, errorCode, data: msgData, hijack: msgHijack } = (event.data || {}) as { type?: string; error?: string; errorCode?: string | null; data?: any; hijack?: any };
+      if (type === "proxy:onboarding-update") {
+        // Resultado do registro automático do número / sincronização da coexistência,
+        // depois do sucesso. Nunca traz PIN nem token.
+        const { registeredPhoneId, notices } = describeMetaProxyOnboardingUpdate(
+          readMetaProxyOnboardingUpdate(event.data)
+        );
+        if (registeredPhoneId) {
+          invalidateWabaPinPendingCache({ phoneNumberId: registeredPhoneId, markRegistered: true });
+        }
+        notices.forEach((n) => {
+          if (n.level === "success") toast.success(t(n.key));
+          else toast.warning(t(n.key), { duration: 10000 });
+        });
+        return;
+      }
       if (type === "proxy:ready") {
         const popup = proxyPopupRef.current;
         if (!popup || popup.closed) return;
@@ -2747,9 +3213,35 @@ function ChannelModal({
         sendCredentials();
         // When using proxy mode, the popup handles exchange itself via /api/exchange-waba
       } else if (type === "proxy:success") {
-        toast.success(t("waChannelCreated"));
+        const successData = (msgData && typeof msgData === "object" ? msgData : {}) as MetaProxySuccessPayload;
+        // Tipo pelo formato da resposta (o popup do Instagram pode seguir pelo login do
+        // Facebook na mesma janela) e, sem pista, pelo botão que abriu a janela.
+        const isFacebookShape = Array.isArray(successData.pages) || Array.isArray(successData.instagram);
+        const isInstagramShape =
+          !isFacebookShape && (successData.userId != null || successData.user_id != null);
+        const successKind = isFacebookShape
+          ? "facebook"
+          : isInstagramShape
+            ? "instagram"
+            : (proxyPopupKindRef.current || "waba");
         setLaunching(false);
         proxyPopupRef.current = null;
+        if (successKind === "waba" && !metaProxySuccessHasPhone(successData)) {
+          // A Meta autorizou mas nenhum número veio: nenhum canal foi criado (proxy
+          // antigo avisava "sucesso" assim). Aviso — o modal fica aberto para tentar de novo.
+          toast.warning(t("waConnectedNoPhone"), { duration: 10000 });
+          setOauthFailed(true);
+          return;
+        }
+        if (successKind === "instagram") {
+          toast.success(t("instagramChannelConnected"));
+        } else if (successKind === "facebook") {
+          const pagesCount = Array.isArray(successData.pages) ? successData.pages.length : 0;
+          const igCount = Array.isArray(successData.instagram) ? successData.instagram.length : 0;
+          toast.success(pagesCount === 0 && igCount > 0 ? t("instagramChannelConnected") : t("facebookChannelConnected"));
+        } else {
+          toast.success(t("waChannelCreated"));
+        }
         onSaved();
         onClose();
         if (msgHijack && onHijack) {
@@ -2797,7 +3289,8 @@ function ChannelModal({
           // Proxy novo manda errorCode; proxy antigo so a mensagem (que pode ser o
           // proprio codigo) — os dois passam pelo mesmo mapa.
           const key = channelCreateErrorKey(errorCode || error);
-          toast.error(key ? t(key) : (error || t("waOauthError")));
+          const description = channelCreateErrorDetail(errorCode, error);
+          toast.error(key ? t(key) : (error || t("waOauthError")), description ? { description } : undefined);
           setOauthFailed(true);
         }
       }
@@ -2991,7 +3484,7 @@ function ChannelModal({
       const res = await getTemplatesForChannel({ id: (form as any).id, type, tokenAPI, appId: (form as any).appId });
       const list = (Array.isArray(res) ? res : (res as { data?: WabaTemplate[] })?.data || []) as WabaTemplate[];
       setBdTplList([...list].sort((a, b) => (a.name || "").toLowerCase().localeCompare((b.name || "").toLowerCase())));
-    } catch { toast.error(t("birthdayTemplateLoadError")); }
+    } catch (err) { toast.error(metaRateLimitedMessage(err, tCommon) ?? (isMetaTokenUnauthorized(err) ? tCommon("metaTokenInvalidReconnect") : t("birthdayTemplateLoadError"))); }
     finally { setBdTplLoading(false); }
   }
 
@@ -3115,19 +3608,26 @@ function ChannelModal({
     return `${OAUTH_PROXY_URL}/${channel}-signup?callbackOrigin=${cb}`;
   }
 
+  function rememberMetaPopup(popup: Window, kind: "waba" | "instagram" | "facebook") {
+    proxyPopupRef.current = popup;
+    proxyPopupLastRef.current = popup;
+    proxyPopupKindRef.current = kind;
+  }
+
   function launchWhatsAppOAuth() {
     setOauthFailed(false);
     if (usingProxy) {
       setLaunching(true);
       const popup = window.open(buildMetaPopupUrl("waba"), "waba-proxy-signup", "width=600,height=700");
-      proxyPopupRef.current = popup;
+      if (!popup) { toast.error(t("popupBlocked")); setLaunching(false); return; }
+      rememberMetaPopup(popup, "waba");
       return;
     }
     if (!selectedAppWaba?.configId) { toast.error(t("configIdNotSet")); return; }
     setLaunching(true);
     const popup = window.open(buildMetaPopupUrl("waba"), "waba-oauth", "width=600,height=700,scrollbars=yes,resizable=yes");
     if (!popup) { toast.error(t("popupBlocked")); setLaunching(false); return; }
-    proxyPopupRef.current = popup;
+    rememberMetaPopup(popup, "waba");
   }
 
   function launchInstagramOAuth() {
@@ -3135,7 +3635,7 @@ function ChannelModal({
     setLaunching(true);
     const popup = window.open(buildMetaPopupUrl("instagram"), "instagram-oauth", "width=600,height=700,scrollbars=yes,resizable=yes");
     if (!popup) { toast.error(t("popupBlocked")); setLaunching(false); return; }
-    proxyPopupRef.current = popup;
+    rememberMetaPopup(popup, "instagram");
   }
 
   function launchFacebookOAuth() {
@@ -3143,7 +3643,7 @@ function ChannelModal({
     setLaunching(true);
     const popup = window.open(buildMetaPopupUrl("facebook"), "facebook-oauth", "width=600,height=700,scrollbars=yes,resizable=yes");
     if (!popup) { toast.error(t("popupBlocked")); setLaunching(false); return; }
-    proxyPopupRef.current = popup;
+    rememberMetaPopup(popup, "facebook");
   }
 
   async function handleUazapiHistorySync() {
@@ -3316,6 +3816,14 @@ function ChannelModal({
       return;
     }
 
+    // WABA "Juntar textos do atendente": 0 desliga, senão de 2 a 15 (o servidor recusa o resto).
+    if (wabaGroupingAvailable && parseWabaGroupSecondsText(wabaGroupSecondsText) === null) {
+      setFormErrors({ wabaGroupAgentSeconds: t("wabaGroupAgentInvalid") });
+      focusInvalidField(wabaGroupSecondsFieldRef.current);
+      toast.error(t("wabaGroupAgentInvalid"));
+      return;
+    }
+
     // Todos os gates passaram — limpa residuos de tentativas anteriores
     setFormErrors((prev) => (Object.keys(prev).length ? {} : prev));
 
@@ -3448,6 +3956,15 @@ function ChannelModal({
       // Agente de IA: o campo SÓ viaja quando a sonda carregou (backend com o recurso).
       // Em backend antigo nada muda no payload — rollout aditivo sem regressão.
       if (aiAgents === null) delete payload.aiAgentId;
+      // WABA "Economia de mensagens": as 2 chaves só viajam quando o bloco apareceu
+      // (o GET do canal as trouxe); senão ficam fora do PUT.
+      if (wabaGroupingAvailable) {
+        payload.wabaGroupBotMessages = form.wabaGroupBotMessages === true;
+        payload.wabaGroupAgentSeconds = parseWabaGroupSecondsText(wabaGroupSecondsText) ?? 0;
+      } else {
+        delete payload.wabaGroupBotMessages;
+        delete payload.wabaGroupAgentSeconds;
+      }
       // IA da plataforma na seção ChatGPT: vai o marcador no lugar da chave e os campos
       // que só existem com chave própria são LIMPOS — organização e endereço próprio não
       // valem nesse modo, e um Assistant ID esquecido mandaria o atendimento para a API
@@ -3515,6 +4032,19 @@ function ChannelModal({
         await updateWhatsapp(savedId, fmData);
       }
 
+      // Textos do convite do Telegram: depois do save do canal e só se algum mudou.
+      // Falha aqui avisa sem desfazer o que já foi salvo no canal.
+      if (isEdit && initial?.id) {
+        const tgInviteBody = buildTelegramInviteTextsUpdate();
+        if (tgInviteBody) {
+          try {
+            await updateTelegramInviteTexts(initial.id, tgInviteBody);
+          } catch {
+            toast.error(t("telegramInviteTextsSaveError"));
+          }
+        }
+      }
+
       onSaved();
       onClose();
     } catch (err: unknown) {
@@ -3531,6 +4061,18 @@ function ChannelModal({
           identifier:   d.identifier  || null,
           callbackUrl:  d.callbackUrl  || null,
         });
+        return;
+      }
+      // Canal de e-mail: quem não é administrador recebe a senha mascarada, e trocar o
+      // servidor (SMTP/IMAP/POP3) sem digitar a senha de novo é recusado pelo servidor.
+      if (getBackendErrorCode(err) === "ERR_EMAIL_PASSWORD_REQUIRED") {
+        toast.error(t("emailPasswordRequired"));
+        return;
+      }
+      // WABA: segundos do atendente fora de 0 ou 2 a 15 (o servidor valida antes de gravar).
+      if (getBackendErrorCode(err) === "ERR_WABA_GROUPING_SECONDS_INVALID") {
+        setFormErrors({ wabaGroupAgentSeconds: t("wabaGroupAgentInvalid") });
+        toast.error(t("wabaGroupAgentInvalid"));
         return;
       }
       const errCode = d?.error || d?.message || "";
@@ -4075,7 +4617,7 @@ function ChannelModal({
                     <Input
                       value={(form.appId as string) || ""}
                       onChange={(e) => setField("appId", e.target.value)}
-                      placeholder="Opcional"
+                      placeholder={t("optionalPlaceholder")}
                     />
                   </Field>
                 </>
@@ -4175,14 +4717,72 @@ function ChannelModal({
             </CollapseSection>
           )}
 
+          {/* Economia de mensagens (docs/PLANO_WABA_JUNTAR_MENSAGENS.md): robôs juntam os textos
+              seguidos numa mensagem e a tela do atendente espera X s para juntar os dele.
+              Só na edição de canal cujo GET trouxe as chaves (backend antigo = bloco oculto). */}
+          {type === "waba" && wabaGroupingAvailable && (
+            <CollapseSection
+              title={t("wabaGroupingTitle")}
+              defaultOpen={form.wabaGroupBotMessages === true || (parseWabaGroupSecondsText(wabaGroupSecondsText) ?? 1) > 0}
+            >
+              <div className="flex items-start justify-between gap-3 py-2">
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-1.5">
+                    <Label htmlFor="wabaGroupBotMessages" className="cursor-pointer text-sm font-medium leading-snug">
+                      {t("wabaGroupBotLabel")}
+                    </Label>
+                    <ChannelFormTip text={t("wabaGroupBotTip")} />
+                  </div>
+                  <p className="text-xs text-muted-foreground mt-0.5">{t("wabaGroupBotHint")}</p>
+                </div>
+                <Switch
+                  id="wabaGroupBotMessages"
+                  checked={form.wabaGroupBotMessages === true}
+                  onCheckedChange={(v) => setField("wabaGroupBotMessages", v)}
+                  className="mt-0.5 flex-shrink-0"
+                />
+              </div>
+              <Field label={t("wabaGroupAgentLabel")} labelAddon={<ChannelFormTip text={t("wabaGroupAgentTip")} />}>
+                <Input
+                  ref={wabaGroupSecondsFieldRef}
+                  type="number"
+                  inputMode="numeric"
+                  min={0}
+                  max={AGENT_GROUP_MAX_SECONDS}
+                  step={1}
+                  value={wabaGroupSecondsText}
+                  onChange={(e) => {
+                    setWabaGroupSecondsText(e.target.value);
+                    clearFormError("wabaGroupAgentSeconds");
+                  }}
+                  className={cn(
+                    "w-full sm:w-32",
+                    formErrors.wabaGroupAgentSeconds && "border-destructive focus-visible:border-destructive focus-visible:ring-destructive/20"
+                  )}
+                  aria-invalid={!!formErrors.wabaGroupAgentSeconds}
+                />
+                {formErrors.wabaGroupAgentSeconds ? (
+                  <p className="mt-1 text-xs text-destructive">{formErrors.wabaGroupAgentSeconds}</p>
+                ) : (
+                  <p className="text-xs text-muted-foreground mt-1">{t("wabaGroupAgentHint")}</p>
+                )}
+              </Field>
+            </CollapseSection>
+          )}
+
           {/* Z-API / UaZapi */}
           {(type === "zapi" || type === "uazapi") && (
             <CollapseSection title={type === "zapi" ? "Z-API" : "UaZapi"} defaultOpen={true}>
-              <Field label="API Token">
+              {/* UAzapi: o status é conferido a cada 10 min e só vira desconectado depois
+                  de 30 min sem confirmação — religa sozinho quando a instância volta. */}
+              <Field
+                label="API Token"
+                labelAddon={type === "uazapi" ? <ChannelFormTip text={t("uazapiStatusCheckTip")} /> : undefined}
+              >
                 <Input
                   value={(form.tokenAPI as string) || ""}
                   onChange={(e) => setField("tokenAPI", e.target.value)}
-                  placeholder="Token da API"
+                  placeholder={t("apiTokenPlaceholder")}
                 />
               </Field>
               <Field label="Number ID (Instance ID)">
@@ -4402,7 +5002,29 @@ function ChannelModal({
                   ? ((initial?.baileysLib as BaileysLib) || "fork") === "infiniteapi"
                   : ((form.baileysLib as BaileysLib) || "fork") === "infiniteapi") && (
                   <div className={cn("space-y-2 min-w-0", (isEdit || !infiniteChoice) && "border-t pt-3")}>
-                    <Field label={t("baileysAuthStoreLabel")}>
+                    <Field
+                      label={
+                        <span className="flex items-center gap-1.5">
+                          {t("baileysAuthStoreLabel")}
+                          <TooltipProvider>
+                            <Tooltip>
+                              <TooltipTrigger asChild>
+                                <button
+                                  type="button"
+                                  className="text-muted-foreground hover:text-foreground"
+                                  aria-label={t("baileysAuthStoreHelp")}
+                                >
+                                  <HelpCircle className="h-3.5 w-3.5" />
+                                </button>
+                              </TooltipTrigger>
+                              <TooltipContent className="max-w-xs">
+                                <p>{t("baileysAuthStoreHelp")}</p>
+                              </TooltipContent>
+                            </Tooltip>
+                          </TooltipProvider>
+                        </span>
+                      }
+                    >
                       <Select
                         value={isEdit ? authStoreSelected : ((form.baileysAuthStore as BaileysAuthStore) || "files")}
                         onValueChange={(v) => {
@@ -4418,11 +5040,29 @@ function ChannelModal({
                         </SelectTrigger>
                         <SelectContent>
                           <SelectItem value="files">{t("baileysAuthStoreFiles")}</SelectItem>
-                          <SelectItem value="sqlite">{t("baileysAuthStoreSqlite")}</SelectItem>
+                          {/* Sem o componente no servidor, SQLite não é oferecido — só
+                              continua selecionável no canal que já está marcado assim. */}
+                          <SelectItem
+                            value="sqlite"
+                            disabled={sqliteAuthAvailable === false && markedAuthStore !== "sqlite"}
+                          >
+                            {t("baileysAuthStoreSqlite")}
+                          </SelectItem>
                         </SelectContent>
                       </Select>
                     </Field>
                     <p className="text-xs text-muted-foreground break-words">{t("baileysAuthStoreDesc")}</p>
+                    {sqliteAuthAvailable === false && (
+                      markedAuthStore === "sqlite" ? (
+                        <div className="rounded-md bg-warning/10 border border-warning/30 p-3 text-xs text-foreground break-words">
+                          {t("baileysAuthStoreSqliteUnavailableActive")}
+                        </div>
+                      ) : (
+                        <p className="text-xs text-muted-foreground break-words">
+                          {t("baileysAuthStoreSqliteUnavailable")}
+                        </p>
+                      )
+                    )}
                     {isEdit && authStoreSelected !== (((initial?.baileysAuthStore as BaileysAuthStore) || "files")) && (
                       <div className="rounded-md bg-info/10 border border-info/30 p-3 text-xs text-foreground break-words">
                         {t("baileysAuthStoreApplyWarning")}
@@ -4625,6 +5265,33 @@ function ChannelModal({
                   placeholder="123456789:ABCdef..."
                 />
               </Field>
+              {/* Textos do link de convite (só em edição; escondida sem suporte no servidor).
+                  Vazio = o bot usa o texto padrão, mostrado como placeholder. */}
+              {isTelegramEdit && tgInviteTexts && (
+                <div className="space-y-3">
+                  <SectionTitle>{t("telegramInviteTextsTitle")}</SectionTitle>
+                  <p className="text-xs text-muted-foreground">{t("telegramInviteTextsNote")}</p>
+                  {([
+                    { key: "confirmText", labelKey: "telegramInviteConfirmLabel" },
+                    { key: "expiredText", labelKey: "telegramInviteExpiredLabel" },
+                    { key: "conflictText", labelKey: "telegramInviteConflictLabel" },
+                  ] as const).map(({ key, labelKey }) => (
+                    <Field key={key} label={t(labelKey)}>
+                      <Textarea
+                        value={tgInviteDraft[key]}
+                        onChange={(e) => {
+                          const value = e.target.value.slice(0, TELEGRAM_INVITE_TEXT_MAX);
+                          setTgInviteDraft((prev) => ({ ...prev, [key]: value }));
+                        }}
+                        placeholder={tgInviteTexts.defaults?.[key] ?? ""}
+                        maxLength={TELEGRAM_INVITE_TEXT_MAX}
+                        rows={3}
+                        className="resize-y min-h-[72px]"
+                      />
+                    </Field>
+                  ))}
+                </div>
+              )}
             </CollapseSection>
           )}
 
@@ -4711,21 +5378,24 @@ function ChannelModal({
                     <p className="font-semibold text-info">{t("oauth2HowTo")}</p>
                     <ol className="list-decimal list-inside space-y-1">
                       <li>
-                        Acesse{" "}
-                        <a
-                          href="https://console.cloud.google.com"
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="underline font-medium text-info"
-                        >
-                          https://console.cloud.google.com
-                        </a>
+                        {t.rich("googleCloudStep1", {
+                          link: (chunks) => (
+                            <a
+                              href="https://console.cloud.google.com"
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="underline font-medium text-info"
+                            >
+                              {chunks}
+                            </a>
+                          ),
+                        })}
                       </li>
-                      <li>Crie um projeto ou selecione um existente</li>
-                      <li>Habilite a Gmail API</li>
-                      <li>Crie credenciais OAuth2 (tipo: Aplicativo Web)</li>
-                      <li>Configure as URLs autorizadas de redirecionamento</li>
-                      <li>Copie o Client ID e Client Secret para os campos abaixo</li>
+                      <li>{t("googleCloudStep2")}</li>
+                      <li>{t("googleCloudStep3")}</li>
+                      <li>{t("googleCloudStep4")}</li>
+                      <li>{t("googleCloudStep5")}</li>
+                      <li>{t("googleCloudStep6")}</li>
                     </ol>
                   </div>
                 )}
@@ -4747,7 +5417,10 @@ function ChannelModal({
                         placeholder="*.apps.googleusercontent.com"
                       />
                     </Field>
-                    <Field label="Client Secret">
+                    <Field
+                      label="Client Secret"
+                      labelAddon={smtpOAuth2.client_secret === EMAIL_PASSWORD_MASK ? <ChannelFormTip icon="lock" text={t("emailSecretMaskedTip")} /> : undefined}
+                    >
                       <Input
                         value={String(smtpOAuth2.client_secret || "")}
                         onChange={(e) => setSmtpOAuth2Field("client_secret", e.target.value)}
@@ -4773,12 +5446,14 @@ function ChannelModal({
                 )}
 
                 {/* Configurar OAuth2 button — funciona em create e edit.
-                    Em create, salva o canal primeiro para obter o id. */}
+                    Em create, salva o canal primeiro para obter o id. Ao lado, a dica do
+                    recebimento pelo Gmail (saudação, fluxo, ausência, gatilhos de campanha). */}
+                <div className="flex items-center gap-2 mt-1">
                 <Button
                   type="button"
                   size="sm"
                   variant="default"
-                  className="w-full mt-1"
+                  className="flex-1 min-w-0"
                   disabled={useOwnGoogleApp && (!smtpOAuth2.client_id?.trim() || !smtpOAuth2.client_secret)}
                   onClick={async () => {
                     let whatsappId = initial?.id ?? null;
@@ -4847,6 +5522,8 @@ function ChannelModal({
                 >
                   {t("oauth2ConfigureBtn")}
                 </Button>
+                <ChannelFormTip text={t("emailAutomationsTip")} />
+                </div>
               </CollapseSection>
               )}
 
@@ -4891,11 +5568,11 @@ function ChannelModal({
                             setSmtpImapField("port", data.imap.port);
                             setSmtpImapField("tls", data.imap.tls);
                             setSmtpImapField("user", email);
-                            if (smtpAuth.pass) setSmtpImapField("pass", String(smtpAuth.pass || ""));
+                            if (smtpAuth.pass) setSmtpImapField("pass", smtpAuth.pass === EMAIL_PASSWORD_MASK ? "" : String(smtpAuth.pass || ""));
                           }
                         } catch { /* silencioso no blur */ }
                       }}
-                      placeholder="seu@email.com"
+                      placeholder={t("autodetectEmailPlaceholder")}
                     />
                   </Field>
                   {/* Phase 16 — botao Detectar so para type=email; webmail e sempre Gmail */}
@@ -4929,7 +5606,7 @@ function ChannelModal({
                           setSmtpImapField("tls", data.imap.tls);
                           // Espelha user/pass para IMAP automaticamente
                           setSmtpImapField("user", String(smtpAuth.user || ""));
-                          setSmtpImapField("pass", String(smtpAuth.pass || ""));
+                          setSmtpImapField("pass", smtpAuth.pass === EMAIL_PASSWORD_MASK ? "" : String(smtpAuth.pass || ""));
                           // Phase 16 — confidence "low" = sugestao baseada em convencao, user deve verificar
                           if (data.confidence === "low") {
                             toast.warning(
@@ -4952,7 +5629,9 @@ function ChannelModal({
                   )}
                 </div>
 
-                {/* Senha de app com tooltip explicativo */}
+                {/* Senha de app com tooltip explicativo. Com a senha mascarada (quem não é
+                    administrador recebe "***"), o cadeado explica que salvar mantém a senha
+                    atual e que trocar o servidor pede a senha de novo. */}
                 <Field label={
                   <span className="inline-flex items-center gap-1">
                     {t("smtpAppPasswordLabel" as any) || "Senha de aplicativo"}
@@ -4980,7 +5659,9 @@ function ChannelModal({
                       </Tooltip>
                     </TooltipProvider>
                   </span>
-                }>
+                }
+                  labelAddon={smtpAuth.pass === EMAIL_PASSWORD_MASK ? <ChannelFormTip icon="lock" text={t("emailPasswordMaskedTip")} /> : undefined}
+                >
                   <Input
                     type="password"
                     value={String(smtpAuth.pass || "")}
@@ -5031,14 +5712,14 @@ function ChannelModal({
                     <Input
                       value={String(smtp.from || "")}
                       onChange={(e) => setSmtpField("from", e.target.value)}
-                      placeholder="Nome Empresa <noreply@empresa.com>"
+                      placeholder={t.raw("smtpFromPlaceholder") as string}
                     />
                   </Field>
                   <Field label={t("smtpReplyToLabel")}>
                     <Input
                       value={String(smtp.replyTo || "")}
                       onChange={(e) => setSmtpField("replyTo", e.target.value)}
-                      placeholder="resposta@empresa.com"
+                      placeholder={t("smtpReplyToPlaceholder")}
                     />
                   </Field>
                 </CollapseSection>
@@ -5170,7 +5851,9 @@ function ChannelModal({
                       </Button>
                     </div>
                   </div>
-                  <Field label={t("imapHostLabel")}>
+                  {/* Dica do recebimento: e-mail que chega (IMAP, ou POP3 como reserva)
+                      passa pela saudação da fila, fluxo, ausência e gatilhos de campanha. */}
+                  <Field label={t("imapHostLabel")} labelAddon={<ChannelFormTip text={t("emailAutomationsTip")} />}>
                     <Input
                       value={String(smtpImap.host || "")}
                       onChange={(e) => setSmtpImapField("host", e.target.value)}
@@ -5200,7 +5883,7 @@ function ChannelModal({
                       <Input
                         value={String(smtpImap.user || "")}
                         onChange={(e) => setSmtpImapField("user", e.target.value)}
-                        placeholder="usuario@dominio.com"
+                        placeholder={t("imapUserPlaceholder")}
                       />
                     </Field>
                     <Button
@@ -5209,13 +5892,24 @@ function ChannelModal({
                       variant="outline"
                       onClick={() => {
                         setSmtpImapField("user", String(smtpAuth.user || ""));
-                        setSmtpImapField("pass", String(smtpAuth.pass || ""));
+                        // Senha do SMTP mascarada: o IMAP fica em branco e usa a do SMTP
+                        // (copiar a máscara manteria a senha IMAP antiga ao salvar).
+                        setSmtpImapField("pass", smtpAuth.pass === EMAIL_PASSWORD_MASK ? "" : String(smtpAuth.pass || ""));
                       }}
                     >
                       {t("imapUseSameAsSmtpBtn")}
                     </Button>
                   </div>
-                  <Field label={t("imapPassLabel")}>
+                  <Field
+                    label={t("imapPassLabel")}
+                    labelAddon={
+                      smtpImap.pass === EMAIL_PASSWORD_MASK ? (
+                        <ChannelFormTip icon="lock" text={t("emailPasswordMaskedTip")} />
+                      ) : !smtpImap.pass && smtpAuth.pass ? (
+                        <ChannelFormTip text={t("imapPassUsesSmtpTip")} />
+                      ) : undefined
+                    }
+                  >
                     <Input
                       type="password"
                       value={String(smtpImap.pass || "")}
@@ -5300,7 +5994,7 @@ function ChannelModal({
                       onChange={(e) =>
                         setForm((prev) => ({ ...prev, emailSignature: e.target.value }))
                       }
-                      placeholder="<p>Atenciosamente,<br/>Equipe</p>"
+                      placeholder={t.raw("emailSignaturePlaceholder") as string}
                     />
                   </Field>
                 </CollapseSection>
@@ -5420,7 +6114,7 @@ function ChannelModal({
 
           {/* BSP Webhook Info — config manual no painel (Customer Account) */}
           {isEdit && (type === "dialog360" || type === "gupshup") && initial?.id && (
-            <CollapseSection title="Configurar webhook no painel BSP" defaultOpen={false}>
+            <CollapseSection title={t("bspWebhookConfigSection")} defaultOpen={false}>
               <BspWebhookInfoCard
                 channelType={type as "dialog360" | "gupshup"}
                 whatsappId={Number(initial.id)}
@@ -5431,7 +6125,7 @@ function ChannelModal({
           {/* Editar dados do app Gupshup (src.name/appName, App ID, token, numero,
               phoneNumberId, wabaId) pos-criacao — corrige dado errado sem SQL. */}
           {isEdit && type === "gupshup" && initial?.id && (
-            <CollapseSection title="Editar dados do app Gupshup" defaultOpen={false}>
+            <CollapseSection title={t("gupshupEditDataSection")} defaultOpen={false}>
               <GupshupChannelDataEditor whatsappId={Number(initial.id)} />
             </CollapseSection>
           )}
@@ -5439,7 +6133,7 @@ function ChannelModal({
           {/* Editar dados do canal Dialog360 (apiKey, phoneNumberId, wabaIdMeta)
               pos-criacao — corrige dado errado sem SQL. */}
           {isEdit && type === "dialog360" && initial?.id && (
-            <CollapseSection title="Editar dados do canal Dialog360" defaultOpen={false}>
+            <CollapseSection title={t("dialog360EditDataSection")} defaultOpen={false}>
               <Dialog360ChannelDataEditor whatsappId={Number(initial.id)} />
             </CollapseSection>
           )}
@@ -5466,7 +6160,7 @@ function ChannelModal({
                   <Textarea
                     value={(form.rescueWindowMessage as string) || ""}
                     onChange={(e) => setField("rescueWindowMessage", e.target.value)}
-                    placeholder="Mensagem enviada automaticamente na janela de resgate..."
+                    placeholder={t("rescueWindowMsgPlaceholder")}
                     rows={3}
                   />
                 </Field>
@@ -5482,7 +6176,7 @@ function ChannelModal({
                 <Input
                   value={(form.wabaId as string) || ""}
                   onChange={(e) => setField("wabaId", e.target.value)}
-                  placeholder="https://minha-loja.com"
+                  placeholder={t("woocommerceStoreUrlPlaceholder")}
                   className="font-mono text-xs"
                 />
                 <p className="text-xs text-muted-foreground mt-1">{t("woocommerceStoreUrlHint")}</p>
@@ -5623,7 +6317,14 @@ function ChannelModal({
                 <SearchableSelect
                   options={[
                     { value: "__none__", label: t("aiAgentSection.none") },
-                    ...aiAgents.map((a) => ({ value: String(a.id), label: a.name })),
+                    // v7 — agente "só base" não atende: fica fora, salvo o já vinculado
+                    // (com marca). Sem o campo (backend antigo) todos aparecem.
+                    ...aiAgents
+                      .filter((a) => a.kbOnly !== true || String(a.id) === String((form as any).aiAgentId ?? ""))
+                      .map((a) => ({
+                        value: String(a.id),
+                        label: a.kbOnly === true ? `${a.name} ${tAiAgents("markerKbOnly")}` : a.name,
+                      })),
                   ]}
                   value={(form as any).aiAgentId != null ? String((form as any).aiAgentId) : "__none__"}
                   onValueChange={(v) =>
@@ -5640,12 +6341,40 @@ function ChannelModal({
                   <AlertDescription>{t("aiAgentSection.precedenceWarning")}</AlertDescription>
                 </Alert>
               )}
+              {/* O agente arma só atendimento NOVO e zera o ChatGPT do canal nele; os
+                  que já estavam abertos seguem com a configuração de antes. */}
+              {(form as any).aiAgentId != null && (
+                <Alert>
+                  <Info className="h-4 w-4" />
+                  <AlertDescription>{t("aiAgentSection.chatgptNote")}</AlertDescription>
+                </Alert>
+              )}
             </CollapseSection>
           )}
 
           {/* ChatGPT */}
           {integrationSettings.chatgpt && supportsAI(type) && (
             <CollapseSection title="ChatGPT" defaultOpen={false}>
+              {/* "Todos os tickets" ligado e canal sem chave nem agente: o servidor não liga
+                  o ChatGPT nos atendimentos deste canal (helpers/ChatgptChannelCredentialsZPRO). */}
+              {integrationSettings.chatgptAllTickets &&
+                !chatgptPlatformMode &&
+                // Agente vinculado só conta se ativo (o servidor não arma inativo); lista
+                // que não carregou não decide.
+                ((form as any).aiAgentId == null ||
+                  (aiAgents !== null &&
+                    !aiAgents.some(
+                      (a) => String(a.id) === String((form as any).aiAgentId) && a.isActive !== false
+                    ))) &&
+                !channelHasChatgptCredentials({
+                  chatgptApiKey: form.chatgptApiKey as string | null | undefined,
+                  chatgptBaseUrl: form.chatgptBaseUrl as string | null | undefined,
+                }) && (
+                  <Alert variant="warning">
+                    <AlertTriangle className="h-4 w-4" />
+                    <AlertDescription>{t("chatgptNoKeyModalWarning")}</AlertDescription>
+                  </Alert>
+                )}
               {/* Não renderiza nada (nem faz request) sem o recurso liberado na empresa.
                   No modo plataforma é ele que mostra o modelo. */}
               <PlatformAiSelector
@@ -5671,7 +6400,7 @@ function ChannelModal({
                     onChange={(v) => setField("chatgptBaseUrl", v)}
                     context="channel"
                   />
-                  <Field label="Organization Key (opcional)">
+                  <Field label={t("chatgptOrgKeyLabel")}>
                     <Input
                       value={(form.chatgptOrganizationId as string) || ""}
                       onChange={(e) => setField("chatgptOrganizationId", e.target.value)}
@@ -5684,7 +6413,7 @@ function ChannelModal({
                 <Input
                   value={(form.chatgptOff as string) || ""}
                   onChange={(e) => setField("chatgptOff", e.target.value)}
-                  placeholder="Ex: #sair"
+                  placeholder={t("stopWordPlaceholder")}
                 />
               </Field>
               <Field label="Prompt">
@@ -5697,7 +6426,7 @@ function ChannelModal({
               </Field>
               {!chatgptPlatformMode && (
                 <>
-                  <Field label="Assistant ID (opcional)">
+                  <Field label={t("chatgptAssistantIdLabel")}>
                     <Input
                       value={(form.assistantId as string) || ""}
                       onChange={(e) => setField("assistantId", e.target.value)}
@@ -5724,7 +6453,7 @@ function ChannelModal({
                       ))}
                     </datalist>
                     <p className="text-[11px] text-muted-foreground mt-1">
-                      Modelos com visão (analisa imagens): <code>gpt-4o-mini</code>, <code>gpt-4o</code>, <code>gpt-4-turbo</code>. Outros aceitam texto. Você pode digitar um modelo customizado.
+                      {t.rich("chatgptVisionModelsHint", { code: (chunks) => <code>{chunks}</code> })}
                     </p>
                   </Field>
                 </>
@@ -5742,7 +6471,7 @@ function ChannelModal({
                   ))}
                 </datalist>
                 <p className="text-[11px] text-muted-foreground mt-1">
-                  Vozes aceitas pela OpenAI: {OPENAI_VOICES.join(", ")}. Custom permitido — confirme no docs da OpenAI antes.
+                  {t("chatgptVoicesHint", { voices: OPENAI_VOICES.join(", ") })}
                 </p>
               </Field>
               <div className="flex items-center gap-2">
@@ -5752,7 +6481,7 @@ function ChannelModal({
                   id="chatgptVoice"
                 />
                 <Label htmlFor="chatgptVoice" className="cursor-pointer text-sm">
-                  Resposta por voz (ChatGPT Voice)
+                  {t("chatgptVoiceReplyLabel")}
                 </Label>
               </div>
             </CollapseSection>
@@ -5761,32 +6490,32 @@ function ChannelModal({
           {/* Typebot */}
           {integrationSettings.typebot && supportsAI(type) && (
             <CollapseSection title="Typebot" defaultOpen={false}>
-              <Field label="URL do Typebot">
+              <Field label={t("typebotUrlLabel")}>
                 <Input
                   value={(form.typebotUrl as string) || ""}
                   onChange={(e) => setField("typebotUrl", e.target.value)}
                   placeholder="https://typebot.io/..."
                 />
               </Field>
-              <Field label="Nome do fluxo">
+              <Field label={t("typebotFlowNameLabel")}>
                 <Input
                   value={(form.typebotName as string) || ""}
                   onChange={(e) => setField("typebotName", e.target.value)}
-                  placeholder="Nome do bot"
+                  placeholder={t("typebotBotNamePlaceholder")}
                 />
               </Field>
               <Field label={t("restartWord")}>
                 <Input
                   value={(form.typebotRestart as string) || ""}
                   onChange={(e) => setField("typebotRestart", e.target.value)}
-                  placeholder="Ex: #reiniciar"
+                  placeholder={t("restartWordPlaceholder")}
                 />
               </Field>
               <Field label={t("stopWord")}>
                 <Input
                   value={(form.typebotOff as string) || ""}
                   onChange={(e) => setField("typebotOff", e.target.value)}
-                  placeholder="Ex: #sair"
+                  placeholder={t("stopWordPlaceholder")}
                 />
               </Field>
               <Field label={t("unknownMessage")}>
@@ -5825,7 +6554,7 @@ function ChannelModal({
             <CollapseSection title="Dify" defaultOpen={false}>
               {/* difyKey — not shown for instagram */}
               {(["whatsapp","meow","evo","evogo","zapi","uazapi","baileys","zapo","waba","dialog360","gupshup","webchat"].includes(type) || isHubType(type)) && (
-                <Field label="Chave da API Dify">
+                <Field label={t("difyApiKeyLabel")}>
                   <Input
                     value={(form.difyKey as string) || ""}
                     onChange={(e) => setField("difyKey", e.target.value)}
@@ -5833,22 +6562,22 @@ function ChannelModal({
                   />
                 </Field>
               )}
-              <Field label="URL do Dify">
+              <Field label={t("difyUrlLabel")}>
                 <Input
                   value={(form.difyUrl as string) || ""}
                   onChange={(e) => setField("difyUrl", e.target.value)}
                   placeholder="https://api.dify.ai/v1"
                 />
               </Field>
-              <Field label="Tipo do Dify">
+              <Field label={t("difyTypeLabel")}>
                 <Select
                   value={(form.difyType as string) || ""}
                   onValueChange={(v) => setField("difyType", v)}
                 >
-                  <SelectTrigger><SelectValue placeholder="Selecione o tipo" /></SelectTrigger>
+                  <SelectTrigger><SelectValue placeholder={t("selectType")} /></SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="agent">Agente</SelectItem>
-                    <SelectItem value="textGenerator">Gerador de Texto</SelectItem>
+                    <SelectItem value="agent">{t("difyTypeAgent")}</SelectItem>
+                    <SelectItem value="textGenerator">{t("difyTypeTextGenerator")}</SelectItem>
                     <SelectItem value="chatBot">ChatBot</SelectItem>
                     <SelectItem value="workflow">Workflow</SelectItem>
                   </SelectContent>
@@ -5858,7 +6587,7 @@ function ChannelModal({
                 <Input
                   value={(form.difyRestart as string) || ""}
                   onChange={(e) => setField("difyRestart", e.target.value)}
-                  placeholder="Ex: #reiniciar"
+                  placeholder={t("restartWordPlaceholder")}
                 />
               </Field>
               {/* difyOff — not shown for instagram or messenger */}
@@ -5867,7 +6596,7 @@ function ChannelModal({
                   <Input
                     value={(form.difyOff as string) || ""}
                     onChange={(e) => setField("difyOff", e.target.value)}
-                    placeholder="Ex: #sair"
+                    placeholder={t("stopWordPlaceholder")}
                   />
                 </Field>
               )}
@@ -5877,7 +6606,7 @@ function ChannelModal({
           {/* N8N — no messenger */}
           {integrationSettings.n8n && (["whatsapp","meow","evo","evogo","zapi","uazapi","baileys","zapo","waba","dialog360","gupshup","instagram","webchat","telegram"].includes(type) || isHubType(type)) && (
             <CollapseSection title="N8N" defaultOpen={false}>
-              <Field label="URL do Webhook N8N">
+              <Field label={t("n8nWebhookUrlLabel")}>
                 <Input
                   value={(form.n8nUrl as string) || ""}
                   onChange={(e) => setField("n8nUrl", e.target.value)}
@@ -5927,10 +6656,10 @@ function ChannelModal({
                 >
                   <SelectTrigger><SelectValue /></SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="EVP">EVP (aleatória)</SelectItem>
+                    <SelectItem value="EVP">{t("pixTypeEvp")}</SelectItem>
                     <SelectItem value="CPF">CPF</SelectItem>
                     <SelectItem value="CNPJ">CNPJ</SelectItem>
-                    <SelectItem value="PHONE">Telefone</SelectItem>
+                    <SelectItem value="PHONE">{t("pixTypePhone")}</SelectItem>
                     <SelectItem value="EMAIL">E-mail</SelectItem>
                   </SelectContent>
                 </Select>
@@ -5963,14 +6692,14 @@ function ChannelModal({
           {/* Ollama */}
           {integrationSettings.ollama && supportsAI(type) && (
             <CollapseSection title="Ollama" defaultOpen={false}>
-              <Field label="URL do Ollama">
+              <Field label={t("ollamaUrlLabel")}>
                 <Input
                   value={(form.ollamaUrl as string) || ""}
                   onChange={(e) => setField("ollamaUrl", e.target.value)}
                   placeholder="http://localhost:11434"
                 />
               </Field>
-              <Field label="Modelo">
+              <Field label={t("modelLabel")}>
                 <Input
                   list="ollama-model-list"
                   value={(form.ollamaModel as string) || ""}
@@ -5981,7 +6710,7 @@ function ChannelModal({
                   {OLLAMA_MODELS.map((m) => <option key={m} value={m} />)}
                 </datalist>
                 <p className="text-[11px] text-muted-foreground mt-1">
-                  Lista comuns; depende do que está instalado no servidor Ollama. Custom permitido.
+                  {t("ollamaModelHint")}
                 </p>
               </Field>
               <Field label="Prompt">
@@ -5996,7 +6725,7 @@ function ChannelModal({
                 <Input
                   value={(form.ollamaOff as string) || ""}
                   onChange={(e) => setField("ollamaOff", e.target.value)}
-                  placeholder="Ex: #sair"
+                  placeholder={t("stopWordPlaceholder")}
                 />
               </Field>
             </CollapseSection>
@@ -6005,14 +6734,14 @@ function ChannelModal({
           {/* LM Studio */}
           {integrationSettings.lm && supportsAI(type) && (
             <CollapseSection title="LM Studio" defaultOpen={false}>
-              <Field label="URL do LM Studio">
+              <Field label={t("lmStudioUrlLabel")}>
                 <Input
                   value={(form.lmUrl as string) || ""}
                   onChange={(e) => setField("lmUrl", e.target.value)}
                   placeholder="http://localhost:1234/v1"
                 />
               </Field>
-              <Field label="Modelo">
+              <Field label={t("modelLabel")}>
                 <Input
                   value={(form.lmModel as string) || ""}
                   onChange={(e) => setField("lmModel", e.target.value)}
@@ -6031,7 +6760,7 @@ function ChannelModal({
                 <Input
                   value={(form.lmOff as string) || ""}
                   onChange={(e) => setField("lmOff", e.target.value)}
-                  placeholder="Ex: #sair"
+                  placeholder={t("stopWordPlaceholder")}
                 />
               </Field>
             </CollapseSection>
@@ -6049,7 +6778,7 @@ function ChannelModal({
                   placeholder="xai-..."
                 />
               </Field>
-              <Field label="Modelo">
+              <Field label={t("modelLabel")}>
                 <Input
                   list="grok-model-list"
                   value={(form.grokModel as string) || ""}
@@ -6072,7 +6801,7 @@ function ChannelModal({
                 <Input
                   value={(form.grokOff as string) || ""}
                   onChange={(e) => setField("grokOff", e.target.value)}
-                  placeholder="Ex: #sair"
+                  placeholder={t("stopWordPlaceholder")}
                 />
               </Field>
             </CollapseSection>
@@ -6090,7 +6819,7 @@ function ChannelModal({
                   placeholder="AIza..."
                 />
               </Field>
-              <Field label="Modelo">
+              <Field label={t("modelLabel")}>
                 <Input
                   list="gemini-model-list"
                   value={(form.geminiModel as string) || ""}
@@ -6113,7 +6842,7 @@ function ChannelModal({
                 <Input
                   value={(form.geminiOff as string) || ""}
                   onChange={(e) => setField("geminiOff", e.target.value)}
-                  placeholder="Ex: #sair"
+                  placeholder={t("stopWordPlaceholder")}
                 />
               </Field>
             </CollapseSection>
@@ -6131,7 +6860,7 @@ function ChannelModal({
                   placeholder="sk-..."
                 />
               </Field>
-              <Field label="Modelo">
+              <Field label={t("modelLabel")}>
                 <Input
                   list="deepseek-model-list"
                   value={(form.deepseekModel as string) || ""}
@@ -6154,7 +6883,7 @@ function ChannelModal({
                 <Input
                   value={(form.deepseekOff as string) || ""}
                   onChange={(e) => setField("deepseekOff", e.target.value)}
-                  placeholder="Ex: #sair"
+                  placeholder={t("stopWordPlaceholder")}
                 />
               </Field>
             </CollapseSection>
@@ -6172,7 +6901,7 @@ function ChannelModal({
                   placeholder="sk-..."
                 />
               </Field>
-              <Field label="Modelo">
+              <Field label={t("modelLabel")}>
                 <Input
                   list="qwen-model-list"
                   value={(form.qwenModel as string) || ""}
@@ -6195,7 +6924,7 @@ function ChannelModal({
                 <Input
                   value={(form.qwenOff as string) || ""}
                   onChange={(e) => setField("qwenOff", e.target.value)}
-                  placeholder="Ex: #sair"
+                  placeholder={t("stopWordPlaceholder")}
                 />
               </Field>
             </CollapseSection>
@@ -6213,7 +6942,7 @@ function ChannelModal({
                   placeholder="sk-ant-..."
                 />
               </Field>
-              <Field label="Modelo">
+              <Field label={t("modelLabel")}>
                 <Input
                   list="claude-model-list"
                   value={(form.claudeModel as string) || ""}
@@ -6236,7 +6965,7 @@ function ChannelModal({
                 <Input
                   value={(form.claudeOff as string) || ""}
                   onChange={(e) => setField("claudeOff", e.target.value)}
-                  placeholder="Ex: #sair"
+                  placeholder={t("stopWordPlaceholder")}
                 />
               </Field>
             </CollapseSection>
@@ -6249,10 +6978,10 @@ function ChannelModal({
                 <Input
                   value={(form.dialogflowProjectId as string) || ""}
                   onChange={(e) => setField("dialogflowProjectId", e.target.value)}
-                  placeholder="meu-projeto-dialogflow"
+                  placeholder={t("dialogflowProjectIdPlaceholder")}
                 />
               </Field>
-              <Field label="Idioma">
+              <Field label={t("languageLabel")}>
                 <Input
                   value={(form.dialogflowLanguage as string) || ""}
                   onChange={(e) => setField("dialogflowLanguage", e.target.value)}
@@ -6263,7 +6992,7 @@ function ChannelModal({
                 <Input
                   value={(form.dialogflowOff as string) || ""}
                   onChange={(e) => setField("dialogflowOff", e.target.value)}
-                  placeholder="Ex: #sair"
+                  placeholder={t("stopWordPlaceholder")}
                 />
               </Field>
               <Field label={t("jsonFileNameLabel")}>
@@ -6504,7 +7233,7 @@ function ChannelModal({
                           <Textarea
                             value={(form.birthdayDateMessage as string) || ""}
                             onChange={(e) => setField("birthdayDateMessage", e.target.value)}
-                            placeholder="Seja bem vindo {{name}}"
+                            placeholder={t.raw("birthdayMsgPlaceholder") as string}
                             rows={3}
                           />
                         </Field>
@@ -6774,7 +7503,7 @@ function ChannelModal({
                 <KeywordChipsInput
                   value={(form.closeKeyWord as string) || ""}
                   onChange={(v) => setField("closeKeyWord", v)}
-                  placeholder="Ex: desligar"
+                  placeholder={t("closeKeywordPlaceholder")}
                 />
                 <p className="text-xs text-muted-foreground mt-1">
                   {t("closeKeywordDesc")}
@@ -6790,14 +7519,14 @@ function ChannelModal({
                 <Input
                   value={(form.proxyUrl as string) || ""}
                   onChange={(e) => setField("proxyUrl", e.target.value)}
-                  placeholder="socks5://ip:porta"
+                  placeholder={t("proxyUrlPlaceholder")}
                 />
               </Field>
               <Field label={t("proxyUserLabel")}>
                 <Input
                   value={(form.proxyUser as string) || ""}
                   onChange={(e) => setField("proxyUser", e.target.value)}
-                  placeholder="usuario"
+                  placeholder={t("proxyUserPlaceholder")}
                 />
               </Field>
               <Field label={t("proxyPassLabel")}>
@@ -6911,7 +7640,7 @@ function ChannelModal({
 
 // ─── Main Page ─────────────────────────────────────────────
 const DEFAULT_INTEGRATION_SETTINGS: IntegrationSettings = {
-  chatgpt: false, typebot: false, dify: false, n8n: false,
+  chatgpt: false, chatgptAllTickets: false, typebot: false, dify: false, n8n: false,
   ollama: false, lm: false, grok: false, gemini: false,
   deepseek: false, qwen: false, claude: false, dialogflow: false,
 };
@@ -6968,7 +7697,12 @@ export default function SessoesPage() {
   const [queues, setQueues] = useState<QueueOpt[]>([]);
   const [users, setUsers] = useState<UserOpt[]>([]);
   const [chatFlows, setChatFlows] = useState<ChatFlow[]>([]);
+  // Agentes de IA para o selo do card (nome no tooltip). null = não carregou
+  // (plano sem o recurso, erro ou servidor antigo): o selo sai sem o nome.
+  const [channelAiAgents, setChannelAiAgents] = useState<AiAgentSummary[] | null>(null);
   const [integrationSettings, setIntegrationSettings] = useState<IntegrationSettings>(DEFAULT_INTEGRATION_SETTINGS);
+  // "Habilitar para todos os tickets" do ChatGPT só vale com o ChatGPT ligado.
+  const chatgptAllTicketsActive = integrationSettings.chatgpt && integrationSettings.chatgptAllTickets;
   const [sortMode, setSortMode] = useState<SortMode>("default");
 
   const { sortedData: sortedChannels } = useSortable(
@@ -7041,6 +7775,22 @@ export default function SessoesPage() {
     user?.profile !== "custom" || hasPermission("sessions_manage");
   const tenantId = user?.tenantId;
   const [tenantMetaToken, setTenantMetaToken] = useState("");
+  // Reconectar Instagram (login pelo Instagram) direto do card: credenciais que o
+  // popup pede (licença = e-mail da empresa) e se a empresa pode usar o proxy da Meta.
+  // Refs para a escuta do popup ler sempre o valor atual.
+  const tenantMetaTokenRef = useRef("");
+  const tenantLicenseKeyRef = useRef("");
+  const tenantOAuthEnabledRef = useRef(true);
+  const igReconnectPopupRef = useRef<Window | null>(null);
+  const igReconnectCtxRef = useRef<Promise<{ webhookOrigin: "zdg_oauth" | "own_app"; appWabaId: number | null } | null> | null>(null);
+  const igReconnectItemRef = useRef<Whatsapp | null>(null);
+  const [igReconnectingId, setIgReconnectingId] = useState<number | null>(null);
+  // Validade do acesso dos canais Instagram (1 consulta por carga da tela, só com canal
+  // Instagram). null = desconhecida/backend antigo. Canal reconectado nesta visita fica
+  // sem os avisos de validade até recarregar (o servidor só reavalia na renovação seguinte).
+  const [igTokenStates, setIgTokenStates] = useState<Map<number, InstagramTokenState> | null>(null);
+  const igTokenStatesRequestedRef = useRef(false);
+  const [igReconnectedIds, setIgReconnectedIds] = useState<Set<number>>(() => new Set());
 
   // Auto-reconnect via query param (toast "Reconectar" no header redireciona pra ca)
   const router = useRouter();
@@ -7132,12 +7882,24 @@ export default function SessoesPage() {
       })
       .catch(() => { toast.error(tErrors("loadFailed")); });
 
+    // Só o nome do agente no selo do card: falha (plano sem o recurso, servidor
+    // antigo) deixa o selo sem nome e não avisa nada.
+    fetchAiAgents({ background: true })
+      .then((list) => setChannelAiAgents(Array.isArray(list) ? list : []))
+      // Plano sem Agentes de IA: o servidor nunca arma o agente do canal (lista vazia =
+      // nenhum agente responde). Outra falha: não dá para saber (null).
+      .catch((err) => setChannelAiAgents(isFeatureNotInPlanError(err) ? [] : null));
+
     if (tenantId) {
       fetchTenantById(tenantId)
         .then(({ data }) => {
           const d = Array.isArray(data) ? data[0] : data;
           setTenantMetaToken((d as any)?.metaToken || "");
           setWebsocketToken((d as any)?.websocketToken || "");
+          tenantMetaTokenRef.current = (d as any)?.metaToken || "";
+          tenantLicenseKeyRef.current = (d as any)?.tenantEmail || "";
+          // Tenant.oauthEnabled defaulta a true no model — undefined = habilitado.
+          tenantOAuthEnabledRef.current = (d as any)?.oauthEnabled !== false;
         })
         .catch(() => {});
     }
@@ -7150,6 +7912,7 @@ export default function SessoesPage() {
         const get = (key: string) => settings.find((s) => s.key === key)?.value === "enabled";
         setIntegrationSettings({
           chatgpt: get("chatgpt"),
+          chatgptAllTickets: get("chatgptAllTickets"),
           typebot: get("typebot"),
           dify: get("dify"),
           n8n: get("n8n"),
@@ -7317,7 +8080,7 @@ export default function SessoesPage() {
     // Phase 16 — escuta erros detalhados de StartWhatsAppSession (ex: SMTP host obrigatorio)
     const handleSessionError = (data: { whatsappId: number; type: string; error: string }) => {
       if (!data?.error) return;
-      const channel = (data.type || "canal").toUpperCase();
+      const channel = (data.type || t("channel")).toUpperCase();
       toast.error(`${channel}: ${data.error}`);
     };
     // Migracao para SQLite abortada no backend -> canal revertido para 'files'
@@ -7459,6 +8222,218 @@ export default function SessoesPage() {
     return () => { socket.off(`${tenantId}:whatsapp:tokenExpired`, handleTokenExpired); };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tenantId, channels]);
+
+  // Termos da Marketing Messages API (selo do card WABA): 1 consulta por carga da tela,
+  // só com canal WABA e só para quem resolve o aviso de pagamento. Backend antigo (404) = sem selo.
+  const marketingMessagesStatuses = useWabaMarketingMessagesStatuses(
+    !loading && channels.some((c) => c.type === "waba")
+  );
+
+  // Validade do acesso do Instagram (login pelo Instagram): 1 consulta por carga da
+  // tela e só quando a empresa tem canal Instagram. Backend antigo (404) = sem avisos.
+  useEffect(() => {
+    if (loading || igTokenStatesRequestedRef.current) return;
+    if (!channels.some((c) => c.type === "instagram")) return;
+    igTokenStatesRequestedRef.current = true;
+    fetchInstagramTokenStates().then((states) => {
+      if (!states) return;
+      setIgTokenStates(new Map(states.map((s) => [Number(s.whatsappId), s])));
+    });
+  }, [loading, channels]);
+
+  // Selo "acesso vencido" na hora: o servidor avisa quando a Meta recusa o acesso de
+  // um canal (o mesmo evento do aviso do topo da tela).
+  useEffect(() => {
+    if (!tenantId) return;
+    const socket = getSocket();
+    const handleAuthExpired = (data: { service?: string; whatsappId?: number; expiredAt?: string }) => {
+      if (data?.service !== "instagram" || !data.whatsappId) return;
+      setChannels((prev) =>
+        prev.map((c) => {
+          if (c.id !== data.whatsappId) return c;
+          const cfg = (c.smtpConfig || {}) as Record<string, any>;
+          return {
+            ...c,
+            smtpConfig: {
+              ...cfg,
+              oauth2: { ...(cfg.oauth2 || {}), authExpired: true, authExpiredAt: data.expiredAt },
+            },
+          } as Whatsapp;
+        })
+      );
+    };
+    socket.on(`${tenantId}:channel:auth-expired`, handleAuthExpired);
+    return () => { socket.off(`${tenantId}:channel:auth-expired`, handleAuthExpired); };
+  }, [tenantId]);
+
+  // Escolhe por onde reconectar o Instagram: pelo mesmo caminho do canal (app próprio
+  // da empresa quando o canal veio dele; senão o proxy da Meta), caindo no outro
+  // quando o preferido não está disponível.
+  async function resolveIgReconnectCtx(item: Whatsapp): Promise<{ webhookOrigin: "zdg_oauth" | "own_app"; appWabaId: number | null } | null> {
+    let apps: AppWaba[] = [];
+    try {
+      const { data } = await listActiveAppWabas();
+      apps = Array.isArray(data) ? data : [];
+    } catch {
+      apps = [];
+    }
+    const igApp = apps.find((a) => !!(a as { appInstagramId?: string }).appInstagramId);
+    const igAppId = igApp ? Number(igApp.id) : NaN;
+    const ownAvailable = Number.isFinite(igAppId) && igAppId > 0;
+    const proxyAvailable = tenantOAuthEnabledRef.current;
+    if (item.webhookOrigin === "own_app" && ownAvailable) return { webhookOrigin: "own_app", appWabaId: igAppId };
+    if (proxyAvailable) return { webhookOrigin: "zdg_oauth", appWabaId: null };
+    if (ownAvailable) return { webhookOrigin: "own_app", appWabaId: igAppId };
+    return null;
+  }
+
+  // Reconectar Instagram (D8): abre a mesma janela de login do Instagram da criação de
+  // canal; o servidor reconhece a conta e atualiza o canal existente, sem criar outro.
+  // A janela abre já no clique (bloqueador de pop-up) e as credenciais saem quando ela
+  // pede. Sem o convite ao login pelo Facebook: reconectar é sempre pelo Instagram.
+  function handleInstagramReconnect(item: Whatsapp) {
+    if (igReconnectPopupRef.current && !igReconnectPopupRef.current.closed) {
+      igReconnectPopupRef.current.focus();
+      return;
+    }
+    const cb = encodeURIComponent(window.location.origin);
+    const popup = window.open(
+      `${OAUTH_PROXY_URL}/instagram-signup?callbackOrigin=${cb}`,
+      "instagram-reconnect",
+      "width=600,height=700,scrollbars=yes,resizable=yes"
+    );
+    if (!popup) {
+      toast.error(t("popupBlocked"));
+      return;
+    }
+    igReconnectPopupRef.current = popup;
+    igReconnectItemRef.current = item;
+    igReconnectCtxRef.current = resolveIgReconnectCtx(item);
+    setIgReconnectingId(item.id);
+    igReconnectCtxRef.current.then((ctx) => {
+      if (ctx || igReconnectPopupRef.current !== popup) return;
+      try { popup.close(); } catch { /* noop */ }
+      igReconnectPopupRef.current = null;
+      setIgReconnectingId(null);
+      toast.error(t("igReconnectUnavailable"));
+    });
+    // Janela fechada sem resposta: libera o botão.
+    const watchdog = window.setInterval(() => {
+      if (!popup.closed) return;
+      window.clearInterval(watchdog);
+      if (igReconnectPopupRef.current === popup) {
+        igReconnectPopupRef.current = null;
+        setIgReconnectingId(null);
+      }
+    }, 500);
+  }
+
+  useEffect(() => {
+    async function sendIgReconnectCredentials(popup: Window) {
+      const ctx = await (igReconnectCtxRef.current ?? Promise.resolve(null));
+      if (!ctx || popup.closed || igReconnectPopupRef.current !== popup) return;
+      // A licença vem da carga da empresa; espera até ~10 s se ainda não chegou.
+      for (let i = 0; i < 50 && !tenantLicenseKeyRef.current; i++) {
+        await new Promise((r) => setTimeout(r, 200));
+      }
+      if (popup.closed || igReconnectPopupRef.current !== popup) return;
+      let authToken: string | null = null;
+      try {
+        const rawToken = localStorage.getItem("token");
+        authToken = rawToken ? JSON.parse(rawToken) : null;
+      } catch {
+        authToken = null;
+      }
+      popup.postMessage(
+        {
+          type: "proxy:credentials",
+          apiUrl: process.env.NEXT_PUBLIC_API_URL || window.location.origin,
+          authToken,
+          tenantId: tenantId ?? null,
+          metaToken: tenantMetaTokenRef.current,
+          licenseKey: tenantLicenseKeyRef.current,
+          webhookOrigin: ctx.webhookOrigin,
+          appWabaId: ctx.appWabaId,
+        },
+        OAUTH_PROXY_URL
+      );
+    }
+
+    function onIgReconnectMessage(event: MessageEvent) {
+      if (event.origin !== OAUTH_PROXY_URL) return;
+      const popup = igReconnectPopupRef.current;
+      if (!popup || event.source !== popup) return;
+      const { type, error, errorCode, hijack: msgHijack } = (event.data || {}) as {
+        type?: string; error?: string; errorCode?: string | null; hijack?: any;
+      };
+      if (type === "proxy:ready") {
+        void sendIgReconnectCredentials(popup);
+        return;
+      }
+      if (type !== "proxy:success" && type !== "proxy:error" && type !== "proxy:cancelled") return;
+      const item = igReconnectItemRef.current;
+      // A escuta segue enquanto a janela estiver aberta (nova tentativa nela ainda
+      // pode dar certo); o vigia de fechamento solta a janela.
+      setIgReconnectingId(null);
+      const hijackPayload: MetaProxyHijackPayload | null = msgHijack
+        ? {
+            channel:      msgHijack.channel      || "instagram",
+            errorCode:    msgHijack.errorCode    || "ALREADY_REGISTERED",
+            apiUrlMasked: msgHijack.existing?.apiUrlMasked || "***",
+            registeredAt: msgHijack.existing?.registeredAt ?? null,
+            identifier:   msgHijack.identifier  || null,
+            callbackUrl:  msgHijack.callbackUrl || null,
+          }
+        : null;
+      if (type === "proxy:success") {
+        // Outra conta (ou canal antigo com outro identificador): o servidor criou
+        // um canal novo em vez de atualizar este — avisar e não dar o card como
+        // reconectado.
+        const connectedId = String(((event.data || {}) as { data?: { userId?: unknown } }).data?.userId ?? "");
+        const sameAccount = !connectedId || !item?.tokenAPI || connectedId === String(item.tokenAPI);
+        if (sameAccount) {
+          toast.success(t("instagramChannelConnected"));
+          if (item?.id) setIgReconnectedIds((prev) => new Set(prev).add(item.id));
+        } else {
+          toast.warning(t("igReconnectDifferentAccount"));
+        }
+        loadChannels(true);
+        if (hijackPayload) {
+          setHijackState(hijackPayload);
+          setHijackPendingRetry(() => () => loadChannels(true));
+        }
+        return;
+      }
+      if (type === "proxy:error") {
+        if (hijackPayload) {
+          setHijackState(hijackPayload);
+          setHijackPendingRetry(() => () => loadChannels(true));
+          return;
+        }
+        const key = channelCreateErrorKey(errorCode || error);
+        toast.error(key ? t(key) : (error || t("igReconnectError")));
+      }
+      // proxy:cancelled: quem fechou foi o próprio usuário — sem aviso.
+    }
+    window.addEventListener("message", onIgReconnectMessage);
+    return () => window.removeEventListener("message", onIgReconnectMessage);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tenantId, loadChannels]);
+
+  // Reconectar só aparece quando o servidor respondeu a rota de validade do Instagram:
+  // é da mesma versão que atualiza o canal existente na reconexão (servidor antigo
+  // criaria um segundo canal).
+  const igReconnectHandler = igTokenStates ? handleInstagramReconnect : undefined;
+
+  const igTokenStateFor = (ch: Whatsapp): InstagramTokenState | null => {
+    if (ch.type !== "instagram" || !igTokenStates || igReconnectedIds.has(ch.id)) return null;
+    return igTokenStates.get(ch.id) ?? null;
+  };
+
+  const marketingMessagesStatusFor = (ch: Whatsapp): MarketingMessagesChannelStatus | null => {
+    if (ch.type !== "waba" || !marketingMessagesStatuses) return null;
+    return marketingMessagesStatuses.get(Number(ch.id)) ?? null;
+  };
 
   function handleEdit(item: Whatsapp) {
     setSelectedChannel(item);
@@ -8209,8 +9184,9 @@ export default function SessoesPage() {
     setTimeout(() => {
       const iframe = sandboxIframeRef.current;
       if (!iframe) return;
+      const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
       const html = `<!DOCTYPE html>
-<html lang="pt-BR">
+<html lang="${esc(document.documentElement.lang || "pt-BR")}">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -8224,8 +9200,8 @@ export default function SessoesPage() {
 </head>
 <body>
   <div class="sandbox-info">
-    <h2>Sandbox do Widget</h2>
-    <p>O widget aparece no canto inferior direito.</p>
+    <h2>${esc(t("widgetSandboxHeading"))}</h2>
+    <p>${esc(t("widgetSandboxHint"))}</p>
   </div>
   <script>${widgetCode}<\/script>
 </body>
@@ -8261,8 +9237,18 @@ export default function SessoesPage() {
       const typeLabel = t(CHANNEL_TYPES.find(c => c.value === deleteTarget.type)?.labelKey as any || "channelDeleted");
       toast.success(t("channelDeletedType", { type: typeLabel }));
       loadChannels(true);
-    } catch {
-      toast.error(t("errorDeletingChannel"));
+    } catch (err: any) {
+      const code = getBackendErrorCode(err);
+      if (code === "ERR_NO_WAPP_FOUND") {
+        // Já excluído em outra aba ou por outro usuário: só a lista estava velha.
+        toast.info(t("channelAlreadyDeleted"));
+        loadChannels(true);
+      } else if (code === "ERR_WAPP_IN_USE") {
+        // Outro cadastro ainda aponta para o canal (o servidor recusa antes de desligar nada).
+        toast.error(t("channelInUse"));
+      } else {
+        toast.error(t("errorDeletingChannel"));
+      }
     } finally {
       setDeletingChannel(false);
       setDeleteTarget(null);
@@ -8588,6 +9574,8 @@ export default function SessoesPage() {
                           queues={queues}
                           users={users}
                           chatFlows={chatFlows}
+                          aiAgents={channelAiAgents}
+                          chatgptAllTicketsActive={chatgptAllTicketsActive}
                           allChannels={channels}
                           onEdit={handleEdit}
                           onDelete={setDeleteTarget}
@@ -8606,6 +9594,10 @@ export default function SessoesPage() {
                           onRegisterWooWebhooks={handleRegisterWooWebhooks}
                           onDiagnose={setDiagnoseTarget}
                           onRegisterPin={setRegisterPinTarget}
+                          onInstagramReconnect={igReconnectHandler}
+                          igTokenState={igTokenStateFor(ch)}
+                          marketingMessagesStatus={marketingMessagesStatusFor(ch)}
+                          isIgReconnecting={igReconnectingId === ch.id}
                           onShowWebhookInfo={setWebhookInfoTarget}
                           onWaLink={handleWaLink}
                           onUnlinkHybrid={setUnlinkHybridTarget}
@@ -8644,6 +9636,8 @@ export default function SessoesPage() {
                             queues={queues}
                             users={users}
                             chatFlows={chatFlows}
+                            aiAgents={channelAiAgents}
+                            chatgptAllTicketsActive={chatgptAllTicketsActive}
                             allChannels={channels}
                             onEdit={handleEdit}
                             onDelete={setDeleteTarget}
@@ -8662,6 +9656,10 @@ export default function SessoesPage() {
                           onRegisterWooWebhooks={handleRegisterWooWebhooks}
                           onDiagnose={setDiagnoseTarget}
                           onRegisterPin={setRegisterPinTarget}
+                          onInstagramReconnect={igReconnectHandler}
+                          igTokenState={igTokenStateFor(ch)}
+                          marketingMessagesStatus={marketingMessagesStatusFor(ch)}
+                          isIgReconnecting={igReconnectingId === ch.id}
                           onShowWebhookInfo={setWebhookInfoTarget}
                           onWaLink={handleWaLink}
                           onUnlinkHybrid={setUnlinkHybridTarget}
@@ -8704,6 +9702,8 @@ export default function SessoesPage() {
                           queues={queues}
                           users={users}
                           chatFlows={chatFlows}
+                          aiAgents={channelAiAgents}
+                          chatgptAllTicketsActive={chatgptAllTicketsActive}
                           allChannels={channels}
                           onEdit={handleEdit}
                           onDelete={setDeleteTarget}
@@ -8722,6 +9722,10 @@ export default function SessoesPage() {
                           onRegisterWooWebhooks={handleRegisterWooWebhooks}
                           onDiagnose={setDiagnoseTarget}
                           onRegisterPin={setRegisterPinTarget}
+                          onInstagramReconnect={igReconnectHandler}
+                          igTokenState={igTokenStateFor(ch)}
+                          marketingMessagesStatus={marketingMessagesStatusFor(ch)}
+                          isIgReconnecting={igReconnectingId === ch.id}
                           onShowWebhookInfo={setWebhookInfoTarget}
                           onWaLink={handleWaLink}
                           onUnlinkHybrid={setUnlinkHybridTarget}
@@ -8751,6 +9755,8 @@ export default function SessoesPage() {
                           queues={queues}
                           users={users}
                           chatFlows={chatFlows}
+                          aiAgents={channelAiAgents}
+                          chatgptAllTicketsActive={chatgptAllTicketsActive}
                           allChannels={channels}
                           onEdit={handleEdit}
                           onDelete={setDeleteTarget}
@@ -8769,6 +9775,10 @@ export default function SessoesPage() {
                           onRegisterWooWebhooks={handleRegisterWooWebhooks}
                           onDiagnose={setDiagnoseTarget}
                           onRegisterPin={setRegisterPinTarget}
+                          onInstagramReconnect={igReconnectHandler}
+                          igTokenState={igTokenStateFor(ch)}
+                          marketingMessagesStatus={marketingMessagesStatusFor(ch)}
+                          isIgReconnecting={igReconnectingId === ch.id}
                           onShowWebhookInfo={setWebhookInfoTarget}
                           onWaLink={handleWaLink}
                           onUnlinkHybrid={setUnlinkHybridTarget}
@@ -8796,6 +9806,8 @@ export default function SessoesPage() {
                 queues={queues}
                 users={users}
                 chatFlows={chatFlows}
+                aiAgents={channelAiAgents}
+                chatgptAllTicketsActive={chatgptAllTicketsActive}
                 allChannels={channels}
                 onEdit={handleEdit}
                 onDelete={setDeleteTarget}
@@ -8814,6 +9826,10 @@ export default function SessoesPage() {
                 onRegisterWooWebhooks={handleRegisterWooWebhooks}
                 onDiagnose={setDiagnoseTarget}
                 onRegisterPin={setRegisterPinTarget}
+                onInstagramReconnect={igReconnectHandler}
+                igTokenState={igTokenStateFor(ch)}
+                marketingMessagesStatus={marketingMessagesStatusFor(ch)}
+                isIgReconnecting={igReconnectingId === ch.id}
                 onShowWebhookInfo={setWebhookInfoTarget}
                 onWaLink={handleWaLink}
                 onUnlinkHybrid={setUnlinkHybridTarget}
@@ -8889,6 +9905,8 @@ export default function SessoesPage() {
                   queues={queues}
                   users={users}
                   chatFlows={chatFlows}
+                  aiAgents={channelAiAgents}
+                  chatgptAllTicketsActive={chatgptAllTicketsActive}
                   allChannels={channels}
                   onEdit={handleEdit}
                   onDelete={setDeleteTarget}
@@ -8907,6 +9925,10 @@ export default function SessoesPage() {
                           onRegisterWooWebhooks={handleRegisterWooWebhooks}
                           onDiagnose={setDiagnoseTarget}
                           onRegisterPin={setRegisterPinTarget}
+                          onInstagramReconnect={igReconnectHandler}
+                          igTokenState={igTokenStateFor(ch)}
+                          marketingMessagesStatus={marketingMessagesStatusFor(ch)}
+                          isIgReconnecting={igReconnectingId === ch.id}
                           onShowWebhookInfo={setWebhookInfoTarget}
                           onWaLink={handleWaLink}
                           onUnlinkHybrid={setUnlinkHybridTarget}
@@ -9328,6 +10350,7 @@ export default function SessoesPage() {
           open={registerPinTarget !== null}
           onOpenChange={(open) => { if (!open) setRegisterPinTarget(null); }}
           onSuccess={() => loadChannels(true)}
+          canSetPin={canManageSessions}
         />
 
         {/* Webhook info popup — Dialog360/Gupshup (Customer Account precisa
@@ -9335,9 +10358,9 @@ export default function SessoesPage() {
         <Dialog open={webhookInfoTarget !== null} onOpenChange={(open) => { if (!open) setWebhookInfoTarget(null); }}>
           <DialogContent className="max-w-lg">
             <DialogHeader>
-              <DialogTitle>Webhook info — {webhookInfoTarget?.name}</DialogTitle>
+              <DialogTitle>{t("webhookInfoDialogTitle", { name: webhookInfoTarget?.name ?? "" })}</DialogTitle>
               <DialogDescription>
-                URL pra colar no painel BSP + eventos a marcar + passo a passo.
+                {t("webhookInfoDialogDesc")}
               </DialogDescription>
             </DialogHeader>
             {webhookInfoTarget && (webhookInfoTarget.type === "dialog360" || webhookInfoTarget.type === "gupshup") && (
@@ -9348,7 +10371,7 @@ export default function SessoesPage() {
             )}
             <DialogFooter>
               <Button variant="outline" onClick={() => setWebhookInfoTarget(null)}>
-                Fechar
+                {t("close")}
               </Button>
             </DialogFooter>
           </DialogContent>

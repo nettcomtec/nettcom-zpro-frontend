@@ -23,6 +23,7 @@ export default function MasterkeyPage() {
   const [captchaVerified, setCaptchaVerified] = useState(false);
   const activeLogo = resolvedTheme === "dark" ? logoDarkUrl : logoUrl;
   const t = useTranslations("login");
+  const tm = useTranslations("masterkey");
 
   return (
     <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-background via-background to-muted/30">
@@ -41,8 +42,8 @@ export default function MasterkeyPage() {
               className="mx-auto mb-2 h-14 max-w-[180px] object-contain"
               onError={(e) => { (e.target as HTMLImageElement).style.display = "none"; }}
             />
-            <CardTitle className="text-2xl font-bold">Acesso Master Key</CardTitle>
-            <CardDescription>Acesso administrativo via chave mestra</CardDescription>
+            <CardTitle className="text-2xl font-bold">{tm("accessTitle")}</CardTitle>
+            <CardDescription>{tm("accessDescription")}</CardDescription>
           </CardHeader>
 
           <CardContent>
@@ -59,7 +60,7 @@ export default function MasterkeyPage() {
                 />
               </div>
               <div className="space-y-2">
-                <Label htmlFor="password">Master Key</Label>
+                <Label htmlFor="password">{tm("keyLabel")}</Label>
                 <div className="relative">
                   <Input
                     id="password"
@@ -93,7 +94,7 @@ export default function MasterkeyPage() {
               className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-primary hover:underline transition-colors"
             >
               <ArrowLeft className="h-3 w-3" />
-              Voltar ao login normal
+              {tm("backToNormalLogin")}
             </Link>
             <DropdownMenu>
               <DropdownMenuTrigger asChild>

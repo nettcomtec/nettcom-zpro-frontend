@@ -1,25 +1,21 @@
 import type { FlowData } from "./types";
+import { uiT } from "@/lib/ui-t";
 
 /**
  * Returns the default flow structure matching the legacy ccFlowBuilder defaultFlow.js format.
  * The backend stores { name, nodeList, lineList } under the `flow` key in the chatflow record.
  *
- * i18n: Node label strings below ("Início", "Configurações", "Boas vindas!", "Novo Fluxo")
- * are data-layer defaults stored in the backend. Translate via "flowBuilderDefaults" namespace:
- *   - defaultFlowName → name parameter default
- *   - startNodeName   → start node name
- *   - configurationsNodeName → configurations node name
- *   - defaultNodeName → nodeC name
- * These strings should be replaced at the component level when creating a new flow,
- * using t("flowBuilderDefaults.startNodeName") etc.
+ * i18n: os nomes dos nós (e o nome padrão do fluxo) saem no idioma da tela na hora da
+ * criação ("flowBuilderDefaults"), com o português de antes como reserva. Ficam gravados
+ * no fluxo; nenhuma lógica depende deles (os nós são achados por id/type).
  */
-export function createDefaultFlow(name = "Novo Fluxo"): FlowData {
+export function createDefaultFlow(name = uiT("flowBuilderDefaults.defaultFlowName", undefined, "Novo Fluxo")): FlowData {
   return {
     name,
     nodeList: [
       {
         id: "start",
-        name: "Início", // i18n: translate via "flowBuilderDefaults.startNodeName"
+        name: uiT("flowBuilderDefaults.startNodeName", undefined, "Início"),
         type: "start",
         left: "26px",
         top: "100px",
@@ -33,7 +29,7 @@ export function createDefaultFlow(name = "Novo Fluxo"): FlowData {
       },
       {
         id: "configurations",
-        name: "Configurações", // i18n: translate via "flowBuilderDefaults.configurationsNodeName"
+        name: uiT("flowBuilderDefaults.configurationsNodeName", undefined, "Configurações"),
         type: "configurations",
         left: "340px",
         top: "100px",
@@ -80,7 +76,7 @@ export function createDefaultFlow(name = "Novo Fluxo"): FlowData {
       },
       {
         id: "nodeC",
-        name: "Boas vindas!", // i18n: translate via "flowBuilderDefaults.defaultNodeName"
+        name: uiT("flowBuilderDefaults.defaultNodeName", undefined, "Boas vindas!"),
         type: "node",
         left: "26px",
         top: "301px",

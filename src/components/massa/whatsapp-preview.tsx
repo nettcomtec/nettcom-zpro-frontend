@@ -110,7 +110,7 @@ export function WhatsAppPreview({ message, mediaFile, mediaUrl, mediaType, foote
                 <div className="bg-[#dcf8c6] rounded-lg overflow-hidden shadow-sm p-1">
                   {isImage && displayMedia && (
                     // eslint-disable-next-line @next/next/no-img-element
-                    <img src={displayMedia} alt="mídia" className="rounded max-w-full max-h-24 object-cover" />
+                    <img src={displayMedia} alt={t("mediaAlt")} className="rounded max-w-full max-h-24 object-cover" />
                   )}
                   {isImage && !displayMedia && (
                     <div className="w-32 h-16 bg-black/5 rounded flex items-center justify-center">

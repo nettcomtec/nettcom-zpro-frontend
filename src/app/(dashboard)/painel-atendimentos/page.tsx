@@ -44,6 +44,8 @@ import { useLiveMode } from "@/hooks/use-live-mode";
 import { usePainelRealtime } from "@/hooks/use-painel-realtime";
 import { cn } from "@/lib/utils";
 import { AccessDenied } from "@/components/layout/access-denied";
+import { toast } from "sonner";
+import { farewellFailed } from "@/services/tickets";
 
 interface PainelTicket {
   id: number;
@@ -574,6 +576,8 @@ export default function PainelAtendimentosPage() {
       setProgressTotal(allMatching.length);
       setProgressCurrent(0);
 
+      // Encerrado, mas a despedida não saiu (o servidor responde 200 com farewellError).
+      let farewellFailures = 0;
       for (let i = 0; i < allMatching.length; i += 10) {
         const batch = allMatching.slice(i, i + 10);
         await Promise.all(
@@ -585,11 +589,13 @@ export default function PainelAtendimentosPage() {
               isTransference: 1,
               skipFarewell: skipFarewellBulk,
             })
+              .then((r) => { if (!skipFarewellBulk && farewellFailed(r)) farewellFailures += 1; })
               .catch(() => {})
               .finally(() => setProgressCurrent((p) => p + 1))
           )
         );
       }
+      if (farewellFailures > 0) toast.warning(tAtd("farewellNotSentBulk", { count: farewellFailures }));
       setTimeout(() => consultarTickets({ silent: true }), 500);
     } finally {
       setActionLoading(false);

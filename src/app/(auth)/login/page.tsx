@@ -6,6 +6,8 @@ import { fetchLoginVariantNovoPublic } from "@/services/superadmin";
 import { Skeleton } from "@/components/ui/skeleton";
 import { isNativeApp, getNativePlugin } from "@/lib/native";
 import api from "@/lib/api";
+import { fetchPublicRegionDefaults } from "@/services/region";
+import { consumeAutoReloadGuard, hasExplicitLanguage, setLanguageAuto } from "@/lib/ui-locale";
 
 // Controles exclusivos do app nativo (PLANO_APP_MOBILE §6.2): botão "Trocar
 // servidor" (volta à tela nativa de configuração) + aviso quando o backend
@@ -15,6 +17,9 @@ function NativeAppControls() {
   const t = useTranslations("login");
   const [visible, setVisible] = useState(false);
   const [outdated, setOutdated] = useState(false);
+  // App white label com endereço fixo no build: não há outro servidor para onde
+  // ir, então o botão some. App antigo (sem o campo `locked`) segue com o botão.
+  const [serverLocked, setServerLocked] = useState(false);
 
   useEffect(() => {
     if (!isNativeApp()) return;
@@ -22,9 +27,15 @@ function NativeAppControls() {
     api.get("/mobile/capabilities").catch((e) => {
       if (e?.response?.status === 404) setOutdated(true);
     });
+    Promise.resolve(getNativePlugin("ZproServer")?.getServerUrl?.())
+      .then((info: any) => {
+        if (info?.locked === true) setServerLocked(true);
+      })
+      .catch(() => { /* plugin ausente ou antigo: mantém o botão */ });
   }, []);
 
   if (!visible) return null;
+  if (serverLocked && !outdated) return null;
 
   const handleChangeServer = async () => {
     try {
@@ -39,13 +50,15 @@ function NativeAppControls() {
           {t("appOutdatedBackend")}
         </p>
       )}
-      <button
-        type="button"
-        onClick={handleChangeServer}
-        className="pointer-events-auto text-xs text-muted-foreground underline underline-offset-4 hover:text-foreground"
-      >
-        {t("changeServer")}
-      </button>
+      {!serverLocked && (
+        <button
+          type="button"
+          onClick={handleChangeServer}
+          className="pointer-events-auto text-xs text-muted-foreground underline underline-offset-4 hover:text-foreground"
+        >
+          {t("changeServer")}
+        </button>
+      )}
     </div>
   );
 }
@@ -126,6 +139,31 @@ export default function LoginPage() {
       .catch(() => {
         if (!cached) setVariant("variant-1");
       });
+  }, []);
+
+  // Idioma da tela de quem nunca escolheu um (P3): segue o idioma do padrão geral da
+  // instalação. ÚNICO ponto do front com o GET público da Região, e não segura a
+  // renderização. Só vale com `languageConfigured` (padrão geral define idioma):
+  // senão a dica "pt" seria gravada a cada logout e o painel recarregaria de novo.
+  // Dica já gravada pelo painel (idioma da empresa de quem entrou aqui) não é trocada.
+  // Erro/404 (backend antigo) = nada muda.
+  useEffect(() => {
+    if (hasExplicitLanguage()) return;
+    let cancelled = false;
+    fetchPublicRegionDefaults()
+      .then(({ data }) => {
+        if (cancelled || hasExplicitLanguage()) return;
+        const defaults = data as { language?: string; languageConfigured?: boolean } | undefined;
+        if (defaults?.languageConfigured !== true) return;
+        const language = defaults.language;
+        if (setLanguageAuto(language, "login") && consumeAutoReloadGuard(`login:${language}`)) {
+          window.location.reload();
+        }
+      })
+      .catch(() => { /* mantém o idioma atual */ });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   if (!variant) {

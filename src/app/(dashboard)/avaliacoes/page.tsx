@@ -1,8 +1,8 @@
 "use client";
 
-import { formatDate as formatDateIntl } from "@/lib/format";
+import { formatDate as formatDateIntl, getActiveLocale } from "@/lib/format";
 
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { useTranslations } from "next-intl";
 import { displayContactIdentity } from "@/lib/contact-identity";
 import { PageHeader } from "@/components/layout/page-header";
@@ -26,8 +26,24 @@ import {
 import { Switch } from "@/components/ui/switch";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Tooltip, TooltipContent, TooltipTrigger, TooltipProvider } from "@/components/ui/tooltip";
-import { Star, Search, Trash2, ChevronLeft, ChevronRight, RefreshCw, ExternalLink, Settings, Save, Eye, BarChart3, TrendingUp, Users, Percent, ThumbsUp, ThumbsDown, Minus, Info } from "lucide-react";
-import { useRouter } from "next/navigation";
+import { Star, Search, Trash2, ChevronLeft, ChevronRight, RefreshCw, ExternalLink, Settings, Save, Eye, BarChart3, TrendingUp, Users, Percent, ThumbsUp, ThumbsDown, Minus, Info, AlertTriangle, Store, Download, FileSpreadsheet, FileText, Loader2, Lock } from "lucide-react";
+import {
+  DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { Alert, AlertDescription } from "@/components/ui/alert";
+import { SearchableSelect } from "@/components/ui/searchable-select";
+import { fetchAllUsers, type User } from "@/services/users";
+import {
+  buildCsv, csvCell, csvDateTimeText, csvDelimiterForCountry, csvDigitsCell,
+  excelDateTimeFormat, excelSerialFromLocalDate, sanitizeFileNamePart,
+} from "@/lib/csv-export";
+import { canDownloadFiles, downloadFile } from "@/lib/download-file";
+import {
+  EXPORT_MAX_PAGES, EXPORT_MAX_ROWS, EXPORT_PAGE_SIZE,
+  buildEvaluationExportRows, evaluationStatus, isNewEvaluationsBackend,
+  type EvaluationExportRow, type EvaluationExportStatus,
+} from "@/lib/evaluation-export";
+import { useRouter, useSearchParams } from "next/navigation";
 import { toast } from "sonner";
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, ResponsiveContainer, ReferenceLine } from "recharts";
 import { StatCard } from "@/components/charts/stat-card";
@@ -36,9 +52,14 @@ import { PieChartCard } from "@/components/charts/pie-chart-card";
 import {
   fetchEvaluations, deleteEvaluation, fetchEvaluationConfig,
   updateRatings, updateTenantRatingData, fetchNpsReport,
+  isValidGoogleReviewUrl, GOOGLE_REVIEW_URL_MAX, GOOGLE_REVIEW_TEXT_MAX,
   type TicketEvaluation, type RatingItem, type NpsReport,
 } from "@/services/evaluations";
+import { loadGoogleBusinessStatus } from "@/services/google-business";
+import { getBackendErrorCode } from "@/lib/backend-error-code";
+import GoogleReviewsTab from "@/components/avaliacoes/google/google-reviews-tab";
 import { useAuthStore } from "@/stores/auth-store";
+import { useRegion } from "@/hooks/use-region";
 import { usePageAccess } from "@/hooks/use-page-access";
 import { useLiveMode } from "@/hooks/use-live-mode";
 import { cn } from "@/lib/utils";
@@ -73,6 +94,26 @@ function StarRating({ rating, max = 5 }: { rating: number; max?: number }) {
   );
 }
 
+/** Variável de sistema com o link de avaliação do Google (resolvida no backend). */
+const GOOGLE_REVIEW_LINK_VAR = "{{linkAvaliacaoGoogle}}";
+
+/**
+ * Texto padrão do pedido de avaliação no Google quando a empresa não define idioma:
+ * espelho do catálogo `rating.googleReview` (pt) do backend — é o que o cliente recebe.
+ */
+const GOOGLE_REVIEW_DEFAULT_PT = "Se puder, conte também no Google como foi o seu atendimento: {link}";
+
+/** Recusas do backend no save do pedido de avaliação no Google → chave da tela. */
+const GOOGLE_REVIEW_ERROR_KEYS: Record<string, string> = {
+  ERR_GOOGLE_REVIEW_URL_INVALID: "googleReviewUrlInvalid",
+  ERR_GOOGLE_REVIEW_TEXT_TOO_LONG: "googleReviewTextTooLong",
+  ERR_GOOGLE_REVIEW_TEXT_INVALID: "googleReviewTextInvalid",
+  ERR_GOOGLE_REVIEW_TOGGLE_INVALID: "googleReviewToggleInvalid",
+};
+
+/** Mesma normalização do backend antes de medir o texto. */
+const normalizeGoogleReviewText = (value: string) => value.replace(/\r\n/g, "\n").trim();
+
 /** Nota gravada é STRING no backend e pode ser texto (pesquisa pendente) — nunca coagir às cegas. */
 function numericScore(value: unknown): number | null {
   const s = String(value ?? "").trim();
@@ -84,19 +125,28 @@ function numericScore(value: unknown): number | null {
 // ─── Config Tab ────────────────────────────────────────────────────
 function ConfigTab() {
   const t = useTranslations("avaliacoesPage");
+  const tChat = useTranslations("atendimentoChatExtra");
   const { user } = useAuthStore();
   const tenantId = user?.tenantId ?? 1;
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  // Textos que vão ao CLIENTE: no idioma da Região só quando ela define idioma; senão,
+  // o texto da tela, como sempre foi.
+  const { text: regionText, ensureTexts } = useRegion();
 
-  const DEFAULT_RATINGS: RatingItem[] = [
-    { rating: 0, label: t("ratingBad"), message: "" },
-    { rating: 1, label: t("ratingRegular"), message: "" },
-    { rating: 2, label: t("ratingGood"), message: "" },
-    { rating: 3, label: t("ratingVeryGood"), message: "" },
-    { rating: 4, label: t("ratingExcellent"), message: "" },
-    { rating: 5, label: t("ratingIncredible"), message: "" },
-  ];
+  // Rótulos padrão da escala (vão ao cliente quando a empresa não tem rótulos salvos).
+  const buildDefaultRatings = useCallback((): RatingItem[] => [
+    { rating: 0, label: regionText("evaluation.scale.0", undefined, t("ratingBad")), message: "" },
+    { rating: 1, label: regionText("evaluation.scale.1", undefined, t("ratingRegular")), message: "" },
+    { rating: 2, label: regionText("evaluation.scale.2", undefined, t("ratingGood")), message: "" },
+    { rating: 3, label: regionText("evaluation.scale.3", undefined, t("ratingVeryGood")), message: "" },
+    { rating: 4, label: regionText("evaluation.scale.4", undefined, t("ratingExcellent")), message: "" },
+    { rating: 5, label: regionText("evaluation.scale.5", undefined, t("ratingIncredible")), message: "" },
+  ], [regionText, t]);
+  const DEFAULT_RATINGS = buildDefaultRatings();
+  // Os padrões seguem os textos da Região que chegarem depois, até vir o salvo ou o
+  // operador editar algum card.
+  const defaultRatingsInUseRef = useRef(true);
 
   const TIME_OPTIONS = [
     ...TIME_OPTIONS_VALUES.map((o) => ({ label: t(`time_${o.minutes}`), value: o.value })),
@@ -119,6 +169,27 @@ function ConfigTab() {
   const [ratingCloseBehavior, setRatingCloseBehavior] = useState("ask");
   const [ratingCloseTimerMinutes, setRatingCloseTimerMinutes] = useState(30);
   const [configTenantId, setConfigTenantId] = useState<number>(tenantId);
+  // Pergunta da pesquisa: só com backend que devolve a chave (antigo = campo oculto e
+  // o save não manda a chave). Vazio = pergunta padrão no idioma da empresa.
+  const [ratingQuestion, setRatingQuestion] = useState("");
+  const [ratingQuestionSupported, setRatingQuestionSupported] = useState(false);
+  // Pedido de avaliação no Google: só com backend que devolve as chaves (antigo ou banco
+  // sem a coluna = card oculto e o save não manda as 3 chaves).
+  const [googleReviewSupported, setGoogleReviewSupported] = useState(false);
+  const [googleReviewEnabled, setGoogleReviewEnabled] = useState(false);
+  const [googleReviewUrl, setGoogleReviewUrl] = useState("");
+  const [googleReviewText, setGoogleReviewText] = useState("");
+  const googleReviewUrlTrimmed = googleReviewUrl.trim();
+  const googleReviewUrlInvalid = googleReviewUrlTrimmed !== "" && !isValidGoogleReviewUrl(googleReviewUrlTrimmed);
+
+  // Textos da Região (voo único; normalmente já vieram no boot do painel).
+  useEffect(() => {
+    void ensureTexts();
+  }, [ensureTexts]);
+
+  useEffect(() => {
+    if (defaultRatingsInUseRef.current) setRatings(buildDefaultRatings());
+  }, [buildDefaultRatings]);
 
   useEffect(() => {
     fetchEvaluationConfig()
@@ -126,7 +197,20 @@ function ConfigTab() {
         const d = Array.isArray(data) ? data[0] : data;
         if (!d) return;
         setConfigTenantId(d.id || tenantId);
-        if (Array.isArray(d.rating)) setRatings(d.rating);
+        if (Array.isArray(d.rating)) {
+          defaultRatingsInUseRef.current = false;
+          setRatings(d.rating);
+        }
+        if (Object.prototype.hasOwnProperty.call(d, "ratingQuestion")) {
+          setRatingQuestionSupported(true);
+          setRatingQuestion(typeof d.ratingQuestion === "string" ? d.ratingQuestion : "");
+        }
+        if (Object.prototype.hasOwnProperty.call(d, "ratingGoogleReview")) {
+          setGoogleReviewSupported(true);
+          setGoogleReviewEnabled(d.ratingGoogleReview === "enabled");
+          setGoogleReviewUrl(typeof d.ratingGoogleReviewUrl === "string" ? d.ratingGoogleReviewUrl : "");
+          setGoogleReviewText(typeof d.ratingGoogleReviewText === "string" ? d.ratingGoogleReviewText : "");
+        }
         setRatingStore(d.ratingStore || "");
         setRatingStoreError(d.ratingStoreError || "");
         setRatingStoreAttemp(d.ratingStoreAttemp || "");
@@ -157,10 +241,31 @@ function ConfigTab() {
   // Casa por identidade (r.rating), nunca por índice: os cards renderizam o array FILTRADO
   // pelo teto e um array fora de ordem faria o índice editar o card errado.
   const updateRating = (rating: number, field: keyof RatingItem, value: string) => {
+    defaultRatingsInUseRef.current = false;
     setRatings((prev) => prev.map((r) => r.rating === rating ? { ...r, [field]: value } : r));
   };
 
   const handleSave = async () => {
+    // Pedido do Google conferido ANTES de qualquer gravação: o save são 2 PUTs sem
+    // atomicidade, e a recusa do backend no 2º deixaria o 1º gravado.
+    const googleReviewTextNormalized = normalizeGoogleReviewText(googleReviewText);
+    if (googleReviewSupported) {
+      if (googleReviewUrlInvalid) { toast.error(t("googleReviewUrlInvalid")); return; }
+      if (ratingMode === "native" && googleReviewEnabled && !googleReviewUrlTrimmed) {
+        toast.error(t("googleReviewUrlRequired")); return;
+      }
+      if (googleReviewTextNormalized.length > GOOGLE_REVIEW_TEXT_MAX) {
+        toast.error(t("googleReviewTextTooLong", { max: GOOGLE_REVIEW_TEXT_MAX })); return;
+      }
+    }
+    const googleReviewToggle: "enabled" | "disabled" = googleReviewEnabled ? "enabled" : "disabled";
+    const googleReviewPayload = googleReviewSupported
+      ? {
+          ratingGoogleReview: googleReviewToggle,
+          ratingGoogleReviewUrl: googleReviewUrlTrimmed || null,
+          ratingGoogleReviewText: googleReviewTextNormalized || null,
+        }
+      : {};
     setSaving(true);
     try {
       await updateRatings(ratings);
@@ -193,11 +298,20 @@ function ConfigTab() {
         ratingExternalUrl: ratingExternalUrl.trim(),
         ratingCloseBehavior,
         ratingCloseTimerMinutes,
+        // Chave só quando o backend a conhece; "" volta à pergunta padrão da Região.
+        ...(ratingQuestionSupported ? { ratingQuestion: ratingQuestion.trim() } : {}),
+        // Idem: as 3 chaves só quando o GET as trouxe. Texto vazio = padrão da Região.
+        ...googleReviewPayload,
       });
 
       toast.success(t("successSaveConfig"));
-    } catch {
-      toast.error(t("errorSaveConfig"));
+    } catch (err) {
+      const googleErrorKey = GOOGLE_REVIEW_ERROR_KEYS[getBackendErrorCode(err)];
+      toast.error(
+        googleErrorKey
+          ? t(googleErrorKey, { max: GOOGLE_REVIEW_TEXT_MAX })
+          : t("errorSaveConfig")
+      );
     } finally {
       setSaving(false);
     }
@@ -329,11 +443,126 @@ function ConfigTab() {
         </CardContent>
       </Card>
 
+      {googleReviewSupported && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base flex items-center gap-1.5">
+              {t("googleReviewCardTitle")}
+              <TooltipProvider delayDuration={200}>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <button type="button" aria-label={t("googleReviewTooltip")} className="text-muted-foreground hover:text-foreground">
+                      <Info className="h-3.5 w-3.5" />
+                    </button>
+                  </TooltipTrigger>
+                  <TooltipContent className="max-w-xs text-xs font-normal">
+                    {t("googleReviewTooltip")}
+                  </TooltipContent>
+                </Tooltip>
+              </TooltipProvider>
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <p className="text-xs text-muted-foreground">{t("googleReviewCardDesc")}</p>
+            <div className="flex items-center justify-between gap-3 rounded-lg border p-3">
+              <div className="min-w-0">
+                <p className="text-sm font-medium">{t("googleReviewToggleLabel")}</p>
+                <p className="text-xs text-muted-foreground">{t("googleReviewToggleDesc")}</p>
+              </div>
+              <Switch
+                checked={googleReviewEnabled}
+                onCheckedChange={setGoogleReviewEnabled}
+                aria-label={t("googleReviewToggleLabel")}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="google-review-url">{t("googleReviewUrlLabel")}</Label>
+              <Input
+                id="google-review-url"
+                type="url"
+                inputMode="url"
+                autoComplete="off"
+                maxLength={GOOGLE_REVIEW_URL_MAX}
+                value={googleReviewUrl}
+                onChange={(e) => setGoogleReviewUrl(e.target.value)}
+                placeholder={t("googleReviewUrlPlaceholder")}
+                aria-invalid={googleReviewUrlInvalid}
+                className={cn(googleReviewUrlInvalid && "border-destructive")}
+              />
+              {googleReviewUrlInvalid && (
+                <p className="text-xs text-destructive">{t("googleReviewUrlInvalid")}</p>
+              )}
+              {googleReviewEnabled && !googleReviewUrlTrimmed && (
+                <p className="text-xs font-medium text-amber-600 dark:text-amber-400">{t("googleReviewUrlRequired")}</p>
+              )}
+              <p className="text-xs text-muted-foreground">{t("googleReviewUrlHint")}</p>
+            </div>
+            <div className="space-y-2">
+              <div className="flex items-center justify-between gap-2">
+                <Label htmlFor="google-review-text">{t("googleReviewTextLabel")}</Label>
+                <span className="text-[11px] text-muted-foreground tabular-nums">
+                  {normalizeGoogleReviewText(googleReviewText).length}/{GOOGLE_REVIEW_TEXT_MAX}
+                </span>
+              </div>
+              <Textarea
+                id="google-review-text"
+                rows={3}
+                maxLength={GOOGLE_REVIEW_TEXT_MAX}
+                value={googleReviewText}
+                onChange={(e) => setGoogleReviewText(e.target.value)}
+                placeholder={regionText(
+                  "rating.googleReview",
+                  { link: googleReviewUrlTrimmed || GOOGLE_REVIEW_LINK_VAR },
+                  GOOGLE_REVIEW_DEFAULT_PT
+                )}
+                className="text-sm"
+              />
+              <p className="text-xs text-muted-foreground">
+                {t("googleReviewTextHint", { variable: GOOGLE_REVIEW_LINK_VAR, max: GOOGLE_REVIEW_TEXT_MAX })}
+              </p>
+            </div>
+            <div className="flex items-start gap-2 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-900 dark:text-amber-200">
+              <AlertTriangle className="h-3.5 w-3.5 mt-0.5 shrink-0" />
+              <span>{t("googleReviewPolicyNote")}</span>
+            </div>
+            <p className="text-xs text-muted-foreground">
+              {t("googleReviewVariableHint", { variable: GOOGLE_REVIEW_LINK_VAR })}
+            </p>
+          </CardContent>
+        </Card>
+      )}
+
       <Card>
         <CardHeader>
           <CardTitle className="text-base">{t("generalSettingsTitle")}</CardTitle>
         </CardHeader>
         <CardContent className="space-y-4">
+          {ratingQuestionSupported && (
+            <div className="space-y-2">
+              <div className="flex items-center gap-1.5">
+                <Label htmlFor="rating-question">{t("ratingQuestionLabel")}</Label>
+                <TooltipProvider delayDuration={200}>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <button type="button" aria-label={t("ratingQuestionTooltip")} className="text-muted-foreground hover:text-foreground">
+                        <Info className="h-3.5 w-3.5" />
+                      </button>
+                    </TooltipTrigger>
+                    <TooltipContent className="max-w-xs text-xs font-normal">
+                      {t("ratingQuestionTooltip")}
+                    </TooltipContent>
+                  </Tooltip>
+                </TooltipProvider>
+              </div>
+              <Input
+                id="rating-question"
+                value={ratingQuestion}
+                onChange={(e) => setRatingQuestion(e.target.value)}
+                placeholder={regionText("evaluation.question", undefined, tChat("evaluationLabel"))}
+              />
+              <p className="text-xs text-muted-foreground">{t("ratingQuestionHint")}</p>
+            </div>
+          )}
           <div className="space-y-2">
             <Label>{t("storeMessageLabel")}</Label>
             <Input value={ratingStore} onChange={(e) => setRatingStore(e.target.value)} placeholder={t("storeMessagePlaceholder")} />
@@ -466,16 +695,65 @@ function ConfigTab() {
 }
 
 // ─── List Tab ────────────────────────────────────────────────────
+/** Opção "Todos" do filtro por agente. */
+const ALL_AGENTS = "all";
+
+const XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+
+/** AAAA-MM-DD no horário local (nome do arquivo quando o período não tem fim). */
+function localDateStamp(d: Date): string {
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
+/** Nome de aba do Excel: sem `\ / ? * [ ] :` e com no máximo 31 caracteres. */
+function xlsxSheetName(name: string): string {
+  return name.replace(/[\\/?*[\]:]/g, "").trim().slice(0, 31) || "Sheet1";
+}
+
+/** Status HTTP da recusa: o interceptor rejeita com o próprio response (status na raiz). */
+function requestStatus(err: unknown): number | undefined {
+  const e = err as { status?: number; response?: { status?: number } } | null | undefined;
+  return e?.status ?? e?.response?.status;
+}
+
+/** Uma coluna do export: o mesmo cabeçalho e o mesmo valor no Excel e no CSV. */
+interface EvaluationExportColumn {
+  header: string;
+  width: number;
+  /** Data: no Excel vira número de série com formato de data e hora. */
+  date?: boolean;
+  xlsx: (row: EvaluationExportRow) => string | number | null;
+  csv: (row: EvaluationExportRow) => string;
+}
+
 function ListTab() {
   const t = useTranslations("avaliacoesPage");
+  const tCommon = useTranslations("common");
   const { isLiveMode } = useLiveMode();
   const router = useRouter();
+  const { country } = useRegion();
+  const { hasPermission, isRestrictedUser } = useAuthStore();
+  // Mesma regra da rota (requirePermission só restringe o personalizado).
+  const canSeeRatings = hasPermission("ratings_view");
+  // Usuário restrito e modo live não exportam (nome e número completos no arquivo).
+  const canExport = canSeeRatings && !isRestrictedUser() && !isLiveMode;
+  // Sem "Exportar contatos" (personalizado) o arquivo sai sem a coluna Número.
+  const canSeeNumber = hasPermission("contacts_export");
   const [items, setItems] = useState<TicketEvaluation[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
+  // Busca aplicada 300 ms depois da última tecla (antes era uma requisição por tecla).
+  const [searchTerm, setSearchTerm] = useState("");
   const [startDate, setStartDate] = useState("");
   const [endDate, setEndDate] = useState("");
   const [filterRating, setFilterRating] = useState<string>("");
+  const [filterUser, setFilterUser] = useState<string>(ALL_AGENTS);
+  const [users, setUsers] = useState<User[]>([]);
+  // Servidor antigo ignora o filtro por agente: a lista avisa em vez de fingir que filtrou.
+  const [userFilterIgnored, setUserFilterIgnored] = useState(false);
+  // 403 na listagem (personalizado com o menu e sem "Ver avaliações").
+  const [forbidden, setForbidden] = useState(false);
   const [page, setPage] = useState(1);
   const [totalCount, setTotalCount] = useState(0);
   const [hasMore, setHasMore] = useState(false);
@@ -483,7 +761,18 @@ function ListTab() {
   const [spyOpen, setSpyOpen] = useState(false);
   const [spyTicket, setSpyTicket] = useState<TicketForSpy | null>(null);
   const [maxScore, setMaxScore] = useState(5);
+  const [exporting, setExporting] = useState(false);
+  const loadSeqRef = useRef(0);
+  const exportAbortRef = useRef<AbortController | null>(null);
+  const exportToastRef = useRef<string | null>(null);
+  const mountedRef = useRef(true);
   const limit = 20;
+  const searchQuery = searchTerm.trim();
+
+  useEffect(() => {
+    const handle = setTimeout(() => setSearchTerm(search), 300);
+    return () => clearTimeout(handle);
+  }, [search]);
 
   useEffect(() => {
     // Escala da avaliação (Pontuação máxima). Backend antigo sem o campo (ou falha) → 5 = comportamento atual.
@@ -495,29 +784,290 @@ function ListTab() {
       .catch(() => { /* silencioso — a listagem não depende da config */ });
   }, []);
 
+  useEffect(() => {
+    // Atendentes da empresa para o filtro (o servidor já tira o superadmin). Falhou = sem filtro.
+    if (!canSeeRatings) return;
+    let cancelled = false;
+    fetchAllUsers()
+      .then((res) => {
+        if (cancelled) return;
+        const label = (u: User) => u.name || u.email || "";
+        setUsers([...(res.data?.users || [])].sort((a, b) => label(a).localeCompare(label(b), undefined, { sensitivity: "base" })));
+      })
+      .catch(() => { if (!cancelled) setUsers([]); });
+    return () => { cancelled = true; };
+  }, [canSeeRatings]);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      // Trocar de aba desmonta a lista: o export em andamento para em silêncio.
+      exportAbortRef.current?.abort();
+      if (exportToastRef.current !== null) toast.dismiss(exportToastRef.current);
+    };
+  }, []);
+
+  const userOptions = useMemo(
+    () => [
+      { value: ALL_AGENTS, label: t("allAgents") },
+      ...users.map((u) => ({ value: String(u.id), label: u.name || u.email })),
+    ],
+    [users, t]
+  );
+
   const load = useCallback(async () => {
+    // Só a resposta da última chamada vale (com a busca filtrando, a de "j" pode chegar depois da de "joão").
+    const seq = ++loadSeqRef.current;
+    const sentUserId = filterUser !== ALL_AGENTS ? Number(filterUser) : undefined;
     setLoading(true);
     try {
       const { data } = await fetchEvaluations({
         page, limit,
-        search: search || undefined,
+        search: searchQuery || undefined,
         startDate: startDate || undefined,
         endDate: endDate || undefined,
         evaluation: filterRating && filterRating !== "all" ? Number(filterRating) : undefined,
+        userId: sentUserId,
       });
+      if (seq !== loadSeqRef.current) return;
       const list = data?.data ?? (Array.isArray(data) ? data : []);
       setItems(list);
       setTotalCount(data?.total ?? list.length);
       setHasMore(page < (data?.totalPages ?? 1));
-    } catch {
-      toast.error(t("errorLoad"));
+      setForbidden(false);
+      // Eco comparado com o agente enviado NESTA requisição (servidor antigo não devolve o eco).
+      setUserFilterIgnored(sentUserId !== undefined && data?.userFilter !== sentUserId);
+    } catch (err) {
+      if (seq !== loadSeqRef.current) return;
+      if (requestStatus(err) === 403) {
+        // O aviso geral de permissão já sai pelo interceptor: aqui só a mensagem da aba.
+        setForbidden(true);
+        setItems([]);
+        setTotalCount(0);
+        setHasMore(false);
+      } else {
+        toast.error(t("errorLoad"));
+      }
     } finally {
-      setLoading(false);
+      if (seq === loadSeqRef.current) setLoading(false);
     }
-  }, [page, search, startDate, endDate, filterRating]);
+  }, [page, searchQuery, startDate, endDate, filterRating, filterUser]);
 
   useEffect(() => { load(); }, [load]);
-  useEffect(() => { setPage(1); }, [search, startDate, endDate, filterRating]);
+  useEffect(() => { setPage(1); }, [searchQuery, startDate, endDate, filterRating, filterUser]);
+
+  const statusLabel = (status: EvaluationExportStatus): string => {
+    if (status === "answered") return t("statusAnswered");
+    if (status === "pending") return t("statusPending");
+    if (status === "no_response") return t("statusNoResponse");
+    return t("statusExternal");
+  };
+
+  const handleExport = async (format: "xlsx" | "csv") => {
+    if (exportAbortRef.current) return;
+    // App antigo, sem o recurso de salvar arquivo: avisa na hora, sem buscar nada.
+    if (!canDownloadFiles()) {
+      toast.warning(tCommon("downloadNeedsAppUpdate"));
+      return;
+    }
+    const controller = new AbortController();
+    exportAbortRef.current = controller;
+    const toastId = `evaluations-export-${Date.now()}`;
+    exportToastRef.current = toastId;
+    setExporting(true);
+    // Fotografia dos filtros aplicados: mexer na barra durante o export não muda o arquivo.
+    const snap = {
+      search: searchQuery,
+      startDate,
+      endDate,
+      evaluation: filterRating && filterRating !== "all" ? Number(filterRating) : undefined,
+      userId: filterUser !== ALL_AGENTS ? Number(filterUser) : undefined,
+    };
+    const withNumber = canSeeNumber;
+    toast.loading(tCommon("exportLoading"), { id: toastId });
+    try {
+      // Escala atual para o cabeçalho "Nota (0 a N)" (a da tela pode ser de antes de uma troca).
+      let scaleMax = maxScore;
+      try {
+        const { data: cfgData } = await fetchEvaluationConfig();
+        const cfg = Array.isArray(cfgData) ? cfgData[0] : (cfgData as unknown as { ratingMaxScore?: unknown });
+        if (cfg && typeof cfg.ratingMaxScore === "number") scaleMax = cfg.ratingMaxScore;
+      } catch { /* fica a escala da tela */ }
+      if (controller.signal.aborted) return;
+
+      const collected: TicketEvaluation[] = [];
+      const seen = new Set<number>();
+      let fetched = 0;
+      let capped = false;
+      let searchPartial = false;
+      let isNew = true;
+      for (let p = 1; p <= EXPORT_MAX_PAGES; p++) {
+        const { data } = await fetchEvaluations(
+          {
+            page: p,
+            limit: EXPORT_PAGE_SIZE,
+            search: snap.search || undefined,
+            startDate: snap.startDate || undefined,
+            endDate: snap.endDate || undefined,
+            evaluation: snap.evaluation,
+            userId: snap.userId,
+          },
+          { signal: controller.signal }
+        );
+        if (controller.signal.aborted) return;
+        if (p === 1) {
+          isNew = isNewEvaluationsBackend(data);
+          // Servidor antigo (ou eco diferente) ignoraria o agente e exportaria todos.
+          if (snap.userId !== undefined && (!isNew || data?.userFilter !== snap.userId)) {
+            toast.error(t("exportUserFilterUnsupported"), { id: toastId });
+            return;
+          }
+        }
+        const pageItems: TicketEvaluation[] = Array.isArray(data?.data) ? data.data : [];
+        fetched += pageItems.length;
+        for (const ev of pageItems) {
+          // Avaliação nova durante o laço empurra linhas para a página seguinte.
+          if (seen.has(ev.id)) continue;
+          seen.add(ev.id);
+          // Servidor antigo não filtra pela busca: as que não casam vêm sem contato.
+          if (snap.search && !isNew && !ev.ticket?.contact) {
+            searchPartial = true;
+            continue;
+          }
+          collected.push(ev);
+        }
+        const total = Math.min(Number(data?.total) || 0, EXPORT_MAX_ROWS);
+        toast.loading(t("exportProgress", { count: fetched, total: Math.max(total, fetched) }), { id: toastId });
+        const totalPages = Number(data?.totalPages);
+        // Página curta pelo limit que o servidor aplicou (ele corta acima do teto dele).
+        const servedLimit = Number(data?.limit) > 0 ? Number(data?.limit) : EXPORT_PAGE_SIZE;
+        const lastPage =
+          pageItems.length < servedLimit || (Number.isFinite(totalPages) && p >= totalPages);
+        if (lastPage) break;
+        if (p === EXPORT_MAX_PAGES) {
+          // Servidor antigo com busca varre a empresa inteira: o teto não diz quantas
+          // casariam, então o aviso certo é o de busca incompleta.
+          if (snap.search && !isNew) searchPartial = true;
+          else capped = true;
+        }
+      }
+
+      if (collected.length === 0) {
+        toast.info(t("exportEmpty"), { id: toastId });
+        if (searchPartial) toast.warning(t("exportSearchPartial"));
+        return;
+      }
+
+      const rows = buildEvaluationExportRows(collected, { canSeeNumber: withNumber });
+      const locale = getActiveLocale();
+      const csvDate = (d: Date | null) => csvCell(d ? csvDateTimeText(d, locale) : "");
+      const columns: EvaluationExportColumn[] = [
+        { header: t("colTicket"), width: 10, xlsx: (r) => r.ticketId || null, csv: (r) => csvCell(r.ticketId || "") },
+        { header: t("colProtocol"), width: 22, xlsx: (r) => r.protocol || null, csv: (r) => csvDigitsCell(r.protocol) },
+        { header: t("colContact"), width: 28, xlsx: (r) => r.contactName || null, csv: (r) => csvCell(r.contactName) },
+        ...(withNumber
+          ? [{
+              header: t("colNumber"),
+              width: 20,
+              xlsx: (r: EvaluationExportRow) => r.contactIdentity || null,
+              csv: (r: EvaluationExportRow) => csvDigitsCell(r.contactIdentity),
+            }]
+          : []),
+        { header: t("colAgent"), width: 22, xlsx: (r) => r.agent || null, csv: (r) => csvCell(r.agent) },
+        { header: t("colRatingScale", { max: scaleMax }), width: 12, xlsx: (r) => r.score, csv: (r) => csvCell(r.score ?? "") },
+        { header: t("colStatus"), width: 20, xlsx: (r) => statusLabel(r.status), csv: (r) => csvCell(statusLabel(r.status)) },
+        { header: t("colExternalLink"), width: 40, xlsx: (r) => r.externalUrl || null, csv: (r) => csvCell(r.externalUrl) },
+        {
+          header: t("colSentAt"),
+          width: 18,
+          date: true,
+          xlsx: (r) => (r.sentAt ? excelSerialFromLocalDate(r.sentAt) : null),
+          csv: (r) => csvDate(r.sentAt),
+        },
+        {
+          header: t("colAnsweredAt"),
+          width: 18,
+          date: true,
+          xlsx: (r) => (r.answeredAt ? excelSerialFromLocalDate(r.answeredAt) : null),
+          csv: (r) => csvDate(r.answeredAt),
+        },
+        { header: t("colQueue"), width: 20, xlsx: (r) => r.queue || null, csv: (r) => csvCell(r.queue) },
+        { header: t("colChannel"), width: 20, xlsx: (r) => r.channel || null, csv: (r) => csvCell(r.channel) },
+      ];
+
+      let blob: Blob;
+      if (format === "xlsx") {
+        const mod = await import("xlsx");
+        const XLSX = mod.default ?? mod;
+        if (controller.signal.aborted) return;
+        const aoa: (string | number | null)[][] = [
+          columns.map((c) => c.header),
+          ...rows.map((r) => columns.map((c) => c.xlsx(r))),
+        ];
+        const ws = XLSX.utils.aoa_to_sheet(aoa);
+        // Datas de verdade: número de série calculado aqui + formato de data e hora do
+        // idioma da tela (nunca `Date` na SheetJS, que erra a hora).
+        const dateFormat = excelDateTimeFormat(locale);
+        columns.forEach((c, colIndex) => {
+          if (!c.date) return;
+          rows.forEach((_, rowIndex) => {
+            const cell = ws[XLSX.utils.encode_cell({ r: rowIndex + 1, c: colIndex })];
+            if (cell && typeof cell.v === "number") {
+              cell.t = "n";
+              cell.z = dateFormat;
+            }
+          });
+        });
+        ws["!cols"] = columns.map((c) => ({ wch: c.width }));
+        const wb = XLSX.utils.book_new();
+        XLSX.utils.book_append_sheet(wb, ws, xlsxSheetName(t("exportSheetName")));
+        const out = XLSX.write(wb, { bookType: "xlsx", type: "array", compression: true });
+        blob = new Blob([out], { type: XLSX_MIME });
+      } else {
+        const csvRows: string[][] = [
+          columns.map((c) => csvCell(c.header)),
+          ...rows.map((r) => columns.map((c) => c.csv(r))),
+        ];
+        blob = new Blob([buildCsv(csvRows, csvDelimiterForCountry(country))], { type: "text/csv;charset=utf-8" });
+      }
+      if (controller.signal.aborted) return;
+
+      const today = localDateStamp(new Date());
+      let range: string;
+      if (snap.startDate && snap.endDate) range = t("exportFileRange", { start: snap.startDate, end: snap.endDate });
+      else if (snap.startDate) range = t("exportFileRange", { start: snap.startDate, end: today });
+      else if (snap.endDate) range = snap.endDate;
+      else range = today;
+      const fileName = `${sanitizeFileNamePart(t("exportFileName"))}_${sanitizeFileNamePart(range)}.${format}`;
+
+      const result = await downloadFile(blob, fileName);
+      if (result === "app_outdated") {
+        toast.dismiss(toastId);
+        toast.warning(tCommon("downloadNeedsAppUpdate"));
+        return;
+      }
+      toast.success(t("exportSuccess", { count: rows.length }), { id: toastId });
+      if (capped) toast.warning(t("exportCapped", { cap: EXPORT_MAX_ROWS }));
+      if (searchPartial) toast.warning(t("exportSearchPartial"));
+    } catch (err) {
+      if (controller.signal.aborted) {
+        toast.dismiss(toastId);
+        return;
+      }
+      if (requestStatus(err) === 403) {
+        // O interceptor já avisou a falta de permissão.
+        toast.dismiss(toastId);
+        return;
+      }
+      toast.error(t("exportError"), { id: toastId });
+    } finally {
+      if (controller.signal.aborted) toast.dismiss(toastId);
+      if (exportAbortRef.current === controller) exportAbortRef.current = null;
+      if (exportToastRef.current === toastId) exportToastRef.current = null;
+      if (mountedRef.current) setExporting(false);
+    }
+  };
 
   const handleDelete = async () => {
     if (!deleting) return;
@@ -541,7 +1091,10 @@ function ListTab() {
 
   // Teto ÚNICO da tabela: escala atual OU a maior nota visível (histórico gravado com teto
   // antigo nunca é truncado) — evita linhas com quantidades diferentes de estrelas.
-  const tableMax = Math.max(maxScore, ...items.map((ev) => numericScore(ev.evaluation) ?? 0));
+  const tableMax = Math.max(
+    maxScore,
+    ...items.map((ev) => (evaluationStatus(ev) === "answered" ? numericScore(ev.evaluation) ?? 0 : 0))
+  );
 
   return (
     <div className="space-y-4">
@@ -570,13 +1123,73 @@ function ListTab() {
             </SelectContent>
           </Select>
         </div>
+        {users.length > 0 && (
+          <div className="w-full space-y-1 sm:w-auto">
+            <Label className="text-xs">{t("colAgent")}</Label>
+            <SearchableSelect
+              options={userOptions}
+              value={filterUser}
+              onValueChange={(v) => setFilterUser(v || ALL_AGENTS)}
+              placeholder={t("allAgents")}
+              triggerClassName="w-full sm:w-48"
+            />
+          </div>
+        )}
         <Button variant="outline" size="icon" onClick={load} disabled={loading}>
           <RefreshCw className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} />
         </Button>
+        {canExport && (
+          <DropdownMenu>
+            <TooltipProvider delayDuration={200}>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <DropdownMenuTrigger asChild>
+                    <Button
+                      variant="outline"
+                      className="px-3 sm:px-4"
+                      disabled={exporting}
+                      aria-label={t("exportButton")}
+                    >
+                      {exporting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
+                      <span className="hidden sm:inline">{t("exportButton")}</span>
+                    </Button>
+                  </DropdownMenuTrigger>
+                </TooltipTrigger>
+                <TooltipContent className="max-w-xs text-xs font-normal">
+                  {t("exportTooltip", { cap: EXPORT_MAX_ROWS })}
+                </TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
+            <DropdownMenuContent align="end" className="w-64 max-w-[calc(100vw-2rem)]">
+              {/* No toque o tooltip não aparece: a explicação curta fica dentro do menu. */}
+              <DropdownMenuLabel className="text-xs font-normal text-muted-foreground">
+                {t("exportMenuHint", { cap: EXPORT_MAX_ROWS })}
+              </DropdownMenuLabel>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem onSelect={() => { void handleExport("xlsx"); }}>
+                <FileSpreadsheet className="mr-2 h-4 w-4" />
+                {t("exportExcel")}
+              </DropdownMenuItem>
+              <DropdownMenuItem onSelect={() => { void handleExport("csv"); }}>
+                <FileText className="mr-2 h-4 w-4" />
+                {t("exportCsv")}
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        )}
       </div>
+
+      {userFilterIgnored && !loading && (
+        <Alert variant="warning-soft">
+          <AlertTriangle className="h-4 w-4" />
+          <AlertDescription>{t("userFilterUnsupported")}</AlertDescription>
+        </Alert>
+      )}
 
       {loading ? (
         <div className="space-y-2">{Array.from({ length: 6 }).map((_, i) => <Skeleton key={i} className="h-14 w-full" />)}</div>
+      ) : forbidden ? (
+        <EmptyState icon={Lock} title={t("noPermissionTitle")} description={t("noPermissionDescription")} />
       ) : items.length === 0 ? (
         <EmptyState icon={Star} title={t("emptyTitle")} description={t("emptyDescription")} />
       ) : (
@@ -642,8 +1255,13 @@ function ListTab() {
                           ) : (
                             <span className="text-xs text-muted-foreground">{t("externalBadge")}</span>
                           )
-                        ) : (
+                        ) : evaluationStatus(ev) === "answered" ? (
                           <StarRating rating={numericScore(ev.evaluation) ?? 0} max={tableMax} />
+                        ) : (
+                          // Pesquisa ainda sem nota: a situação no lugar de estrelas vazias (que pareciam nota 0).
+                          <span className="text-xs text-muted-foreground">
+                            {evaluationStatus(ev) === "pending" ? t("statusPending") : t("statusNoResponse")}
+                          </span>
                         )}
                       </TableCell>
                       <TableCell className="text-muted-foreground">{formatDate(ev.createdAt)}</TableCell>
@@ -938,32 +1556,69 @@ function NpsReportTab() {
 
 // ─── Page ────────────────────────────────────────────────────────
 export default function AvaliacoesPage() {
-  const t = useTranslations("avaliacoesPage");
+  // Gate isolado num wrapper: o conteúdo tem hooks, e sair com `return` antes deles
+  // quebraria o React quando a permissão muda com a página montada.
   const allowed = usePageAccess("avaliacoes", { adminSuperOnly: true });
   if (!allowed) return <AccessDenied />;
+  return <AvaliacoesPageContent />;
+}
+
+function AvaliacoesPageContent() {
+  const t = useTranslations("avaliacoesPage");
+  const searchParams = useSearchParams();
+  const wantsGoogleTab = searchParams?.get("tab") === "google";
+  const [tab, setTab] = useState("listar");
+  // Aba Google só quando o backend tem o recurso (rotas novas, plano com
+  // Avaliações/NPS e recurso ligado). Qualquer outra resposta = sem aba.
+  const [googleTabAvailable, setGoogleTabAvailable] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    loadGoogleBusinessStatus({ background: true })
+      .then((res) => {
+        if (!cancelled) setGoogleTabAvailable(res.state === "ok");
+      })
+      .catch(() => { /* sem aba */ });
+    return () => { cancelled = true; };
+  }, []);
+
+  // `?tab=google` (link do sino e do push) abre a aba assim que ela existir.
+  useEffect(() => {
+    if (googleTabAvailable && wantsGoogleTab) setTab("google");
+  }, [googleTabAvailable, wantsGoogleTab]);
+
+  const pageHelp = {
+    description: t("helpDesc"),
+    sections: [
+      { title: t("helpS0T"), items: [t("helpS0I0"), t("helpS0I1"), t("helpS0I2")] },
+      { title: t("helpS1T"), items: [t("helpS1I0"), t("helpS1I1"), t("helpS1I2")] },
+      { title: t("helpS2T"), items: [t("helpS2I0"), t("helpS2I1")] },
+      { title: t("helpS3T"), items: [t("helpS3I0"), t("helpS3I1"), t("helpS3I2")] },
+    ],
+  };
+
   return (
     <div className="space-y-6">
       <PageHeader
         title={t("title")}
         description={t("description")}
-        help={{
-          description: t("helpDesc"),
-          sections: [
-            { title: t("helpS0T"), items: [t("helpS0I0"), t("helpS0I1"), t("helpS0I2")] },
-            { title: t("helpS1T"), items: [t("helpS1I0"), t("helpS1I1"), t("helpS1I2")] },
-            { title: t("helpS2T"), items: [t("helpS2I0"), t("helpS2I1")] },
-          ],
-        }}
+        help={pageHelp}
       />
-      <Tabs defaultValue="listar">
-        <TabsList>
+      <Tabs value={tab} onValueChange={setTab}>
+        <TabsList className="max-w-full justify-start overflow-x-auto overflow-y-hidden">
           <TabsTrigger value="listar"><Star className="mr-2 h-4 w-4" />{t("tabList")}</TabsTrigger>
           <TabsTrigger value="relatorio"><BarChart3 className="mr-2 h-4 w-4" />{t("tabNps")}</TabsTrigger>
           <TabsTrigger value="configurar"><Settings className="mr-2 h-4 w-4" />{t("tabConfig")}</TabsTrigger>
+          {googleTabAvailable && (
+            <TabsTrigger value="google"><Store className="mr-2 h-4 w-4" />{t("tabGoogle")}</TabsTrigger>
+          )}
         </TabsList>
         <TabsContent value="listar" className="mt-4 pb-8"><ListTab /></TabsContent>
         <TabsContent value="relatorio" className="mt-4 pb-8"><NpsReportTab /></TabsContent>
         <TabsContent value="configurar" className="mt-4 pb-8"><ConfigTab /></TabsContent>
+        {googleTabAvailable && (
+          <TabsContent value="google" className="mt-4 pb-8"><GoogleReviewsTab /></TabsContent>
+        )}
       </Tabs>
     </div>
   );

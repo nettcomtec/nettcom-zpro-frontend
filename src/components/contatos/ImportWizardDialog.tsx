@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useCallback, useRef, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslations } from "next-intl";
 import {
   Dialog,
@@ -52,6 +52,8 @@ import type { Tag } from "@/services/tags";
 import type { User } from "@/services/users";
 import type { Queue } from "@/services/queues";
 import { useLiveMode } from "@/hooks/use-live-mode";
+import { useRegion } from "@/hooks/use-region";
+import { dialCodeFor } from "@/lib/region";
 import { cn } from "@/lib/utils";
 
 const MAX_FILE_SIZE_MB = 30;
@@ -137,6 +139,10 @@ export function ImportWizardDialog({
   const t = useTranslations("contatosPage.importWizard");
   const tCsv = useTranslations("bulkCsvImport");
   const { isLiveMode } = useLiveMode();
+  // DDI padrão = o do país da empresa; o DDD sugerido ("11") só faz sentido no BR.
+  const { country: regionCountry } = useRegion();
+  const regionDialCode = dialCodeFor(regionCountry);
+  const isBrRegion = regionCountry === "BR";
 
   const [step, setStep] = useState(1);
 
@@ -156,7 +162,10 @@ export function ImportWizardDialog({
 
   // Step 3
   const [mappings, setMappings] = useState<MappingRow[]>([]);
-  const [defaultCountryCode, setDefaultCountryCode] = useState("55");
+  const [defaultCountryCode, setDefaultCountryCode] = useState(regionDialCode);
+  // O operador mexeu no DDI padrão (inclusive apagou, que é "não aplicar"): a Região que chega
+  // depois do 1º render não sobrescreve. O reset (fechar o assistente) volta a seguir a Região.
+  const countryCodeTouchedRef = useRef(false);
   const [defaultAreaCode, setDefaultAreaCode] = useState("");
   const [tagIds, setTagIds] = useState<number[]>([]);
   const [tagSearch, setTagSearch] = useState("");
@@ -169,6 +178,10 @@ export function ImportWizardDialog({
     null
   );
 
+  useEffect(() => {
+    if (!countryCodeTouchedRef.current) setDefaultCountryCode(regionDialCode);
+  }, [regionDialCode]);
+
   const reset = () => {
     setStep(1);
     setFile(null);
@@ -178,7 +191,8 @@ export function ImportWizardDialog({
     setDelimiter("auto");
     setDetectedDelimiter(null);
     setMappings([]);
-    setDefaultCountryCode("55");
+    countryCodeTouchedRef.current = false;
+    setDefaultCountryCode(regionDialCode);
     setDefaultAreaCode("");
     setTagIds([]);
     setTagSearch("");
@@ -705,25 +719,37 @@ export function ImportWizardDialog({
                   );
                 })}
               </div>
+              <p className="text-xs text-muted-foreground flex items-start gap-1">
+                <AlertTriangle className="h-3 w-3 mt-0.5 shrink-0 text-amber-500" />
+                {t("updateBehaviorHint", {
+                  always: t("behaviorAlways"),
+                  keepIfEmpty: t("behaviorNeverIfEmptyFile"),
+                })}
+              </p>
             </div>
 
             {/* Phone defaults */}
             <div className="grid grid-cols-2 gap-3">
               <div className="space-y-1">
-                <Label className="text-xs">{t("defaultCountryCode")}</Label>
+                <Label className="text-xs">{t("defaultCountryCodeLabel")}</Label>
                 <Input
                   value={defaultCountryCode}
-                  onChange={(e) => setDefaultCountryCode(e.target.value.replace(/\D/g, ""))}
-                  placeholder="55"
+                  onChange={(e) => {
+                    countryCodeTouchedRef.current = true;
+                    setDefaultCountryCode(e.target.value.replace(/\D/g, ""));
+                  }}
+                  placeholder={regionDialCode}
+                  inputMode="numeric"
                   className="h-8 text-xs"
                 />
               </div>
               <div className="space-y-1">
-                <Label className="text-xs">{t("defaultAreaCode")}</Label>
+                <Label className="text-xs">{t("defaultAreaCodeLabel")}</Label>
                 <Input
                   value={defaultAreaCode}
                   onChange={(e) => setDefaultAreaCode(e.target.value.replace(/\D/g, ""))}
-                  placeholder="11"
+                  placeholder={isBrRegion ? "11" : undefined}
+                  inputMode="numeric"
                   className="h-8 text-xs"
                 />
               </div>
@@ -731,7 +757,7 @@ export function ImportWizardDialog({
 
             <p className="text-xs text-muted-foreground flex items-start gap-1">
               <AlertTriangle className="h-3 w-3 mt-0.5 shrink-0 text-amber-500" />
-              {t("phoneDefaultHint")}
+              {t("phoneDefaultsHint")}
             </p>
 
             {/* Tags */}

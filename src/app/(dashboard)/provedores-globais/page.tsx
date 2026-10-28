@@ -132,10 +132,10 @@ const WHISPER_LANGUAGES = [
   { value: "cy", label: "Cymraeg (Welsh)" },
 ];
 
-const GROQ_SPEECH_MODELS = [
+const GROQ_SPEECH_MODELS: Array<{ value: string; label?: string; labelKey?: string }> = [
   { value: "whisper-large-v3", label: "Whisper Large v3" },
-  { value: "whisper-large-v3-turbo", label: "Whisper Large v3 Turbo (4× mais rápido)" },
-  { value: "distil-whisper-large-v3-en", label: "Distil Whisper Large v3 (somente inglês)" },
+  { value: "whisper-large-v3-turbo", labelKey: "modelWhisperTurbo" },
+  { value: "distil-whisper-large-v3-en", labelKey: "modelDistilWhisperEn" },
 ];
 
 const PROVIDER_TYPES = [
@@ -428,12 +428,9 @@ export default function ProvedoresGlobaisPage() {
               {editing.providerType === "dialog360_partner" && (
                 <>
                   <div className="col-span-2 rounded-md bg-blue-50 dark:bg-blue-950/30 border border-blue-200 dark:border-blue-900 p-3 text-xs space-y-1">
-                    <p className="font-semibold text-foreground">Apenas Partner Account 360dialog</p>
+                    <p className="font-semibold text-foreground">{t("d360PartnerOnlyTitle")}</p>
                     <p className="text-muted-foreground">
-                      Esses campos são para a <strong>Partner API</strong> do 360dialog (BSP).
-                      Customer Accounts não têm Partner credentials — usuários Customer devem
-                      conectar canais via fluxo <strong>Manual</strong> em /sessoes (colam só a
-                      D360-API-KEY emitida no WABA Manager).
+                      {t.rich("d360PartnerOnlyInfo", { strong: (chunks) => <strong>{chunks}</strong> })}
                     </p>
                   </div>
                   <div className="space-y-1.5 col-span-2">
@@ -441,7 +438,7 @@ export default function ProvedoresGlobaisPage() {
                     <Input
                       value={editing.dialog360PartnerId || ""}
                       onChange={(e) => set("dialog360PartnerId", e.target.value)}
-                      placeholder="ID alfanumérico (não é email)"
+                      placeholder={t("d360PartnerIdPlaceholder")}
                     />
                   </div>
                   <div className="space-y-1.5 col-span-2">
@@ -463,13 +460,9 @@ export default function ProvedoresGlobaisPage() {
               {editing.providerType === "gupshup_partner" && (
                 <>
                   <div className="col-span-2 rounded-md bg-blue-50 dark:bg-blue-950/30 border border-blue-200 dark:border-blue-900 p-3 text-xs space-y-1">
-                    <p className="font-semibold text-foreground">Apenas Partner Account Gupshup</p>
+                    <p className="font-semibold text-foreground">{t("gupshupPartnerOnlyTitle")}</p>
                     <p className="text-muted-foreground">
-                      Esses campos são para a <strong>Partner API</strong> do Gupshup
-                      (partner.gupshup.io). Login Partner não aceita Google SSO — só
-                      email + senha. Customer Accounts (gupshup.io comum) não têm Partner
-                      credentials e devem conectar canais via fluxo <strong>Manual</strong>
-                      em /sessoes (colam App ID + App Token criados no painel Customer).
+                      {t.rich("gupshupPartnerOnlyInfo", { strong: (chunks) => <strong>{chunks}</strong> })}
                     </p>
                   </div>
                   <div className="space-y-1.5 col-span-2">
@@ -477,7 +470,7 @@ export default function ProvedoresGlobaisPage() {
                     <Input
                       value={editing.gupshupPartnerEmail || ""}
                       onChange={(e) => set("gupshupPartnerEmail", e.target.value)}
-                      placeholder="email do Partner Gupshup"
+                      placeholder={t("gupshupPartnerEmailPlaceholder")}
                     />
                   </div>
                   <div className="space-y-1.5 col-span-2">
@@ -492,7 +485,7 @@ export default function ProvedoresGlobaisPage() {
                     <Input
                       value={editing.gupshupSolutionId || ""}
                       onChange={(e) => set("gupshupSolutionId", e.target.value)}
-                      placeholder="UUID alfanumérico aprovado pela Meta"
+                      placeholder={t("gupshupSolutionIdPlaceholder")}
                     />
                   </div>
                 </>
@@ -518,7 +511,7 @@ export default function ProvedoresGlobaisPage() {
                     <SelectTrigger><SelectValue placeholder={t("labelModel")} /></SelectTrigger>
                     <SelectContent>
                       {GROQ_SPEECH_MODELS.map((m) => (
-                        <SelectItem key={m.value} value={m.value}>{m.label}</SelectItem>
+                        <SelectItem key={m.value} value={m.value}>{m.labelKey ? t(m.labelKey) : m.label}</SelectItem>
                       ))}
                     </SelectContent>
                   </Select>

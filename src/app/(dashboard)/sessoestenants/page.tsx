@@ -31,6 +31,8 @@ import { RegisterPinDialog } from "@/components/sessoes/register-pin-dialog";
 import { BspWebhookInfoCard } from "@/components/sessoes/bsp-webhook-info-card";
 import { Tooltip, TooltipContent, TooltipTrigger, TooltipProvider } from "@/components/ui/tooltip";
 import { toast } from "sonner";
+import { getBackendErrorCode } from "@/lib/backend-error-code";
+import { normalizeAgentSeconds } from "@/lib/waba-text-grouping";
 import {
   fetchWhatsappsByTenant, deleteWhatsappTenant, createWhatsappTenant, updateWhatsappTenant,
   showWhatsappTenantSession, connectWhatsappTenantSession, requestQrCodeTenant, disconnectWhatsappTenantSession,
@@ -42,6 +44,12 @@ import {
 import { QRCodeSVG } from "qrcode.react";
 import { fetchTenants } from "@/services/tenants";
 import type { Whatsapp } from "@/services/whatsapp";
+import {
+  getTelegramInviteTexts,
+  updateTelegramInviteTexts,
+  type TelegramInviteTexts,
+  type TelegramInviteTextsUpdate,
+} from "@/services/whatsapp";
 import { buildDirectLinkUrl } from "@/services/webchat";
 
 // ─── Types ────────────────────────────────────────────────
@@ -62,6 +70,9 @@ interface Session {
   wabaId?: string;
   bmToken?: string;
   wabaVersion?: string;
+  // Juntar mensagens (WABA): só vêm do backend que oferece a opção.
+  wabaGroupBotMessages?: boolean;
+  wabaGroupAgentSeconds?: number;
   appId?: string;
   tokenTelegram?: string;
   wppUser?: string;
@@ -250,6 +261,9 @@ function emptyForm() {
     proxyPass: "",
     // Pairing toggle
     usePairingCode: false,
+    // Juntar mensagens (WABA)
+    wabaGroupBotMessages: false,
+    wabaGroupAgentSeconds: "0",
   };
 }
 type FormState = ReturnType<typeof emptyForm>;
@@ -648,7 +662,7 @@ function GroupCard({ label, sublabel, sessions, t, onDelete, onEdit, onConnect, 
           </div>
           <div className="flex items-center gap-2">
             <Badge variant="success" className="text-xs">{connected} {t("statConnected")}</Badge>
-            {sessions.length - connected > 0 && <Badge variant="secondary" className="text-xs">{sessions.length - connected} offline</Badge>}
+            {sessions.length - connected > 0 && <Badge variant="secondary" className="text-xs">{sessions.length - connected} {t("groupOffline")}</Badge>}
           </div>
         </div>
       </CardHeader>
@@ -660,6 +674,12 @@ function GroupCard({ label, sublabel, sessions, t, onDelete, onEdit, onConnect, 
     </Card>
   );
 }
+
+// Textos que o bot do Telegram responde ao link de convite: campos editáveis e teto por
+// campo (o backend corta no mesmo tamanho). Mesma seção de /sessoes.
+type TelegramInviteTextFields = { confirmText: string; expiredText: string; conflictText: string };
+const TELEGRAM_INVITE_TEXT_KEYS = ["confirmText", "expiredText", "conflictText"] as const;
+const TELEGRAM_INVITE_TEXT_MAX = 1000;
 
 // ─── Channel Modal ────────────────────────────────────────
 
@@ -679,6 +699,18 @@ function ChannelModal({ open, onClose, editing, tenants, onSaved }: {
 
   const isEdit = !!editing;
   const type = form.type;
+  // Juntar mensagens (WABA): só na edição de canal WABA cujo backend devolveu as chaves
+  // (backend antigo, colunas ausentes ou interruptor desligado = bloco escondido, nada no PUT).
+  const wabaGroupingAvailable = isEdit && !!editing && type === "waba" && editing.type === "waba"
+    && ("wabaGroupAgentSeconds" in editing || "wabaGroupBotMessages" in editing);
+  // 0 (desligado) ou de 2 a 15; null = valor inválido.
+  const parsedWabaGroupSeconds = (() => {
+    const raw = String(form.wabaGroupAgentSeconds ?? "").trim();
+    if (raw === "") return 0;
+    const n = Number(raw);
+    if (!Number.isInteger(n)) return null;
+    return n === 0 || normalizeAgentSeconds(n) === n ? n : null;
+  })();
 
   useEffect(() => {
     if (!open) return;
@@ -739,12 +771,54 @@ function ChannelModal({ open, onClose, editing, tenants, onSaved }: {
         proxyUser: editing.proxyUser || "",
         proxyPass: editing.proxyPass || "",
         usePairingCode: false,
+        wabaGroupBotMessages: editing.wabaGroupBotMessages === true,
+        wabaGroupAgentSeconds: String(editing.wabaGroupAgentSeconds ?? 0),
       });
     } else {
       setForm(emptyForm());
     }
     setManualWabaVersion(false);
   }, [open, editing]);
+
+  // ── Textos do link de convite do Telegram (mesma seção de /sessoes). Só na EDIÇÃO de
+  // canal Telegram; rota própria, carregada ao abrir e gravada DEPOIS do save do canal,
+  // só com os campos que mudaram. null = seção escondida (backend antigo → 404, banco sem
+  // as colunas → available:false). Falha ao gravar não desfaz o save do canal.
+  const isTelegramEdit = isEdit && editing?.type === "telegram";
+  const [tgInviteTexts, setTgInviteTexts] = useState<TelegramInviteTexts | null>(null);
+  const [tgInviteDraft, setTgInviteDraft] = useState<TelegramInviteTextFields>({
+    confirmText: "", expiredText: "", conflictText: "",
+  });
+  useEffect(() => {
+    setTgInviteTexts(null);
+    setTgInviteDraft({ confirmText: "", expiredText: "", conflictText: "" });
+    if (!open || !isTelegramEdit || !editing?.id) return;
+    let alive = true;
+    getTelegramInviteTexts(editing.id)
+      .then(({ data }) => {
+        if (!alive || !data || data.available !== true) return;
+        setTgInviteTexts(data);
+        setTgInviteDraft({
+          confirmText: data.confirmText ?? "",
+          expiredText: data.expiredText ?? "",
+          conflictText: data.conflictText ?? "",
+        });
+      })
+      .catch(() => { /* 404 (backend antigo), 403 ou falha: a seção fica escondida */ });
+    return () => { alive = false; };
+  }, [open, isTelegramEdit, editing?.id]);
+
+  // Só os campos que mudaram em relação ao que o servidor devolveu ("" = volta ao padrão).
+  function buildTelegramInviteTextsUpdate(): TelegramInviteTextsUpdate | null {
+    if (!tgInviteTexts) return null;
+    const body: TelegramInviteTextsUpdate = {};
+    TELEGRAM_INVITE_TEXT_KEYS.forEach((key) => {
+      const saved = (tgInviteTexts[key] ?? "").trim();
+      const next = tgInviteDraft[key].trim();
+      if (next !== saved) body[key] = next;
+    });
+    return Object.keys(body).length > 0 ? body : null;
+  }
 
   function setField<K extends keyof FormState>(k: K, v: FormState[K]) {
     setForm(f => ({ ...f, [k]: v }));
@@ -812,17 +886,31 @@ function ChannelModal({ open, onClose, editing, tenants, onSaved }: {
       proxyUrl: form.proxyUrl || undefined,
       proxyUser: form.proxyUser || undefined,
       proxyPass: form.proxyPass || undefined,
+      ...(wabaGroupingAvailable
+        ? { wabaGroupBotMessages: form.wabaGroupBotMessages, wabaGroupAgentSeconds: parsedWabaGroupSeconds ?? 0 }
+        : {}),
     };
   }
 
   async function handleSave() {
     if (!form.name.trim()) { toast.error(tPage("fieldNameRequired")); return; }
     if (!form.tenantId) { toast.error(tPage("fieldTenantRequired")); return; }
+    if (wabaGroupingAvailable && parsedWabaGroupSeconds === null) { toast.error(tS("wabaGroupAgentInvalid")); return; }
     setSaving(true);
     try {
       const payload = buildPayload();
       if (isEdit && editing) {
         await updateWhatsappTenant(editing.id, payload);
+        // Textos do convite do Telegram: depois do save do canal e só se algum mudou.
+        // Falha aqui avisa sem desfazer o que já foi salvo no canal.
+        const tgInviteBody = buildTelegramInviteTextsUpdate();
+        if (tgInviteBody) {
+          try {
+            await updateTelegramInviteTexts(editing.id, tgInviteBody);
+          } catch {
+            toast.error(tS("telegramInviteTextsSaveError"));
+          }
+        }
         toast.success(tPage("sessionUpdated"));
       } else {
         await createWhatsappTenant(payload);
@@ -830,8 +918,9 @@ function ChannelModal({ open, onClose, editing, tenants, onSaved }: {
       }
       onSaved();
       onClose();
-    } catch {
-      toast.error(isEdit ? tPage("errorUpdating") : tPage("errorCreating"));
+    } catch (err) {
+      if (getBackendErrorCode(err) === "ERR_WABA_GROUPING_SECONDS_INVALID") toast.error(tS("wabaGroupAgentInvalid"));
+      else toast.error(isEdit ? tPage("errorUpdating") : tPage("errorCreating"));
     } finally {
       setSaving(false);
     }
@@ -936,6 +1025,33 @@ function ChannelModal({ open, onClose, editing, tenants, onSaved }: {
               <Field label={tS("telegramBotToken")}>
                 <Input value={form.tokenTelegram} onChange={e => setField("tokenTelegram", e.target.value)} placeholder="123456789:ABCdef..." />
               </Field>
+              {/* Textos do link de convite (só em edição; escondida sem suporte no servidor).
+                  Vazio = o bot usa o texto padrão, mostrado como placeholder. */}
+              {isTelegramEdit && tgInviteTexts && (
+                <div className="space-y-3 pt-1">
+                  <p className="text-sm font-semibold">{tS("telegramInviteTextsTitle")}</p>
+                  <p className="text-xs text-muted-foreground">{tS("telegramInviteTextsNote")}</p>
+                  {([
+                    { key: "confirmText", labelKey: "telegramInviteConfirmLabel" },
+                    { key: "expiredText", labelKey: "telegramInviteExpiredLabel" },
+                    { key: "conflictText", labelKey: "telegramInviteConflictLabel" },
+                  ] as const).map(({ key, labelKey }) => (
+                    <Field key={key} label={tS(labelKey)}>
+                      <Textarea
+                        value={tgInviteDraft[key]}
+                        onChange={(e) => {
+                          const value = e.target.value.slice(0, TELEGRAM_INVITE_TEXT_MAX);
+                          setTgInviteDraft((prev) => ({ ...prev, [key]: value }));
+                        }}
+                        placeholder={tgInviteTexts.defaults?.[key] ?? ""}
+                        maxLength={TELEGRAM_INVITE_TEXT_MAX}
+                        rows={3}
+                        className="resize-y min-h-[72px]"
+                      />
+                    </Field>
+                  ))}
+                </div>
+              )}
             </CollapseSection>
           )}
 
@@ -981,6 +1097,38 @@ function ChannelModal({ open, onClose, editing, tenants, onSaved }: {
               <Field label={tS("wabaAppIdOptional")}>
                 <Input value={form.appId} onChange={e => setField("appId", e.target.value)} placeholder={tS("none")} />
               </Field>
+              {wabaGroupingAvailable && (
+                <div className="space-y-3 border-t pt-3">
+                  <p className="text-sm font-medium">{tS("wabaGroupingTitle")}</p>
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="flex-1">
+                      <Label htmlFor="tenantWabaGroupBot" className="cursor-pointer text-sm font-medium leading-snug">{tS("wabaGroupBotLabel")}</Label>
+                      <p className="text-xs text-muted-foreground mt-0.5">{tS("wabaGroupBotHint")}</p>
+                      <p className="text-xs text-muted-foreground mt-1">{tS("wabaGroupBotTip")}</p>
+                    </div>
+                    <Switch
+                      id="tenantWabaGroupBot"
+                      checked={!!form.wabaGroupBotMessages}
+                      onCheckedChange={v => setField("wabaGroupBotMessages", v)}
+                      className="mt-0.5 flex-shrink-0"
+                    />
+                  </div>
+                  <Field label={tS("wabaGroupAgentLabel")} hint={tS("wabaGroupAgentHint")}>
+                    <Input
+                      type="number"
+                      min={0}
+                      max={15}
+                      className="w-full sm:w-32"
+                      value={form.wabaGroupAgentSeconds}
+                      onChange={e => setField("wabaGroupAgentSeconds", e.target.value)}
+                    />
+                    {parsedWabaGroupSeconds === null && (
+                      <p className="text-xs text-destructive mt-1">{tS("wabaGroupAgentInvalid")}</p>
+                    )}
+                    <p className="text-xs text-muted-foreground mt-1">{tS("wabaGroupAgentTip")}</p>
+                  </Field>
+                </div>
+              )}
             </CollapseSection>
           )}
 
@@ -1051,7 +1199,7 @@ function ChannelModal({ open, onClose, editing, tenants, onSaved }: {
           {(type === "zapi" || type === "uazapi") && (
             <CollapseSection title={type === "zapi" ? "Z-API" : "UaZapi"} defaultOpen={true}>
               <Field label={tPage("apiTokenLabel")}>
-                <Input value={form.tokenAPI} onChange={e => setField("tokenAPI", e.target.value)} placeholder="Token" />
+                <Input value={form.tokenAPI} onChange={e => setField("tokenAPI", e.target.value)} placeholder={tPage("apiTokenPlaceholder")} />
               </Field>
               <Field label={tS("numberInstancePlaceholder")}>
                 <Input value={form.wabaId} onChange={e => setField("wabaId", e.target.value)} placeholder={tS("numberInstancePlaceholder")} />
@@ -1063,7 +1211,7 @@ function ChannelModal({ open, onClose, editing, tenants, onSaved }: {
           {type === "woocommerce" && (
             <CollapseSection title="WooCommerce" defaultOpen={true}>
               <Field label={tS("woocommerceStoreUrl" as Parameters<typeof tS>[0])} hint={tS("woocommerceStoreUrlHint" as Parameters<typeof tS>[0])}>
-                <Input value={form.wabaId} onChange={e => setField("wabaId", e.target.value)} placeholder="https://minha-loja.com" />
+                <Input value={form.wabaId} onChange={e => setField("wabaId", e.target.value)} placeholder={tPage("woocommerceStoreUrlPlaceholder")} />
               </Field>
             </CollapseSection>
           )}
@@ -1089,16 +1237,16 @@ function ChannelModal({ open, onClose, editing, tenants, onSaved }: {
                 </Field>
                 <ToggleRow id="smtpSecure" label={tS("smtpSecureLabel")} checked={form.smtpSecure} onCheckedChange={v => setField("smtpSecure", v)} />
                 <Field label={tS("smtpUserLabel")}>
-                  <Input value={form.smtpUser} onChange={e => setField("smtpUser", e.target.value)} placeholder="seu@email.com" />
+                  <Input value={form.smtpUser} onChange={e => setField("smtpUser", e.target.value)} placeholder={tS("autodetectEmailPlaceholder")} />
                 </Field>
                 <Field label={tS("smtpPassLabel")}>
                   <Input type="password" value={form.smtpPass} onChange={e => setField("smtpPass", e.target.value)} />
                 </Field>
                 <Field label={tS("smtpFromLabel")}>
-                  <Input value={form.smtpFrom} onChange={e => setField("smtpFrom", e.target.value)} placeholder="Nome Empresa <noreply@empresa.com>" />
+                  <Input value={form.smtpFrom} onChange={e => setField("smtpFrom", e.target.value)} placeholder={tPage.raw("smtpFromPlaceholder") as string} />
                 </Field>
                 <Field label={tS("smtpReplyToLabel")}>
-                  <Input value={form.smtpReplyTo} onChange={e => setField("smtpReplyTo", e.target.value)} placeholder="resposta@empresa.com" />
+                  <Input value={form.smtpReplyTo} onChange={e => setField("smtpReplyTo", e.target.value)} placeholder={tPage("smtpReplyToPlaceholder")} />
                 </Field>
               </CollapseSection>
 
@@ -1297,7 +1445,7 @@ function ChannelModal({ open, onClose, editing, tenants, onSaved }: {
                 <ToggleRow id="isActive" label={tS("contingency")} desc={tS("contingencyDesc")} checked={form.isActive} onCheckedChange={v => setField("isActive", v)} />
               )}
               <Field label={tS("closeKeyword")} hint={tS("closeKeywordDesc")}>
-                <KeywordChipsInput value={form.closeKeyWord || ""} onChange={v => setField("closeKeyWord", v)} placeholder="Ex: desligar" />
+                <KeywordChipsInput value={form.closeKeyWord || ""} onChange={v => setField("closeKeyWord", v)} placeholder={tPage("closeKeywordPlaceholder")} />
               </Field>
             </CollapseSection>
           )}
@@ -1306,10 +1454,10 @@ function ChannelModal({ open, onClose, editing, tenants, onSaved }: {
           {isQr && (
             <CollapseSection title={tS("additionalSettings")} defaultOpen={false}>
               <Field label={tS("proxyUrlLabel")}>
-                <Input value={form.proxyUrl} onChange={e => setField("proxyUrl", e.target.value)} placeholder="socks5://ip:porta" />
+                <Input value={form.proxyUrl} onChange={e => setField("proxyUrl", e.target.value)} placeholder={tPage("proxyUrlPlaceholder")} />
               </Field>
               <Field label={tS("proxyUserLabel")}>
-                <Input value={form.proxyUser} onChange={e => setField("proxyUser", e.target.value)} placeholder="usuario" />
+                <Input value={form.proxyUser} onChange={e => setField("proxyUser", e.target.value)} placeholder={tPage("proxyUserPlaceholder")} />
               </Field>
               <Field label={tS("proxyPassLabel")}>
                 <Input type="password" value={form.proxyPass} onChange={e => setField("proxyPass", e.target.value)} />
@@ -1846,8 +1994,8 @@ export default function SessoesTenantPage() {
             ) : qrSession?.qrcode ? (
               (() => {
                 const qr = qrSession.qrcode;
-                if (qr.startsWith("data:")) return <img src={qr} alt="QR Code" className="w-64 h-64 object-contain bg-white p-1 rounded" />;
-                if (/^[A-Za-z0-9+/]+=*$/.test(qr)) return <img src={`data:image/png;base64,${qr}`} alt="QR Code" className="w-64 h-64 object-contain bg-white p-1 rounded" />;
+                if (qr.startsWith("data:")) return <img src={qr} alt={t("qrCodeTitle")} className="w-64 h-64 object-contain bg-white p-1 rounded" />;
+                if (/^[A-Za-z0-9+/]+=*$/.test(qr)) return <img src={`data:image/png;base64,${qr}`} alt={t("qrCodeTitle")} className="w-64 h-64 object-contain bg-white p-1 rounded" />;
                 return <div className="bg-white p-2 rounded" style={{ colorScheme: "light" }}><QRCodeSVG value={qr} size={256} bgColor="#ffffff" fgColor="#000000" /></div>;
               })()
             ) : (

@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState, type ChangeEvent } from "reac
 import { useTranslations } from "next-intl";
 import { toast } from "sonner";
 import {
-  BookOpen, FileText, Library, Link2, ListChecks, Loader2, Pencil, Plus,
+  BookCopy, BookOpen, FileText, Library, Link2, ListChecks, Loader2, Pencil, Plus,
   RefreshCw, Trash2, Upload,
 } from "lucide-react";
 
@@ -15,6 +15,9 @@ import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import {
+  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
+} from "@/components/ui/select";
+import {
   Tooltip, TooltipContent, TooltipProvider, TooltipTrigger,
 } from "@/components/ui/tooltip";
 import {
@@ -23,6 +26,7 @@ import {
 } from "@/components/ui/alert-dialog";
 
 import {
+  MAX_AI_AGENT_SHARED_KB,
   createAiAgentDocumentSource, createAiAgentKnowledge, deleteAiAgentKnowledge,
   deleteAiAgentSource, fetchAiAgentKnowledge, fetchAiAgentSources,
   resyncAiAgentSource, updateAiAgentKnowledge,
@@ -42,6 +46,19 @@ interface AgentKnowledgeTabProps {
   // Anunciado pelo servidor. Ausente (servidor antigo ou quem não repassa) =
   // aba igual à anterior
   engineFeatures?: AiAgentEngineFeature[];
+  // v7 — TODAS opcionais: sem elas a aba é a de antes.
+  // Agentes cuja base este também consulta. `0` = linha sem agente escolhido
+  // (rascunho: o editor a deixa fora do save).
+  sharedKbAgents?: number[];
+  onSharedKbAgentsChange?: (ids: number[]) => void;
+  // Listagem enxuta do tenant, carregada 1× pelo editor. `aiAgentsAvailable`
+  // é false enquanto ela não chegou (ou se falhou): aí o gravado aparece pelo
+  // "#id", sem acusar "removido".
+  agentOptions?: Array<{ id: number; name: string; isActive: boolean; kbOnly?: boolean }>;
+  aiAgentsAvailable?: boolean;
+  // Agente "só base": não atende, então o interruptor "Usar base" e a seção
+  // de bases de outros agentes não se aplicam a ele
+  kbOnly?: boolean;
 }
 
 // Mesmo teto do upload no servidor: barrar aqui evita subir 10MB+ para
@@ -65,10 +82,80 @@ export function AgentKnowledgeTab({
   semanticEnabled,
   onSemanticEnabledChange,
   engineFeatures,
+  sharedKbAgents,
+  onSharedKbAgentsChange,
+  agentOptions,
+  aiAgentsAvailable = false,
+  kbOnly = false,
 }: AgentKnowledgeTabProps) {
   const t = useTranslations("aiAgents");
   const supportsKbJsonMd =
     Array.isArray(engineFeatures) && engineFeatures.includes("kbJsonMd");
+
+  // ── Bases de outros agentes (v7) ─────────────────────────────────────────
+  // Só com o recurso anunciado pelo servidor e nunca no agente "só base".
+  const supportsKbShared =
+    Array.isArray(engineFeatures) && engineFeatures.includes("kbShared");
+  const showSharedKb = supportsKbShared && !kbOnly && !!onSharedKbAgentsChange;
+  // Sem a base ligada o agente não consulta base nenhuma — nem as emprestadas
+  const sharedKbDisabled = !kbEnabled;
+  const sharedKbRows = sharedKbAgents || [];
+  // TODOS os outros agentes, inativos e "só base" incluídos: a base de um
+  // agente vale mesmo com ele desligado
+  const sharedKbCandidates = (agentOptions || []).filter(agent => agent.id !== agentId);
+  const chosenSharedKbIds = new Set(sharedKbRows.filter(id => id > 0));
+  const freeSharedKbCandidates = sharedKbCandidates.filter(
+    agent => !chosenSharedKbIds.has(agent.id)
+  );
+  const draftSharedKbRows = sharedKbRows.filter(id => !(id > 0)).length;
+  // Só afirma "não há agente" depois que a lista chegou
+  const noSharedKbCandidates = aiAgentsAvailable && sharedKbCandidates.length === 0;
+  // Linha nova só quando sobra agente livre para ela (e para cada rascunho já
+  // aberto) — senão nasceria com o seletor vazio
+  const canAddSharedKb =
+    !sharedKbDisabled &&
+    sharedKbRows.length < MAX_AI_AGENT_SHARED_KB &&
+    freeSharedKbCandidates.length > draftSharedKbRows;
+
+  const sharedKbAgentLabel = (agent: {
+    name: string;
+    isActive: boolean;
+    kbOnly?: boolean;
+  }) =>
+    agent.kbOnly === true
+      ? `${agent.name} ${t("markerKbOnly")}`
+      : agent.isActive === false
+        ? `${agent.name} ${t("targetAiAgentInactive")}`
+        : agent.name;
+
+  // Opções da linha: os agentes livres mais o que ELA já escolheu. O gravado
+  // que saiu da lista (excluído) continua visível com o motivo — senão o
+  // seletor apareceria vazio e a base pareceria não configurada.
+  const sharedKbOptionsFor = (selectedId: number) => {
+    const options = sharedKbCandidates
+      .filter(agent => agent.id === selectedId || !chosenSharedKbIds.has(agent.id))
+      .map(agent => ({ id: agent.id, name: sharedKbAgentLabel(agent) }));
+    if (!(selectedId > 0) || options.some(option => option.id === selectedId)) {
+      return options;
+    }
+    const name = aiAgentsAvailable
+      ? `#${selectedId} ${t("targetAiAgentRemoved")}`
+      : `#${selectedId}`;
+    return [{ id: selectedId, name }, ...options];
+  };
+
+  const updateSharedKbRow = (index: number, id: number) => {
+    onSharedKbAgentsChange?.(sharedKbRows.map((value, i) => (i === index ? id : value)));
+  };
+
+  const removeSharedKbRow = (index: number) => {
+    onSharedKbAgentsChange?.(sharedKbRows.filter((_, i) => i !== index));
+  };
+
+  const addSharedKbRow = () => {
+    if (!canAddSharedKb) return;
+    onSharedKbAgentsChange?.([...sharedKbRows, 0]);
+  };
 
   const [articles, setArticles] = useState<AiAgentKnowledge[]>([]);
   const [loading, setLoading] = useState(false);
@@ -248,17 +335,112 @@ export function AgentKnowledgeTab({
 
   return (
     <div className="space-y-5">
-      <div className="space-y-1.5">
-        <div className="flex items-center justify-between gap-2">
-          <Label htmlFor="ai-agent-kb-enabled">{t("kbEnabled")}</Label>
-          <Switch
-            id="ai-agent-kb-enabled"
-            checked={kbEnabled}
-            onCheckedChange={onKbEnabledChange}
-          />
+      {/* Agente "só base" não atende: a base dele vale para quem a escolher,
+          então o interruptor "Usar base" não se aplica (o da busca
+          inteligente fica — ele decide se os trechos nascem prontos para ela) */}
+      {kbOnly ? (
+        <div className="flex gap-2 rounded-md border bg-muted/40 p-3">
+          <Library className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
+          <p className="text-xs text-muted-foreground">{t("kbOnlyKnowledgeNote")}</p>
         </div>
-        <p className="text-xs text-muted-foreground">{t("kbNote")}</p>
-      </div>
+      ) : (
+        <div className="space-y-1.5">
+          <div className="flex items-center justify-between gap-2">
+            <Label htmlFor="ai-agent-kb-enabled">{t("kbEnabled")}</Label>
+            <Switch
+              id="ai-agent-kb-enabled"
+              checked={kbEnabled}
+              onCheckedChange={onKbEnabledChange}
+            />
+          </div>
+          <p className="text-xs text-muted-foreground">{t("kbNote")}</p>
+        </div>
+      )}
+
+      {/* ── Usar também a base de outros agentes (v7) ─────────────────── */}
+      {showSharedKb && (
+        <div className="space-y-3 rounded-md border p-3">
+          <div className="space-y-1">
+            <h4 className="flex items-center gap-1.5 text-sm font-medium">
+              <BookCopy className="h-4 w-4" />
+              {t("sharedKbTitle")}
+            </h4>
+            <p className="text-xs text-muted-foreground">{t("sharedKbHint")}</p>
+          </div>
+
+          {sharedKbDisabled && (
+            <p className="text-xs text-amber-700 dark:text-amber-400">{t("sharedKbOff")}</p>
+          )}
+
+          {sharedKbRows.map((selectedId, index) => {
+            const options = sharedKbOptionsFor(selectedId);
+            return (
+              // Índice como chave: a linha é só um seletor controlado, sem
+              // estado próprio a preservar quando outra do meio sai
+              <div key={index} className="flex items-center gap-2">
+                <div className="min-w-0 flex-1">
+                  <Select
+                    value={selectedId > 0 ? String(selectedId) : ""}
+                    onValueChange={value => {
+                      const id = Number(value);
+                      if (Number.isInteger(id) && id > 0) updateSharedKbRow(index, id);
+                    }}
+                    disabled={sharedKbDisabled || options.length === 0}
+                  >
+                    <SelectTrigger aria-label={t("sharedKbSelectPlaceholder")}>
+                      <SelectValue placeholder={t("sharedKbSelectPlaceholder")} />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {options.map(agent => (
+                        <SelectItem key={agent.id} value={String(agent.id)}>
+                          {agent.name}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  className="h-9 w-9 shrink-0 text-destructive"
+                  disabled={sharedKbDisabled}
+                  onClick={() => removeSharedKbRow(index)}
+                  aria-label={t("sharedKbRemove")}
+                  title={t("sharedKbRemove")}
+                >
+                  <Trash2 className="h-4 w-4" />
+                </Button>
+              </div>
+            );
+          })}
+
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="gap-1.5"
+              onClick={addSharedKbRow}
+              disabled={!canAddSharedKb}
+            >
+              <Plus className="h-4 w-4" />
+              {t("sharedKbAdd")}
+            </Button>
+            {noSharedKbCandidates ? (
+              <p className="text-xs text-muted-foreground">{t("sharedKbNoOptions")}</p>
+            ) : (
+              sharedKbRows.length >= MAX_AI_AGENT_SHARED_KB && (
+                <p className="text-xs text-muted-foreground">
+                  {t("sharedKbLimitReached", { max: MAX_AI_AGENT_SHARED_KB })}
+                </p>
+              )
+            )}
+          </div>
+
+          <p className="text-xs text-muted-foreground">{t("sharedKbSemanticNote")}</p>
+        </div>
+      )}
 
       {sourcesState === "loading" && (
         <div className="flex justify-center py-4">

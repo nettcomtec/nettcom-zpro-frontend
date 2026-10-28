@@ -21,11 +21,13 @@ function ManagePortal() {
   const sp = useSearchParams();
   const slug = String((params as Record<string, string>)?.slug || "");
   const token = sp.get("token") || "";
-  const lang = resolveBookingLang(sp.get("lang"));
-  const s = getBookingStrings(lang);
-  const locale = intlLocale(lang);
 
   const [booking, setBooking] = useState<ManageBooking | null>(null);
+  // Mesma regra da página de agendamento: ?lang → idioma da Região da empresa (só se
+  // configurado) → pt. O link da confirmação não leva ?lang, então vale a Região.
+  const lang = resolveBookingLang(sp.get("lang"), booking?.region);
+  const s = getBookingStrings(lang);
+  const locale = intlLocale(lang);
   const [loading, setLoading] = useState(true);
   const [notFound, setNotFound] = useState(false);
   const [tz, setTz] = useState("America/Sao_Paulo");

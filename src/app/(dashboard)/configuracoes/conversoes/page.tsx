@@ -3,7 +3,7 @@
 import React, { useState, useEffect, useCallback, useMemo } from "react";
 import { useTranslations } from "next-intl";
 import { displayContactIdentity } from "@/lib/contact-identity";
-import { Plus, Pencil, Trash2, BarChart2, TrendingUp, Search, RefreshCw, ExternalLink, RotateCw, AlertTriangle } from "lucide-react";
+import { Plus, Pencil, Trash2, BarChart2, TrendingUp, Search, RefreshCw, ExternalLink, RotateCw, AlertTriangle, Megaphone, Info } from "lucide-react";
 import { PageHeader } from "@/components/layout/page-header";
 import { toast } from "sonner";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
@@ -38,12 +38,19 @@ import {
   listAdReferralReport,
   retryAdReferralConversion,
   retryBulkAdReferralConversion,
+  getAdReferralSettings,
+  updateAdReferralSettings,
+  type AdReferralSettings,
   type ConversionCredential,
   type ConversionRule,
   type AdReferralLog,
 } from "@/services/conversion";
+import { fetchTags, type Tag } from "@/services/tags";
+import { SearchableSelect, type SearchableSelectOption } from "@/components/ui/searchable-select";
+import { getBackendErrorCode } from "@/lib/backend-error-code";
 import { fetchWhatsapps, type Whatsapp } from "@/services/whatsapp";
 import { useLiveMode } from "@/hooks/use-live-mode";
+import { useRegion } from "@/hooks/use-region";
 import { cn } from "@/lib/utils";
 
 const TRIGGERS = [
@@ -120,10 +127,194 @@ const emptyRule: Omit<ConversionRule, "id" | "createdAt" | "credential"> = {
   isActive: true,
 };
 
+// ─── Card: Contatos vindos de anúncio ─────────────────────────────────────────
+// Etiqueta automática do contato que chega por anúncio do Instagram, do Messenger ou do
+// WhatsApp oficial (docs/PLANO_ANUNCIO_ORIGEM_CONVERSA.md, D9). Backend anterior ao
+// recurso (GET 404, ou resposta fora do formato) = card escondido; banco do servidor sem
+// a coluna (`available: false`, ou 409 ao salvar) = card desabilitado com o aviso.
+
+const AD_LEAD_TAG_NONE = "none";
+
+const toAdLeadTagId = (value: unknown): number | null => {
+  const n = Number(value);
+  return Number.isInteger(n) && n > 0 ? n : null;
+};
+
+function AdLeadTagCard() {
+  const t = useTranslations("conversoesPage");
+  const [status, setStatus] = useState<"loading" | "hidden" | "error" | "ready">("loading");
+  const [available, setAvailable] = useState(true);
+  const [savedTagId, setSavedTagId] = useState<number | null>(null);
+  const [selected, setSelected] = useState<string>(AD_LEAD_TAG_NONE);
+  const [tags, setTags] = useState<Tag[]>([]);
+  const [tagsLoaded, setTagsLoaded] = useState(false);
+  const [saving, setSaving] = useState(false);
+
+  const loadTags = useCallback(async () => {
+    try {
+      const { data } = await fetchTags();
+      setTags(Array.isArray(data) ? data : []);
+    } catch {
+      toast.error(t("errorLoading"));
+    } finally {
+      setTagsLoaded(true);
+    }
+  }, [t]);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      let settings: AdReferralSettings | null = null;
+      try {
+        settings = await getAdReferralSettings();
+      } catch (err) {
+        if (cancelled) return;
+        // O interceptor rejeita com o próprio response (status na raiz).
+        const httpStatus =
+          (err as { status?: number } | null)?.status ??
+          (err as { response?: { status?: number } } | null)?.response?.status;
+        setStatus(httpStatus === 404 ? "hidden" : "error");
+        return;
+      }
+      if (cancelled) return;
+      if (!settings || typeof settings !== "object" || typeof settings.available !== "boolean") {
+        setStatus("hidden");
+        return;
+      }
+      const tagId = toAdLeadTagId(settings.tagId);
+      setAvailable(settings.available);
+      setSavedTagId(tagId);
+      setSelected(tagId ? String(tagId) : AD_LEAD_TAG_NONE);
+      setStatus("ready");
+      // Só busca as etiquetas quando o recurso pode ser usado.
+      if (settings.available) void loadTags();
+    })();
+    return () => { cancelled = true; };
+  }, [loadTags]);
+
+  const options = useMemo<SearchableSelectOption[]>(() => {
+    const list: SearchableSelectOption[] = [{ value: AD_LEAD_TAG_NONE, label: t("adLeadTagNone") }];
+    // Etiqueta inativa só aparece quando é a salva (mesmo critério das telas de contato).
+    for (const tag of tags) {
+      if (tag.isActive === false && tag.id !== savedTagId) continue;
+      list.push({ value: String(tag.id), label: tag.name || `#${tag.id}` });
+    }
+    // Etiqueta salva que não veio na lista (falha ao carregar): segue visível pelo id.
+    if (tagsLoaded && savedTagId != null && !tags.some((tag) => tag.id === savedTagId)) {
+      list.push({ value: String(savedTagId), label: `#${savedTagId}` });
+    }
+    return list;
+  }, [tags, tagsLoaded, savedTagId, t]);
+
+  const tagColorById = useMemo(
+    () => new Map(tags.map((tag) => [String(tag.id), tag.color] as const)),
+    [tags]
+  );
+
+  const selectedTagId = selected === AD_LEAD_TAG_NONE ? null : toAdLeadTagId(selected);
+  const dirty = selectedTagId !== savedTagId;
+  const disabled = status !== "ready" || !available;
+
+  const save = async () => {
+    if (saving || disabled || !dirty) return;
+    setSaving(true);
+    try {
+      const res = await updateAdReferralSettings(selectedTagId);
+      const tagId = res && typeof res === "object" && "tagId" in res ? toAdLeadTagId(res.tagId) : selectedTagId;
+      setSavedTagId(tagId);
+      setSelected(tagId ? String(tagId) : AD_LEAD_TAG_NONE);
+      toast.success(t("adLeadSaved"));
+    } catch (err) {
+      const code = getBackendErrorCode(err);
+      if (code === "ERR_AD_REFERRAL_TAG_NOT_FOUND") {
+        // Etiqueta apagada depois de a tela carregar: volta ao valor salvo e relê a lista.
+        toast.error(t("adLeadTagNotFound"));
+        setSelected(savedTagId ? String(savedTagId) : AD_LEAD_TAG_NONE);
+        void loadTags();
+      } else if (code === "ERR_AD_REFERRAL_SETTINGS_UNAVAILABLE") {
+        // Banco do servidor sem a coluna: o card passa a mostrar o aviso.
+        setAvailable(false);
+        toast.error(t("adLeadUnavailable"));
+      } else {
+        toast.error(t("adLeadSaveError"));
+      }
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  if (status === "loading" || status === "hidden") return null;
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2">
+          <Megaphone className="h-5 w-5" />
+          {t("adLeadSectionTitle")}
+        </CardTitle>
+        <CardDescription>{t("adLeadSectionDesc")}</CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        {status === "error" ? (
+          <p className="text-sm text-muted-foreground">{t("errorLoading")}</p>
+        ) : (
+          <>
+            {!available && (
+              <Alert variant="warning-soft">
+                <AlertTriangle className="h-4 w-4" />
+                <AlertDescription>{t("adLeadUnavailable")}</AlertDescription>
+              </Alert>
+            )}
+            <div className="space-y-1">
+              <Label>{t("adLeadTagLabel")}</Label>
+              <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+                <div className="w-full min-w-0 sm:w-72">
+                  <SearchableSelect
+                    options={options}
+                    value={selected}
+                    onValueChange={(v) => setSelected(v || AD_LEAD_TAG_NONE)}
+                    placeholder={tagsLoaded ? undefined : t("loading")}
+                    disabled={disabled || saving}
+                    renderOption={(option) => {
+                      const color = tagColorById.get(option.value);
+                      return (
+                        <span className="flex min-w-0 flex-1 items-center gap-2 text-left">
+                          {color && (
+                            <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ backgroundColor: color }} />
+                          )}
+                          <span className="truncate">{option.label}</span>
+                        </span>
+                      );
+                    }}
+                  />
+                </div>
+                <Button
+                  size="sm"
+                  className="w-full sm:w-auto"
+                  onClick={save}
+                  disabled={disabled || saving || !dirty}
+                >
+                  {saving ? t("saving") : t("adLeadSave")}
+                </Button>
+              </div>
+            </div>
+            <p className="flex items-start gap-1.5 text-xs text-muted-foreground">
+              <Info className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+              <span>{t("adLeadTagNote")}</span>
+            </p>
+          </>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 // ─── Tab: Configurações ───────────────────────────────────────────────────────
 
 function ConfigTab() {
   const t = useTranslations("conversoesPage");
+  // Moeda padrão da regra = moeda da empresa (BRL sem Região configurada).
+  const { currency: regionCurrency } = useRegion();
 
   const [credentials, setCredentials] = useState<ConversionCredential[]>([]);
   const [rules, setRules] = useState<ConversionRule[]>([]);
@@ -214,7 +405,7 @@ function ConfigTab() {
 
   const openNewRule = () => {
     setEditingRuleId(null);
-    setRuleForm({ ...emptyRule, credentialId: credentials[0]?.id || 0 });
+    setRuleForm({ ...emptyRule, currency: regionCurrency, credentialId: credentials[0]?.id || 0 });
     setRuleDialog(true);
   };
 
@@ -225,7 +416,7 @@ function ConfigTab() {
       trigger: rule.trigger,
       eventName: rule.eventName,
       conversionValue: rule.conversionValue,
-      currency: rule.currency || "BRL",
+      currency: rule.currency || regionCurrency,
       isActive: rule.isActive,
     });
     setRuleDialog(true);
@@ -426,6 +617,9 @@ function ConfigTab() {
         </CardContent>
       </Card>
 
+      {/* Contatos vindos de anúncio: etiqueta automática (some com backend anterior) */}
+      <AdLeadTagCard />
+
       {/* Dialog: Credencial */}
       <Dialog open={credDialog} onOpenChange={setCredDialog}>
         <DialogContent className="max-w-md">
@@ -574,7 +768,7 @@ function ConfigTab() {
                 <Input
                   value={ruleForm.currency}
                   onChange={(e) => setRuleForm((f) => ({ ...f, currency: e.target.value.toUpperCase() }))}
-                  placeholder="BRL"
+                  placeholder={regionCurrency}
                   maxLength={3}
                 />
               </div>

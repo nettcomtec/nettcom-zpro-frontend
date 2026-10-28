@@ -5,12 +5,14 @@ import { resetAllStores } from "./reset-all-stores";
 import { safeJsonParse } from "@/lib/safe-json-parse";
 import { clearStoredPushFlags } from "@/lib/push-subscription";
 import { clearAllEmailTemplateDrafts } from "@/lib/email-template-draft";
+import { clearAuthRouteCookie, forgetCsrfToken, rememberCsrfToken, setAuthRouteCookie } from "@/lib/auth-session";
 import {
   type CustomProfileSummary,
   type ICustomPermissions,
   type PermissionKey,
 } from "@/types/custom-permissions";
 import { planAllowsCapability, type PlanFeatures } from "@/lib/plan-capabilities";
+import type { RegionState } from "@/lib/region";
 
 const IDB_NAME = "zpro-auth";
 const IDB_VERSION = 1;
@@ -74,6 +76,8 @@ export interface UserData {
   sipUsername?: string;
   sipPassword?: string;
   sipTransport?: "ws" | "wss" | "udp";
+  /** Keep-alive do WebPhone em segundos (null = padrão, 0 = desligado; ausente = backend antigo). */
+  sipKeepAliveInterval?: number | null;
   whatsappAllowed: unknown[];
   isOnline?: boolean;
   restrictedUser?: string | boolean; // 'enabled' | 'disabled' | boolean
@@ -85,6 +89,8 @@ export interface UserData {
     supervisorViewDept?: string;
     dashboardLayout?: DashboardLayout;
     tourDone?: string; // "v1" = tour de boas-vindas dispensado (persistido no servidor)
+    /** Som das notificações só deste usuário (lib/notification-sound-mute.ts). */
+    notificationSoundMute?: "none" | "groups" | "all";
   };
   // Constructed from flat SIP fields in setAuth
   sipConfig?: {
@@ -94,6 +100,8 @@ export interface UserData {
     username: string;
     password: string;
     transport: "ws" | "wss" | "udp";
+    /** Segundos; null/ausente = padrão do WebPhone (lib/sip-link.ts), 0 = desligado. */
+    keepAliveInterval?: number | null;
   };
   wavoipTokens?: { token: string; inboxName: string }[];
   profilePicture?: string;
@@ -141,6 +149,14 @@ interface AuthState {
   billingDaysInfo: { daysBeforeDue?: number; daysOverdue?: number; daysUntilBlock?: number; bankSlipUrl?: string };
   /** Snapshot das features do plano do tenant (Tenant.planFeatures). null => grandfathering (libera tudo). */
   planFeatures: PlanFeatures | null;
+  /**
+   * Região da empresa (país, moeda, idioma dos textos ao cliente), vinda do
+   * GET /tenants/:id. null = ainda não carregou ou backend antigo (use-region cai em
+   * BR/BRL/pt). Persistida para a tela não nascer em BRL/BR até o boot.
+   */
+  region: RegionState | null;
+  /** Textos ao cliente no idioma da empresa (só com languageConfigured). Não persistido. */
+  regionTexts: { language: string; texts: Record<string, string> } | null;
 
   setAuth: (data: UserData) => void;
   clearAuth: () => void;
@@ -163,6 +179,8 @@ interface AuthState {
   patchUser: (fields: Partial<UserData>) => void;
   setProfilePicture: (url: string) => void;
   setPinnedTickets: (ids: number[]) => void;
+  /** Som das notificações só deste usuário, no store + cache local (o backend recebe via updateUserConfigs). */
+  setNotificationSoundMute: (mode: "none" | "groups" | "all") => void;
   /** Persiste o layout do dashboard no store + cache local (o backend recebe via updateUserConfigs). */
   setDashboardLayout: (layout: DashboardLayout) => void;
   setPaymentOverdue: (value: boolean) => void;
@@ -182,6 +200,10 @@ interface AuthState {
   isAiCreditsEnabled: () => boolean;
   /** Quem gerencia os Créditos de IA: admin, ou custom com `ai_credits_manage`. */
   canManageAiCredits: () => boolean;
+  /** Quem pode iniciar conversa (Nova Conversa, avulsa, Funil): espelho do guard do `POST /individual`. */
+  canStartConversation: () => boolean;
+  setRegion: (region: RegionState | null) => void;
+  setRegionTexts: (texts: { language: string; texts: Record<string, string> } | null) => void;
 }
 
 const DEFAULT_FILTERS = {
@@ -224,8 +246,19 @@ export const useAuthStore = create<AuthState>()(
       billingState: 'ok' as const,
       billingDaysInfo: {},
       planFeatures: null,
+      region: null,
+      regionTexts: null,
 
-      setAuth: (data) => {
+      setAuth: (rawData) => {
+        // O código anti-CSRF vem no corpo do login (backend novo) e fica fora do
+        // usuário persistido: é guardado à parte para a renovação do login. O
+        // `refreshToken` que o 2FA devolve no corpo também não é persistido (o cookie
+        // httpOnly é quem renova; guardado no localStorage ficava ao alcance de script).
+        // eslint-disable-next-line @typescript-eslint/no-unused-vars
+        const { csrfToken, refreshToken: _refreshToken, ...data } = rawData as UserData & {
+          csrfToken?: unknown;
+          refreshToken?: unknown;
+        };
         // BUGFIX: `isSuporte` antes usava `email.includes("@")` — verdadeiro pra
         // QUALQUER email — fazendo `isAdmin` ser true pra todo mundo. Resultado:
         // atendente comum bypassava filtros de canal/permissao em telas que
@@ -244,6 +277,7 @@ export const useAuthStore = create<AuthState>()(
                 username: data.sipUsername,
                 password: data.sipPassword,
                 transport: (data.sipTransport ?? "wss") as "ws" | "wss" | "udp",
+                keepAliveInterval: data.sipKeepAliveInterval ?? null,
               }
             : data.sipConfig ?? undefined;
 
@@ -262,9 +296,9 @@ export const useAuthStore = create<AuthState>()(
             "filtrosAtendimento",
             JSON.stringify(data.configs?.filtrosAtendimento || DEFAULT_FILTERS)
           );
-          // Set lightweight cookie for Next.js middleware auth check
-          const secureFlag = window.location.protocol === "https:" ? "Secure; " : "";
-          document.cookie = `zpro_auth=1; path=/; ${secureFlag}SameSite=Lax; max-age=86400`;
+          // Cookie que o middleware do Next confere; vive o mesmo que a renovação do login.
+          setAuthRouteCookie();
+          rememberCsrfToken(csrfToken);
           // Persist tenantId in IndexedDB so the service worker can validate push notifications
           setCurrentTenantInDB(data.tenantId);
         }
@@ -285,10 +319,13 @@ export const useAuthStore = create<AuthState>()(
         // para que um login seguinte na mesma aba nao veja a lista do tenant anterior.
         // Import dinamico: estatico criaria ciclo auth-store -> whatsapp -> api -> auth-store.
         import("@/services/whatsapp").then((m) => m.clearWhatsappsCache()).catch(() => {});
+        // Apps do menu ficam FORA do resetAllStores (PLANO_APLICATIVOS_PERSONALIZADOS
+        // Ag1-4): só o logout as limpa. Dinâmico pelo mesmo motivo do whatsapp.
+        import("@/stores/panel-apps-store").then((m) => m.usePanelAppsStore.getState().clear()).catch(() => {});
         if (typeof window !== "undefined") {
           // Clear middleware auth cookie
-          const secureFlag = window.location.protocol === "https:" ? "Secure; " : "";
-          document.cookie = `zpro_auth=; path=/; ${secureFlag}max-age=0`;
+          clearAuthRouteCookie();
+          forgetCsrfToken();
           localStorage.removeItem("token");
           localStorage.removeItem("username");
           localStorage.removeItem("profile");
@@ -338,8 +375,18 @@ export const useAuthStore = create<AuthState>()(
           billingState: 'ok',
           billingDaysInfo: {},
           planFeatures: null,
+          region: null,
+          regionTexts: null,
         });
       },
+
+      setRegion: (region) => {
+        // Idioma mudou: os textos carregados são de outro idioma e saem junto.
+        const texts = get().regionTexts;
+        const keepTexts = !!region && !!texts && texts.language === region.language && region.languageConfigured;
+        set({ region, ...(keepTexts ? {} : { regionTexts: null }) });
+      },
+      setRegionTexts: (regionTexts) => set({ regionTexts }),
 
       setMenuVisibility: (visibility) => set({ menuVisibility: visibility }),
       setTenantMenuVisibility: (visibility) => set({ tenantMenuVisibility: visibility }),
@@ -438,6 +485,19 @@ export const useAuthStore = create<AuthState>()(
         }
       },
 
+      setNotificationSoundMute: (mode: "none" | "groups" | "all") => {
+        const current = get().user;
+        if (!current) return;
+        const updated = { ...current, configs: { ...current.configs, notificationSoundMute: mode } };
+        set({ user: updated });
+        if (typeof window !== "undefined") {
+          // Cota cheia ou armazenamento bloqueado: o store já vale nesta aba.
+          try {
+            localStorage.setItem("usuario", JSON.stringify(updated));
+          } catch { /* ignore */ }
+        }
+      },
+
       setDashboardLayout: (layout: DashboardLayout) => {
         const current = get().user;
         if (!current) return;
@@ -465,6 +525,10 @@ export const useAuthStore = create<AuthState>()(
                   username: local.sipUsername as string,
                   password: local.sipPassword as string,
                   transport: ((local.sipTransport as string) ?? "wss") as "ws" | "wss" | "udp",
+                  keepAliveInterval:
+                    "sipKeepAliveInterval" in local
+                      ? ((local.sipKeepAliveInterval as number | null | undefined) ?? null)
+                      : (current.sipConfig?.keepAliveInterval ?? null),
                 }
               : current.sipConfig;
           set({
@@ -596,6 +660,18 @@ export const useAuthStore = create<AuthState>()(
         if (profile === "custom") return get().hasPermission("ai_credits_manage");
         return false;
       },
+
+      /**
+       * Espelho do `requireAnyPermission(["mass_send_manage", "tickets_create"])` do
+       * `POST /individual`: só o `custom` passa pela permissão (`hasPermission` já é falso
+       * para custom com o recurso desligado). Os demais perfis seguem com o gate próprio
+       * de cada botão (superadmin, usuário restrito).
+       */
+      canStartConversation: (): boolean => {
+        const profile = get().user?.profile;
+        if (profile !== "custom") return true;
+        return get().hasPermission("tickets_create") || get().hasPermission("mass_send_manage");
+      },
     }),
     {
       name: "zpro-auth",
@@ -619,6 +695,7 @@ export const useAuthStore = create<AuthState>()(
           tenantMenuVisibility: state.tenantMenuVisibility,
           tenantConfigsLoaded: state.tenantConfigsLoaded,
           planFeatures: state.planFeatures,
+          region: state.region,
         };
       },
     }

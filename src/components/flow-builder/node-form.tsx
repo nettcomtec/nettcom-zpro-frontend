@@ -86,7 +86,16 @@ import { PlatformAiSelector, usePlatformAiEnabled } from "@/components/ai-credit
 import { AI_PLATFORM_KEY_SENTINEL, isPlatformKey } from "@/services/ai-credits";
 import TimeTableEditor from "./time-table-editor";
 import AiActionsEditor, { type AiAction } from "./ai-actions-editor";
-import { INTERACTION_TYPES, defaultInteractionData, SWITCH_CHANNEL_DEFAULT_MESSAGE } from "./lib/types";
+import {
+  INTERACTION_TYPES,
+  defaultInteractionData,
+  flowLocationCoordKeys,
+  getSwitchChannelDefaultMessage,
+  getSwitchChannelMessageToPersist,
+  isFlowLocationValueFilled,
+} from "./lib/types";
+import { LocationPickerFields, type LocationPickerValue } from "@/components/atendimento/location-picker-fields";
+import { LOCATION_ADDRESS_MAX, LOCATION_NAME_MAX, formatCoord, parseCoordInput } from "@/lib/location-message";
 import { useTranslations } from "next-intl";
 import { fetchQueues } from "@/services/queues";
 import { fetchAllUsers } from "@/services/users";
@@ -98,6 +107,7 @@ import { fetchReasons } from "@/services/reasons";
 import { fetchStages, fetchPipelines } from "@/services/funnel";
 import { fetchAiAgents } from "@/services/ai-agents";
 import { getTemplatesForChannel } from "@/services/channel-templates";
+import { fetchWebchatInviteAvailability } from "@/services/webchat";
 import {
   type TemplateVarEntry,
   type TemplateBuilderTFunc,
@@ -115,6 +125,23 @@ import {
   buildOrderDetailsPayload,
 } from "@/lib/order-details";
 import { WABA_LIMITS } from "@/lib/waba-text-limits";
+
+// {{linkWebchat}} no seletor de variáveis só quando o servidor entende a variável
+// (PLANO_WEBCHAT_LINK_CONVITE D9): backend antigo = a opção não aparece. A consulta é uma só
+// por carga de página (memorizada no service), mesmo com vários campos abertos.
+function useWebchatInviteAvailable(): boolean {
+  const [available, setAvailable] = useState(false);
+  useEffect(() => {
+    let alive = true;
+    fetchWebchatInviteAvailability().then((res) => {
+      if (alive) setAvailable(res.available);
+    });
+    return () => {
+      alive = false;
+    };
+  }, []);
+  return available;
+}
 
 const iconMap: Record<string, React.ElementType> = {
   MessageSquare, Image, Clock, Bot, Blocks, Workflow, Tag, LayoutGrid,
@@ -137,8 +164,9 @@ export interface RouteOptions {
   pipelines: { id: number; name: string }[];
   /** Canais BSP conectados (waba/gupshup/dialog360) — fonte de templates do TemplateField */
   templateChannels: { id: number; name: string; type: string; tokenAPI?: string; appId?: string }[];
-  /** Agentes de IA (nó "agent") — lista enxuta; vazia em backend sem o recurso */
-  aiAgents: { id: number; name: string }[];
+  /** Agentes de IA (nó "agent") — lista enxuta; vazia em backend sem o recurso.
+   *  `kbOnly` (v7): agente "só base" sai do seletor; ausente em backend antigo. */
+  aiAgents: { id: number; name: string; kbOnly?: boolean }[];
 }
 
 interface NodeFormProps {
@@ -151,6 +179,9 @@ interface NodeFormProps {
 
 export function NodeForm({ open, onOpenChange, node, allNodes, onSave }: NodeFormProps) {
   const t = useTranslations("flowBuilderNodeForm");
+  // Nome do tipo de interação no idioma da tela; sem `labelKey` (nome próprio) vale o `label`.
+  const tDef = useTranslations("flowBuilderDefaults");
+  const interactionLabel = (it: { label: string; labelKey?: string }) => (it.labelKey ? tDef(it.labelKey) : it.label);
   const [editNode, setEditNode] = useState<FlowNodeData | null>(null);
   const [originalNodeJson, setOriginalNodeJson] = useState<string>("");
   const [confirmCloseOpen, setConfirmCloseOpen] = useState(false);
@@ -238,8 +269,8 @@ export function NodeForm({ open, onOpenChange, node, allNodes, onSave }: NodeFor
         : [];
       const pipelines = pipelinesRaw.map((p) => ({ id: p.id, name: p.name }));
 
-      const aiAgentsRaw = Array.isArray(agRes) ? (agRes as { id: number; name: string }[]) : [];
-      const aiAgents = aiAgentsRaw.map((a) => ({ id: a.id, name: a.name }));
+      const aiAgentsRaw = Array.isArray(agRes) ? (agRes as { id: number; name: string; kbOnly?: boolean }[]) : [];
+      const aiAgents = aiAgentsRaw.map((a) => ({ id: a.id, name: a.name, kbOnly: a.kbOnly === true }));
 
       setRouteOptions({ queues, users, channels, chatflows, tags, kanbans, reasons, stages, pipelines, templateChannels, aiAgents });
     });
@@ -436,19 +467,21 @@ export function NodeForm({ open, onOpenChange, node, allNodes, onSave }: NodeFor
                           <CommandList>
                             <CommandEmpty>{t("noInteractionFound")}</CommandEmpty>
                             <CommandGroup>
-                              {[...INTERACTION_TYPES].sort((a, b) => a.label.localeCompare(b.label, undefined, { sensitivity: "base" })).map((it) => {
+                              {[...INTERACTION_TYPES].sort((a, b) => interactionLabel(a).localeCompare(interactionLabel(b), undefined, { sensitivity: "base" })).map((it) => {
                                 const Ico = iconMap[it.icon] || MessageSquare;
+                                const itLabel = interactionLabel(it);
                                 return (
                                   <CommandItem
                                     key={it.type}
-                                    value={it.label}
+                                    value={itLabel}
+                                    keywords={[it.label]}
                                     onSelect={() => {
                                       addInteraction(it.type as FlowInteraction["type"]);
                                       setAddInteractionOpen(false);
                                     }}
                                   >
                                     <Ico className="h-4 w-4" />
-                                    <span>{it.label}</span>
+                                    <span>{itLabel}</span>
                                   </CommandItem>
                                 );
                               })}
@@ -493,7 +526,7 @@ export function NodeForm({ open, onOpenChange, node, allNodes, onSave }: NodeFor
                                   <div className="flex items-center gap-2">
                                     <Ico className="h-4 w-4 text-primary" />
                                     <Badge variant="secondary" className="text-xs">
-                                      {it?.label || interaction.type}
+                                      {(it && interactionLabel(it)) || interaction.type}
                                     </Badge>
                                     <span className="text-xs text-muted-foreground">#{idx + 1}</span>
                                   </div>
@@ -964,6 +997,7 @@ function TemplateInteractionFields({
 }) {
   const t = useTranslations("flowBuilderNodeForm");
   const tOrder = useTranslations("orderDetails");
+  const webchatInviteAvailable = useWebchatInviteAvailable();
   const [templates, setTemplates] = useState<any[]>([]);
   const [loadingTemplates, setLoadingTemplates] = useState(false);
   const channels = routeOptions.templateChannels;
@@ -1121,6 +1155,8 @@ function TemplateInteractionFields({
                 value={v.value}
                 onChange={(val) => updateVar(v.key, val)}
                 placeholder={v.label}
+                withGoogleReviewLink
+                withWebchatInviteLink={webchatInviteAvailable}
               />
             </div>
           ))}
@@ -1151,6 +1187,106 @@ function TemplateInteractionFields({
   );
 }
 
+// ── Localização ─────────────────────────────────────────────────────────────
+// Colar link ou coordenadas + mapa de conferência (o mesmo componente da janela do
+// atendimento) e, abaixo, nome e endereço com as variáveis do fluxo. As coordenadas ficam
+// na família de chaves que o nó já usa (flowLocationCoordKeys, a regra do servidor): nó do
+// editor antigo segue em locationLatitude/locationLongitude com NÚMERO, como ele gravava (o
+// backend antigo repassa o valor cru ao provedor); nó novo e nó com lat/lng gravam lat/lng
+// em texto, como antes. Abrir o nó não grava nada: só a edição escreve, e só o que mudou.
+function flowLocationFieldText(raw: unknown): string {
+  if (typeof raw === "number") return Number.isFinite(raw) ? formatCoord(raw) : "";
+  return typeof raw === "string" ? raw : "";
+}
+
+function LocationInteractionFields({
+  d,
+  onBatchUpdate,
+}: {
+  d: Record<string, unknown>;
+  onBatchUpdate: (updates: Record<string, unknown>) => void;
+}) {
+  const tField = useTranslations("nodeForm.locationField");
+  const tShare = useTranslations("locationShare");
+  // Família decidida ao abrir: esvaziar as duas coordenadas no meio da edição não a troca.
+  const [keys] = useState(() => flowLocationCoordKeys(d));
+  // Texto dos campos como digitado: na família antiga o valor gravado é número, e "-23." ou
+  // "-23.50" não sobreviveriam à ida e volta.
+  const [coords, setCoords] = useState(() => ({
+    lat: flowLocationFieldText(d[keys.lat]),
+    lng: flowLocationFieldText(d[keys.lng]),
+  }));
+  const name = typeof d.locationName === "string" ? d.locationName : "";
+  const address = typeof d.locationAddress === "string" ? d.locationAddress : "";
+
+  const storedCoord = (text: string): unknown => {
+    if (!keys.legacy) return text;
+    const n = parseCoordInput(text);
+    return n === null ? text : n;
+  };
+
+  const handlePickerChange = (next: LocationPickerValue) => {
+    const updates: Record<string, unknown> = {};
+    const latChanged = next.lat !== coords.lat;
+    const lngChanged = next.lng !== coords.lng;
+    if (latChanged) updates[keys.lat] = storedCoord(next.lat);
+    if (lngChanged) updates[keys.lng] = storedCoord(next.lng);
+    // Nó antigo que também ganhou lat/lng no editor anterior (que só mostrava essas): com as
+    // coordenadas visíveis apagadas, o servidor passaria a ler as de baixo — apaga junto.
+    if (
+      keys.legacy &&
+      (latChanged || lngChanged) &&
+      !isFlowLocationValueFilled(next.lat) &&
+      !isFlowLocationValueFilled(next.lng) &&
+      (isFlowLocationValueFilled(d.lat) || isFlowLocationValueFilled(d.lng))
+    ) {
+      updates.lat = "";
+      updates.lng = "";
+    }
+    // Link colado com nome/endereço: o componente só os devolve quando o campo do nó está vazio.
+    if (next.name !== name) updates.locationName = next.name;
+    if (next.address !== address) updates.locationAddress = next.address;
+    if (latChanged || lngChanged) setCoords({ lat: next.lat, lng: next.lng });
+    if (Object.keys(updates).length > 0) onBatchUpdate(updates);
+  };
+
+  return (
+    <div className="space-y-3">
+      <LocationPickerFields
+        value={{ lat: coords.lat, lng: coords.lng, name, address }}
+        onChange={handlePickerChange}
+        showNameAddress={false}
+        compact
+      />
+      <div className="space-y-1">
+        <Label className="text-xs">{tField("name")}</Label>
+        <InputWithVars
+          value={name}
+          onChange={(val) => onBatchUpdate({ locationName: val })}
+          placeholder={tField("nameHint")}
+          maxLength={LOCATION_NAME_MAX}
+        />
+      </div>
+      <div className="space-y-1">
+        <Label className="text-xs">{tField("address")}</Label>
+        <InputWithVars
+          value={address}
+          onChange={(val) => onBatchUpdate({ locationAddress: val })}
+          placeholder={tField("addressHint")}
+          maxLength={LOCATION_ADDRESS_MAX}
+        />
+      </div>
+      <p className="text-[11px] text-muted-foreground">{tShare("flowNodeNote")}</p>
+    </div>
+  );
+}
+
+// Bloco Mídia: a chave "Enviar como mensagem de voz" só existe para áudio.
+const FLOW_AUDIO_EXTENSIONS = new Set(["mp3", "ogg", "oga", "opus", "m4a", "aac", "wav", "amr"]);
+function isFlowAudioMedia(mimeType: string, ext: string): boolean {
+  return (mimeType || "").toLowerCase().startsWith("audio/") || FLOW_AUDIO_EXTENSIONS.has((ext || "").toLowerCase());
+}
+
 function InteractionFields({
   interaction,
   allNodes,
@@ -1165,11 +1301,16 @@ function InteractionFields({
   onBatchUpdate: (updates: Record<string, unknown>) => void;
 }) {
   const t = useTranslations("flowBuilderNodeForm");
+  // Só a marca "(só base)" do seletor do nó Agente de IA.
+  const tAiAgents = useTranslations("aiAgents");
   const d = interaction.data as Record<string, unknown>;
   const scheduleFileRef = useRef<HTMLInputElement>(null);
   // Gate do recurso "IA da plataforma" (usado no nó ChatGPT). Não faz request nenhum:
   // é leitura do que a carga da empresa já trouxe.
   const platformAiEnabled = usePlatformAiEnabled();
+  // {{linkWebchat}} nos mesmos campos do link do Google (fora o Agendar: mensagem agendada
+  // sai sem o link — D24).
+  const webchatInviteAvailable = useWebchatInviteAvailable();
 
  // Inicializa defaults do TransferField (paridade com front legado: transferField#initializeData).
   // Sem isso o JSON salvo fica sem `transferType` e o backend ignora a transferência.
@@ -1191,7 +1332,8 @@ function InteractionFields({
     if (interaction.type !== "SwitchChannel") return;
     const updates: Record<string, unknown> = {};
     if (d.channelId === undefined) updates.channelId = null;
-    if (d.message === undefined) updates.message = SWITCH_CHANNEL_DEFAULT_MESSAGE;
+    // Texto que vai ao CLIENTE: idioma da Região da empresa (nunca o da tela).
+    if (d.message === undefined) updates.message = getSwitchChannelMessageToPersist();
     if (Object.keys(updates).length > 0) onBatchUpdate(updates);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [interaction.id, interaction.type]);
@@ -1206,6 +1348,8 @@ function InteractionFields({
           placeholder={t("typeMessage")}
           value={(d.message as string) || ""}
           onChange={(val) => onUpdate("message", val)}
+          withGoogleReviewLink
+          withWebchatInviteLink={webchatInviteAvailable}
         />
       );
 
@@ -1230,12 +1374,18 @@ function InteractionFields({
       // For preview: prefer base64 (works offline + avoids mixed-content issues),
       // then fresh blob URL (just uploaded), then server URL as last resort.
       const previewSrc = mediaBase64 || (d.mediaUrl as string) || "";
+      const mediaExt = ((d.ext as string) || (mediaName.includes(".") ? mediaName.split(".").pop() : "") || "").toLowerCase();
+      const mediaIsAudio = !!(previewSrc || mediaName) && isFlowAudioMedia(mediaType, mediaExt);
 
       const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
         const file = e.target.files?.[0];
         if (!file) return;
         const blobUrl = URL.createObjectURL(file);
         const ext = file.name.split(".").pop() || "";
+        // 1º arquivo do bloco sendo áudio: nasce como mensagem de voz. Trocar o arquivo de
+        // um bloco que já tinha mídia mantém a escolha atual (bloco antigo segue desligado).
+        const isFirstMedia = !previewSrc && !mediaName;
+        const voiceDefault = isFirstMedia && isFlowAudioMedia(file.type, ext) ? { ptt: true } : {};
         const reader = new FileReader();
         reader.onload = () => {
           onBatchUpdate({
@@ -1244,6 +1394,7 @@ function InteractionFields({
             type: file.type,
             name: file.name,
             ext,
+            ...voiceDefault,
           });
         };
         reader.readAsDataURL(file);
@@ -1290,11 +1441,31 @@ function InteractionFields({
             accept=".txt,.jpg,.png,.jpeg,image/*,.pdf,.doc,.docx,.xls,.xlsx,.zip,.ppt,.pptx,.mp4,.mp3,.ogg"
             onChange={handleFileChange}
           />
+          {mediaIsAudio && (
+            <div className="rounded-md border px-3 py-2 space-y-1">
+              <div className="flex items-center justify-between gap-3">
+                <Label htmlFor={`media-ptt-${interaction.id}`} className="text-xs flex items-center gap-1.5 min-w-0">
+                  <Mic className="h-3.5 w-3.5 shrink-0" />
+                  <span>{t("sendAsVoice")}</span>
+                </Label>
+                <Switch
+                  id={`media-ptt-${interaction.id}`}
+                  checked={d.ptt === true}
+                  // Desligado = sem a chave (cada canal manda como já mandava); nunca `false`,
+                  // que no Baileys/WhatsApp Web força áudio comum. undefined some no JSON salvo.
+                  onCheckedChange={(v) => onUpdate("ptt", v ? true : undefined)}
+                />
+              </div>
+              <p className="text-[11px] text-muted-foreground leading-snug">{t("sendAsVoiceHint")}</p>
+            </div>
+          )}
           <TextareaWithVars
             rows={2}
             placeholder={t("captionOptional")}
             value={(d.caption as string) || ""}
             onChange={(val) => onUpdate("caption", val)}
+            withGoogleReviewLink
+            withWebchatInviteLink={webchatInviteAvailable}
           />
         </div>
       );
@@ -1463,9 +1634,14 @@ function InteractionFields({
             <Select value={(d.agentId as string) || ""} onValueChange={(v) => onUpdate("agentId", v)}>
               <SelectTrigger><SelectValue placeholder={t("selectAgent")} /></SelectTrigger>
               <SelectContent className="max-h-60">
-                {routeOptions.aiAgents.map((a) => (
-                  <SelectItem key={a.id} value={String(a.id)}>{a.name}</SelectItem>
-                ))}
+                {/* v7 — agente "só base" não atende: fica fora, salvo o já escolhido (com marca) */}
+                {routeOptions.aiAgents
+                  .filter((a) => a.kbOnly !== true || String(a.id) === String(d.agentId ?? ""))
+                  .map((a) => (
+                    <SelectItem key={a.id} value={String(a.id)}>
+                      {a.kbOnly === true ? `${a.name} ${tAiAgents("markerKbOnly")}` : a.name}
+                    </SelectItem>
+                  ))}
               </SelectContent>
             </Select>
           </div>
@@ -1577,9 +1753,11 @@ function InteractionFields({
             <Label className="text-xs">{t("switchChannelMessageLabel")}</Label>
             <TextareaWithVars
               rows={3}
-              placeholder={SWITCH_CHANNEL_DEFAULT_MESSAGE}
+              placeholder={getSwitchChannelDefaultMessage()}
               value={(d.message as string) || ""}
               onChange={(val) => onUpdate("message", val)}
+              withGoogleReviewLink
+              withWebchatInviteLink={webchatInviteAvailable}
             />
             <p className="text-[11px] text-muted-foreground">
               {t("switchChannelLinkHint")}{" "}
@@ -2129,6 +2307,8 @@ function InteractionFields({
             maxLength={WABA_LIMITS.body}
             value={(d.message as string) || ""}
             onChange={(val) => onUpdate("message", val)}
+            withGoogleReviewLink
+            withWebchatInviteLink={webchatInviteAvailable}
           />
           <p className="text-[10px] text-muted-foreground text-right">{((d.message as string) || "").length}/{WABA_LIMITS.body}</p>
           <Input
@@ -2243,6 +2423,8 @@ function InteractionFields({
             maxLength={WABA_LIMITS.listBody}
             value={(d.message as string) || ""}
             onChange={(val) => onUpdate("message", val)}
+            withGoogleReviewLink
+            withWebchatInviteLink={webchatInviteAvailable}
           />
           <p className="text-[10px] text-muted-foreground text-right">{((d.message as string) || "").length}/{WABA_LIMITS.listBody}</p>
           <Input
@@ -2419,6 +2601,8 @@ function InteractionFields({
             placeholder={t("transferMessage")}
             value={(d.transferMessage as string) || ""}
             onChange={(val) => onUpdate("transferMessage", val)}
+            withGoogleReviewLink
+            withWebchatInviteLink={webchatInviteAvailable}
           />
         </div>
       );
@@ -2444,20 +2628,7 @@ function InteractionFields({
 
     // ── Location ──────────────────────────────────────────────────────────────
     case "location":
-      return (
-        <div className="grid grid-cols-2 gap-2">
-          <Input
-            placeholder="Latitude"
-            value={(d.lat as string) || ""}
-            onChange={(e) => onUpdate("lat", e.target.value)}
-          />
-          <Input
-            placeholder="Longitude"
-            value={(d.lng as string) || ""}
-            onChange={(e) => onUpdate("lng", e.target.value)}
-          />
-        </div>
-      );
+      return <LocationInteractionFields d={d} onBatchUpdate={onBatchUpdate} />;
 
     // ── Sticker ───────────────────────────────────────────────────────────────
     case "sticker": {
@@ -2541,6 +2712,8 @@ function InteractionFields({
             placeholder={t("videoLinkMessage")}
             value={(d.videoLinkMessage as string) || ""}
             onChange={(val) => onUpdate("videoLinkMessage", val)}
+            withGoogleReviewLink
+            withWebchatInviteLink={webchatInviteAvailable}
           />
         </div>
       );
@@ -2611,6 +2784,7 @@ function InteractionFields({
             placeholder={t("scheduleMessage")}
             value={(d.scheduleMessage as string) || ""}
             onChange={(val) => onUpdate("scheduleMessage", val)}
+            withGoogleReviewLink
           />
 
           {/* Media upload */}
@@ -2713,6 +2887,8 @@ function InteractionFields({
             placeholder={t("smsMessage")}
             value={(d.smsMessage as string) || ""}
             onChange={(val) => onUpdate("smsMessage", val)}
+            withGoogleReviewLink
+            withWebchatInviteLink={webchatInviteAvailable}
           />
         </div>
       );
@@ -3292,6 +3468,10 @@ function ConfigurationsForm({
               <span className={`text-xs block ${autoDistrib === o.v ? "text-primary-foreground/80" : "text-muted-foreground"}`}>{o.desc}</span>
             </button>
           ))}
+          <div className="flex gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 p-2">
+            <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-600" />
+            <p className="text-[11px] leading-snug text-muted-foreground">{t("autoDistributionAiAgentNote")}</p>
+          </div>
         </div>
       </ConfigCard>
 

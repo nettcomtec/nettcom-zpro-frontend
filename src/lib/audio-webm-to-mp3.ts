@@ -24,15 +24,17 @@ export async function convertWebmBlobToMp3(blob: Blob): Promise<Blob> {
   const audioBuffer = await decodeAudio(blob);
 
   const sampleRate = audioBuffer.sampleRate;
-  const numChannels = audioBuffer.numberOfChannels;
+  const numChannels = Math.max(1, audioBuffer.numberOfChannels);
 
- // Interleave channel data → flat Float32 (same as front legado convertToMp3)
-  const samples = new Float32Array(audioBuffer.length * numChannels);
-  let idx = 0;
+  // Mono (média dos canais): com microfone estéreo o lamejs exige os dois canais em
+  // buffers separados, e o antigo encadeava os canais e entregava um só — a conversão
+  // falhava ("Falha ao converter áudio para MP3"). Mensagem de voz é mono; com
+  // microfone mono o resultado é o mesmo de antes.
+  const samples = new Float32Array(audioBuffer.length);
   for (let ch = 0; ch < numChannels; ch++) {
     const channelData = audioBuffer.getChannelData(ch);
     for (let i = 0; i < channelData.length; i++) {
-      samples[idx++] = channelData[i];
+      samples[i] += channelData[i] / numChannels;
     }
   }
 
@@ -43,7 +45,7 @@ export async function convertWebmBlobToMp3(blob: Blob): Promise<Blob> {
   }
 
   // Encode to MP3
-  const encoder = new Mp3Encoder(numChannels, sampleRate, 128);
+  const encoder = new Mp3Encoder(1, sampleRate, 128);
   const mp3Data: Uint8Array[] = [];
 
   for (let i = 0; i < pcm.length; i += SAMPLE_BLOCK) {

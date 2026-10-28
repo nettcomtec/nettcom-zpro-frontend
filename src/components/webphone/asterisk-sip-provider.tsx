@@ -7,13 +7,20 @@
  *
  * Registers on page load so incoming calls arrive even before the modal opens.
  * On incoming call: calls startCall() which sets isVisible=true → modal opens.
+ *
+ * Conexão, registro e reconexão automática moram em lib/sip-link.ts.
  */
 
-import { useEffect } from "react";
-import { UserAgent, Registerer, SessionState, Web } from "sip.js";
+import { useEffect, useRef } from "react";
+import { SessionState, Web, type Invitation } from "sip.js";
+import { useTranslations } from "next-intl";
 import { startCallRingtone } from "@/lib/call-ringtone";
+import { SipLink } from "@/lib/sip-link";
+import { isPageInBackground, showIncomingSipCallNotification } from "@/lib/sip-call-notification";
+import { getPwaIconUrl } from "@/lib/branding-urls";
 import { useAuthStore } from "@/stores/auth-store";
-import { useWebphoneStore } from "@/stores/webphone-store";
+import { useLiveModeStore } from "@/stores/live-mode-store";
+import { isSipCallActive, useWebphoneStore } from "@/stores/webphone-store";
 import { sipSession, SIP_MIC_TIMEOUT_ERROR } from "./sip-session";
 import { createCallLog } from "@/services/call-logs";
 
@@ -54,13 +61,41 @@ const micStreamFactory: Web.MediaStreamFactory = (constraints, sdh, options) => 
   });
 };
 
+// Ponte UDP do backend: a URL leva o token do login, que vence e é renovado — por isso é
+// montada de novo a cada conexão (a reconexão com o token velho seria recusada).
+const buildBridgeUrl = (sipServer: string, port: number | undefined): string => {
+  const apiOrigin = process.env.NEXT_PUBLIC_API_URL ?? window.location.origin;
+  const apiHost = new URL(apiOrigin).host;
+  let token = "";
+  try {
+    const raw = localStorage.getItem("token");
+    token = raw ? (JSON.parse(raw) as string) : "";
+  } catch { /* ignore */ }
+  return (
+    `wss://${apiHost}/sip-bridge` +
+    `?server=${encodeURIComponent(sipServer)}` +
+    `&port=${port ?? 5060}` +
+    `&token=${encodeURIComponent(token)}`
+  );
+};
+
 export function AsteriskSipProvider() {
   const { user } = useAuthStore();
-  const { startCall, setCallStatus, setSipRegistered, endCall } = useWebphoneStore();
+  const { startCall, setSipLinkStatus, setSipRegistered, endCall } = useWebphoneStore();
   const callStatus = useWebphoneStore((s) => s.callStatus);
   const incomingDirection = useWebphoneStore((s) => s.callInfo?.direction);
+  const t = useTranslations("asteriskWebphone");
+  const tLive = useTranslations("liveMode");
+  // Textos lidos na hora da chamada, sem reiniciar o ramal quando o idioma muda.
+  const textsRef = useRef({ t, tLive });
+  textsRef.current = { t, tLive };
 
   const cfg = user?.sipConfig;
+  // Lido só quando o ramal (re)conecta, fora das dependências do efeito: mudar o
+  // keep-alive (ou a chave faltar numa atualização de 30 s) não pode recriar o
+  // WebPhone, o que derrubaria uma chamada em curso. Vale na próxima abertura do painel.
+  const keepAliveRef = useRef(cfg?.keepAliveInterval);
+  keepAliveRef.current = cfg?.keepAliveInterval;
 
   // Toque enquanto há chamada SIP recebida — mesmo mecanismo das demais telas
   // de chamada: arquivo de public/ quando existir, senão o beep sintetizado de
@@ -71,124 +106,98 @@ export function AsteriskSipProvider() {
   }, [callStatus, incomingDirection]);
 
   useEffect(() => {
-    if (!cfg?.server || !cfg?.username || !cfg?.password) return;
+    // Aparados como no "Testar conexão": com espaço sobrando o sip.js não monta a URI.
+    const sipServer = (cfg?.server || "").trim();
+    const sipUser = (cfg?.username || "").trim();
+    const sipDomain = (cfg?.domain || "").trim();
+    if (!sipServer || !sipUser || !cfg?.password) return;
 
-    let destroyed = false;
+    const transport = (cfg.transport ?? "wss") as "wss" | "ws" | "udp";
 
-    // Domínio SIP do ramal pode diferir do servidor de conexão (SBC na frente do WebRTC).
-    const uri = UserAgent.makeURI(`sip:${cfg.username}@${cfg.domain || cfg.server}`);
-    if (!uri) return;
-
-    // setTimeout(0) — defer so React StrictMode's synchronous fake-unmount fires
- // clearTimeout before any WebSocket is opened. Mirrors the legacy front's single mounted() call.
-    const timerId = setTimeout(async () => {
-      if (destroyed) return;
-
-      const transport = (cfg.transport ?? "wss") as "wss" | "ws" | "udp";
-      let serverUrl: string;
-      if (transport === "udp") {
-        const apiOrigin = process.env.NEXT_PUBLIC_API_URL ?? window.location.origin;
-        const apiHost = new URL(apiOrigin).host;
-        let token = "";
-        try {
-          const raw = localStorage.getItem("token");
-          token = raw ? (JSON.parse(raw) as string) : "";
-        } catch { /* ignore */ }
-        serverUrl =
-          `wss://${apiHost}/sip-bridge` +
-          `?server=${encodeURIComponent(cfg.server)}` +
-          `&port=${cfg.port ?? 5060}` +
-          `&token=${encodeURIComponent(token)}`;
-      } else {
-        const defaultPort = transport === "wss" ? 8089 : 5066;
-        serverUrl = `${transport}://${cfg.server}:${cfg.port ?? defaultPort}/ws`;
+    const handleInvite = (invitation: Invitation) => {
+      sipSession.session = invitation;
+      const remoteUri =
+        invitation.remoteIdentity.uri.user || "Desconhecido";
+      // startCall sets isVisible=true in the store → WebphoneModal opens
+      startCall({ phone: remoteUri, direction: "incoming" });
+      // Front legado: handleIncomingCall → CriarCallLog('Received')
+      createCallLog({
+        userId: user!.userId,
+        tenantId: user!.tenantId,
+        phoneNumber: sipUser,
+        originNumber: sipUser,
+        destinationNumber: remoteUri,
+        callDuration: null,
+        callStatus: "Received",
+      }).catch(() => {});
+      // Aba minimizada ou atrás de outra janela: o WebPhone abre onde ninguém vê.
+      let closeNotification = () => {};
+      if (isPageInBackground()) {
+        const { t: tw, tLive: tl } = textsRef.current;
+        const live = useLiveModeStore.getState();
+        const hideContent = live.envEnabled && live.active;
+        closeNotification = showIncomingSipCallNotification({
+          title: tw("callReceived"),
+          body: hideContent ? tl("notificationBodyHidden") : tw("incomingCallNotificationBody", { caller: remoteUri }),
+          icon: getPwaIconUrl("icon-192x192.png"),
+          onClick: () => useWebphoneStore.getState().toggleVisibility(true),
+        });
       }
+      invitation.stateChange.addListener((s: SessionState) => {
+        // Atendida, recusada ou encerrada: o aviso some.
+        if (s !== SessionState.Initial) closeNotification();
+        if (s === SessionState.Terminated) {
+          endCall();
+          sipSession.session = null;
+        }
+      });
+    };
 
-      // Pré-flight: ws:// (texto puro) num painel servido por HTTPS é bloqueado
-      // pelo navegador (mixed content) e nunca conecta. Sem este guard, sip.js
-      // tenta abrir um socket condenado e o erro "closed before established" se
-      // repete, gerando tarefas longas que travam a main thread (chega a atrapalhar
-      // a seleção de texto no atendimento). Falha cedo com erro claro.
-      if (window.location.protocol === "https:" && serverUrl.startsWith("ws://")) {
-        console.error(
-          "[SIP] Conexão ws:// bloqueada em painel HTTPS (mixed content). " +
-            "Use transport 'wss' (porta padrão 8089) na configuração SIP do usuário."
-        );
-        if (!destroyed) setCallStatus("error");
-        return;
-      }
-
-      const ua = new UserAgent({
-        uri,
-        transportOptions: {
-          server: serverUrl,
-        },
-        authorizationUsername: cfg.username,
-        authorizationPassword: cfg.password,
-        logLevel: "error",
+    const link = new SipLink({
+      config: {
+        server: sipServer,
+        username: sipUser,
+        password: cfg.password,
+        // Domínio SIP do ramal pode diferir do servidor de conexão (SBC na frente do WebRTC).
+        domain: sipDomain || undefined,
+        port: cfg.port,
+        transport,
+        keepAliveInterval: keepAliveRef.current,
+      },
+      onStatus: (status) => setSipLinkStatus(status),
+      onInvite: handleInvite,
+      userAgentOptions: {
         sessionDescriptionHandlerFactory: Web.defaultSessionDescriptionHandlerFactory(micStreamFactory),
         sessionDescriptionHandlerFactoryOptions: {
           constraints: { audio: true, video: false },
         },
-        delegate: {
-          onInvite: (invitation) => {
-            if (destroyed) return;
-            sipSession.session = invitation;
-            const remoteUri =
-              invitation.remoteIdentity.uri.user || "Desconhecido";
-            // startCall sets isVisible=true in the store → WebphoneModal opens
-            startCall({ phone: remoteUri, direction: "incoming" });
- // Front legado: handleIncomingCall → CriarCallLog('Received')
-            createCallLog({
-              userId: user!.userId,
-              tenantId: user!.tenantId,
-              phoneNumber: cfg.username,
-              originNumber: cfg.username,
-              destinationNumber: remoteUri,
-              callDuration: null,
-              callStatus: "Received",
-            }).catch(() => {});
-            invitation.stateChange.addListener((s: SessionState) => {
-              if (s === SessionState.Terminated) {
-                endCall();
-                sipSession.session = null;
-              }
-            });
-          },
-        },
-      });
+      },
+      buildBridgeUrl: transport === "udp" ? () => buildBridgeUrl(sipServer, cfg.port) : undefined,
+      isCallActive: () => isSipCallActive(useWebphoneStore.getState().callStatus),
+    });
 
-      sipSession.ua = ua;
-      sipSession.sipUsername = cfg.username;
-      if (!destroyed) setCallStatus("registering");
-
-      try {
-        await ua.start();
-        if (destroyed) {
-          ua.stop().catch(() => {});
-          return;
-        }
-        const reg = new Registerer(ua);
-        sipSession.registerer = reg;
-        await reg.register();
-        if (!destroyed) setSipRegistered(true);
-      } catch {
-        if (!destroyed) setCallStatus("error");
-      }
+    // setTimeout(0) — defer so React StrictMode's synchronous fake-unmount fires
+    // clearTimeout before any WebSocket is opened. Mirrors the legacy front's single mounted() call.
+    const timerId = setTimeout(() => {
+      sipSession.link = link;
+      sipSession.sipUsername = sipUser;
+      link.start();
+      sipSession.ua = link.userAgent;
     }, 0);
 
     return () => {
-      destroyed = true;
       clearTimeout(timerId);
-      sipSession.registerer?.dispose();
-      sipSession.registerer = null;
-      sipSession.ua?.stop().catch(() => {});
-      sipSession.ua = null;
-      sipSession.session = null;
+      // Para timers, ouvintes de aba/rede, o registro e o socket desta configuração.
+      link.dispose();
+      if (sipSession.link === link) {
+        sipSession.link = null;
+        sipSession.ua = null;
+        sipSession.session = null;
+      }
       setSipRegistered(false);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [cfg?.server, cfg?.domain, cfg?.port, cfg?.username, cfg?.password]);
+  }, [cfg?.server, cfg?.domain, cfg?.port, cfg?.username, cfg?.password, cfg?.transport]);
 
   return null;
 }

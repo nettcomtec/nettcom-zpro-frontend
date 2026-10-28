@@ -15,7 +15,8 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
-import { Loader2, X } from "lucide-react";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
+import { AlertTriangle, HelpCircle, Loader2, X } from "lucide-react";
 import { toast } from "sonner";
 import { useTranslations } from "next-intl";
 import { fetchWhatsapps, type Whatsapp } from "@/services/whatsapp";
@@ -46,6 +47,44 @@ interface GroupOption {
   name: string;
 }
 
+// O tooltip do Radix não abre por toque (fecha no clique): o clique abre e tocar
+// fora fecha, senão no celular a explicação nunca apareceria.
+function ToggleHelpTip({ text }: { text: string }) {
+  const [open, setOpen] = useState(false);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  return (
+    <TooltipProvider delayDuration={150}>
+      <Tooltip open={open} onOpenChange={setOpen}>
+        <TooltipTrigger asChild>
+          <button
+            ref={triggerRef}
+            type="button"
+            aria-label={text}
+            onPointerDown={(e) => e.preventDefault()}
+            onClick={(e) => {
+              e.preventDefault();
+              setOpen(true);
+            }}
+            className="inline-flex shrink-0 items-center text-muted-foreground hover:text-foreground"
+          >
+            <HelpCircle className="h-3.5 w-3.5" />
+          </button>
+        </TooltipTrigger>
+        <TooltipContent
+          side="top"
+          collisionPadding={16}
+          className="max-w-[18rem] whitespace-normal leading-relaxed"
+          onPointerDownOutside={(e) => {
+            if (triggerRef.current?.contains(e.target as Node)) e.preventDefault();
+          }}
+        >
+          {text}
+        </TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
+  );
+}
+
 export default function GrupoMassaUsuariosPage() {
   const t = useTranslations("grupoMassausuariosPage");
   const tCsv = useTranslations("bulkCsvImport");
@@ -54,7 +93,6 @@ export default function GrupoMassaUsuariosPage() {
   const [loading, setLoading] = useState(true);
   const [connections, setConnections] = useState<ConnectionOption[]>([]);
   const [selectedConnection, setSelectedConnection] = useState("");
-  const [selectedConnectionType, setSelectedConnectionType] = useState("");
   const [groupOptions, setGroupOptions] = useState<GroupOption[]>([]);
   const [selectedGroups, setSelectedGroups] = useState<GroupOption[]>([]);
   const [loadingGroups, setLoadingGroups] = useState(false);
@@ -146,8 +184,6 @@ export default function GrupoMassaUsuariosPage() {
 
   const handleConnectionChange = (val: string) => {
     setSelectedConnection(val);
-    const conn = connections.find((c) => String(c.value) === val);
-    setSelectedConnectionType(conn?.type || "");
     popularGrupos(val);
   };
 
@@ -357,11 +393,15 @@ export default function GrupoMassaUsuariosPage() {
             <Switch checked={demover} onCheckedChange={handleDemover} id="toggle-demover" />
             <Label htmlFor="toggle-demover">{t("toggleDemote")}</Label>
           </div>
-          {/* Add users: not available for baileys/zapo */}
-          {selectedConnectionType !== "baileys" && selectedConnectionType !== "zapo" && (
-            <div className="flex items-center gap-3">
-              <Switch checked={adicionar} onCheckedChange={handleAdicionar} id="toggle-adicionar" />
-              <Label htmlFor="toggle-adicionar">{t("toggleAdd")}</Label>
+          <div className="flex items-center gap-3">
+            <Switch checked={adicionar} onCheckedChange={handleAdicionar} id="toggle-adicionar" />
+            <Label htmlFor="toggle-adicionar">{t("toggleAdd")}</Label>
+            <ToggleHelpTip text={t("toggleAddHelp")} />
+          </div>
+          {adicionar && (
+            <div className="flex items-start gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-300">
+              <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+              <span>{t("addWarningNote")}</span>
             </div>
           )}
           <div className="flex items-center gap-3">

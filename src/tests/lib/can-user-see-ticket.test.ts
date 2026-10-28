@@ -49,6 +49,7 @@ const CUSTOM1: UserVisibilityData = {
   queues: [{ id: FILA_A }],
   whatsappAllowed: [{ id: CANAL_1 }],
   customProfile: { customPermissions: { tickets_view_all: true } },
+  customProfileEnabled: true,
 };
 const CUSTOM2: UserVisibilityData = {
   userId: 402,
@@ -56,6 +57,7 @@ const CUSTOM2: UserVisibilityData = {
   queues: [{ id: FILA_A }],
   whatsappAllowed: [{ id: CANAL_1 }],
   customProfile: { customPermissions: { tickets_view_all: false } },
+  customProfileEnabled: true,
 };
 
 /**
@@ -196,6 +198,11 @@ describe("bloco 2.3 — perfil custom com tickets_view_all", () => {
   it("custom2 (sem a permissao) fica no escopo normal", () => {
     const t = ticket({ queueId: FILA_B, whatsappId: CANAL_2, userId: 999 });
     expect(canUserSeeTicket(t, CUSTOM2, TENANT_PADRAO)).toBe(false);
+  });
+
+  it("custom1 com perfis personalizados desligados na empresa perde o 'ver todos'", () => {
+    const t = ticket({ queueId: FILA_B, whatsappId: CANAL_2, userId: 999 });
+    expect(canUserSeeTicket(t, { ...CUSTOM1, customProfileEnabled: false }, TENANT_PADRAO)).toBe(false);
   });
 });
 

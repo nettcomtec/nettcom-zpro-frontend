@@ -9,13 +9,13 @@ import { motion, AnimatePresence } from "framer-motion";
 import {
   X, User, Phone, Mail, Briefcase, Calendar, Tag, ArrowRightLeft,
   MessageSquare, Plus, ExternalLink, Copy, RotateCcw, Paperclip, FileImage,
-  Pause, Play, Bot, Radio, Search, Image as ImageIcon,
+  Pause, Play, Bot, BotOff, Radio, Search, Image as ImageIcon,
   MessageSquareText, Clock, CheckCircle2, Undo2,
   Link2, FileText, Star, Share2, Filter, UserX, Ban, DollarSign,
   LayoutGrid, FileDown, Shield, ShieldCheck, RefreshCw, Wallet,
   MailOpen, List, Send, ChevronDown, PhoneCall, PhoneOutgoing, Loader2,
   Pencil, Trash2, Sparkles, AlertTriangle, TrendingUp, TrendingDown, Meh,
-  AtSign, MapPin,
+  AtSign, MapPin, History as HistoryIcon, Info,
 } from "lucide-react";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Button, buttonVariants } from "@/components/ui/button";
@@ -23,7 +23,7 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { Checkbox } from "@/components/ui/checkbox";
-import { Badge } from "@/components/ui/badge";
+import { Badge, badgeVariants } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -46,14 +46,27 @@ import {
   DropdownMenuSub, DropdownMenuSubTrigger, DropdownMenuSubContent, DropdownMenuSeparator,
 } from "@/components/ui/dropdown-menu";
 import { cn, getInitials } from "@/lib/utils";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { formatDateTime } from "@/lib/format";
 import { linkifyParts } from "@/lib/linkify";
+import { matchWebchatInviteUrl } from "@/lib/webchat-invite-link";
+import { downloadMediaFile, mediaFileNameFromUrl } from "@/lib/media-fetch";
+import { notifyUnreadablePickedFile, preparePickedFile } from "@/lib/picked-file";
 import { ProfilePicPreviewDialog, type ProfilePicPreview } from "@/components/shared/profile-pic-preview-dialog";
 import { useLiveMode } from "@/hooks/use-live-mode";
 import { useParentBridge } from "@/hooks/use-parent-bridge";
 import { getReadableTextColor } from "@/lib/color-contrast";
 import { ContactEditDialog } from "@/components/contatos/contact-edit-dialog";
+import { TelegramInviteDialog } from "@/components/contatos/telegram-invite-dialog";
+import { WebchatLinksRow } from "@/components/contatos/webchat-links-row";
+import { filterWhatsappsByUserAccess } from "@/lib/whatsapp-user-access";
 import { ContactCrmCard } from "@/components/contact-crm/contact-crm-card";
+import { ContactTasksCard } from "@/components/tasks/contact-tasks-card";
 import { ReopenConfirmDialog } from "@/components/atendimento/reopen-confirm-dialog";
+import { ReleaseAiAgentDialog } from "@/components/atendimento/release-ai-agent-dialog";
+import { AiAgentPauseButton } from "@/components/atendimento/ai-agent-pause-button";
+import { getTicketAutomations, isAiAgentPaused } from "@/lib/ticket-automations";
+import { isTagNotFound, getBackendErrorCode } from "@/lib/backend-error-code";
 import { TransferChannelConfirmDialog } from "@/components/atendimento/transfer-channel-confirm-dialog";
 import { findCrossChannelSiblingForTicket, findOpenTicketOnTargetChannel, type ExistingOpenTicket } from "@/lib/check-existing-open-ticket";
 import { buildReopenNotices, type ReopenNotices } from "@/lib/reopen-notices";
@@ -61,7 +74,7 @@ import { useTicketStore } from "@/stores/ticket-store";
 import type { Ticket } from "@/stores/ticket-store";
 import { useWhatsappStore, type WhatsApp } from "@/stores/whatsapp-store";
 import { fetchWhatsapps } from "@/services/whatsapp";
-import { updateTicket, fetchTicketLogs, transferTicketChannel, transferToChatbot, pauseTicket, resumeTicket } from "@/services/tickets";
+import { updateTicket, farewellFailed, fetchTicketLogs, transferTicketChannel, transferToChatbot, pauseTicket, resumeTicket } from "@/services/tickets";
 import {
   updateContactTags,
   updateContactWallet,
@@ -89,15 +102,17 @@ import { createAppointment } from "@/services/agenda";
 import { fetchEvaluationLogs, fetchEvaluationConfig, type EvaluationConfig } from "@/services/evaluations";
 import { sendEvaluationForTicket, channelSupportsEvaluation } from "@/lib/send-evaluation";
 import { fetchTicketNoteLogs, createTicketNote, updateTicketNote, deleteTicketNote } from "@/services/notes";
-import { fetchGallery, getGalleryPreviewUrl, type GalleryItem } from "@/services/gallery";
+import { fetchGallery, fetchGalleryBlob, getGalleryPreviewUrl, type GalleryItem } from "@/services/gallery";
 import { fetchTenantById } from "@/services/tenants";
 import { sendSMS, sendSMSConecta, sendSMSLivson } from "@/services/sms";
 import { fetchVapiAssistants, fetchVapiPhoneNumbers, createVapiCall, type VapiAssistant, type VapiPhoneNumber } from "@/services/vapi";
 import { useSettings } from "@/hooks/use-settings";
+import { usePageAccess } from "@/hooks/use-page-access";
 import { useWebphoneStore } from "@/stores/webphone-store";
 import { useAuthStore } from "@/stores/auth-store";
 import { toast } from "sonner";
 import { useTranslations } from "next-intl";
+import { useRegion, ensureRegionTexts, getRegionText } from "@/hooks/use-region";
 import { uazapiContactAgenda, listUazapiLabels, setUazapiChatLabels } from "@/services/uazapi-interactive";
 import { zapoContactAgenda, listZapoLabels, setZapoChatLabels } from "@/services/zapo-interactive";
 import { summarizeContact, analyzeSentiment } from "@/services/copilot";
@@ -168,6 +183,9 @@ function NoteLogText({ text }: { text: string }) {
       {linkifyParts(text).map((part, i) =>
         part.type === "text" ? (
           <React.Fragment key={i}>{part.value}</React.Fragment>
+        ) : !part.href.startsWith("mailto:") && matchWebchatInviteUrl(part.value) ? (
+          // Link de convite do WebChat (D22): texto, nunca link (quem abre fica com a conversa).
+          <span key={i} className="break-all">{part.value}</span>
         ) : (
           <a
             key={i}
@@ -184,6 +202,65 @@ function NoteLogText({ text }: { text: string }) {
   );
 }
 
+/**
+ * Selo do atendimento trazido de outro servidor (migração de empresa): o número que ele
+ * tinha lá. Popover e não Tooltip (o Tooltip não abre com toque no celular/PWA) com a
+ * data da migração, o protocolo anterior e o aviso de que a busca da lista acha por esse
+ * número. Sem `migrationRef` (atendimento comum ou backend anterior) não renderiza nada.
+ * Usado no painel do contato e no cabeçalho da conversa (lá com `stopPropagation`, porque
+ * o clique no cabeçalho abre/fecha o painel).
+ */
+export function TicketMigrationRefBadge({
+  migrationRef,
+  className,
+  stopPropagation = false,
+}: {
+  migrationRef: Ticket["migrationRef"];
+  className?: string;
+  stopPropagation?: boolean;
+}) {
+  const t = useTranslations("migrationRef");
+  if (!migrationRef?.oldId) return null;
+  const migratedAtDate = migrationRef.migratedAt ? new Date(migrationRef.migratedAt) : null;
+  const migratedAt = migratedAtDate && !Number.isNaN(migratedAtDate.getTime())
+    ? formatDateTime(migratedAtDate, { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" })
+    : "—";
+  const stop = stopPropagation ? (e: React.SyntheticEvent) => e.stopPropagation() : undefined;
+  return (
+    <Popover>
+      <PopoverTrigger asChild>
+        <button
+          type="button"
+          onClick={stop}
+          title={t("popoverTitle")}
+          className={cn(
+            badgeVariants({ variant: "info-soft" }),
+            "h-4 shrink-0 gap-1 px-1.5 py-0 text-[10px] font-medium leading-none whitespace-nowrap cursor-pointer align-middle",
+            className
+          )}
+        >
+          <HistoryIcon className="h-2.5 w-2.5" aria-hidden="true" />
+          {t("badge", { id: migrationRef.oldId })}
+        </button>
+      </PopoverTrigger>
+      <PopoverContent
+        side="bottom"
+        align="start"
+        className="w-auto max-w-[min(20rem,calc(100vw-2rem))] space-y-1.5 text-xs leading-relaxed"
+        onClick={stop}
+      >
+        <p className="text-sm font-medium">{t("popoverTitle")}</p>
+        <p>{t("popoverBody", { date: migratedAt, id: migrationRef.oldId })}</p>
+        {migrationRef.legacyProtocol && (
+          <p className="break-all text-muted-foreground">
+            {t("popoverProtocol", { protocol: migrationRef.legacyProtocol })}
+          </p>
+        )}
+      </PopoverContent>
+    </Popover>
+  );
+}
+
 interface TicketDetailProps {
   ticket: Ticket;
   open: boolean;
@@ -192,7 +269,7 @@ interface TicketDetailProps {
   queues?: { id: number; name: string; color: string; isActive?: boolean }[];
   users?: { id: number; name: string; queues?: { id: number }[] }[];
   tags?: { id: number; name: string; color: string; isActive?: boolean }[];
-  whatsapps?: { id: number; name: string; type?: string }[];
+  whatsapps?: { id: number; name: string; type?: string; status?: string }[];
   chatFlows?: { id: number; name: string }[];
   kanbans?: { id: number; name: string }[];
   motivos?: { id: number; name: string }[];
@@ -211,6 +288,10 @@ export function TicketDetail({
   // Namespace dos toasts de chamada (o provider usa as mesmas chaves) — o `t`
   // deste componente é de "ticketDetail" e não resolveria "wabaCallProvider.*".
   const tWabaCallProvider = useTranslations("wabaCallProvider");
+  // Aviso de mídia ilegível no anexo da nota: mesmas chaves do campo de mensagem.
+  const tMsgInput = useTranslations("messageInput");
+  // Região da empresa: valor de negócio na moeda dela; texto ao cliente pelo catálogo.
+  const { formatMoney, text: regionText } = useRegion();
   const router = useRouter();
   const { settings } = useSettings(INTEGRATION_CONFIG.map((c) => c.settingKey));
   // Seletores escopados (referências estáveis) — evita re-render do TicketDetail a
@@ -222,6 +303,9 @@ export function TicketDetail({
   // de atendimento — sem o gate, cada abertura virava um 402 automático.
   const hasFunnelFeature = useAuthStore((s) => s.hasFeature("funnelKanban"));
   const hasCalendarFeature = useAuthStore((s) => s.hasFeature("googleCalendar"));
+  // "Ver no funil" na lista de oportunidades só para quem abre a página do funil
+  // (mesma regra das telas /funil/*; hook puro, sem consulta).
+  const canOpenFunnelPage = usePageAccess("funil", { alsoAccept: ["kanban"] });
   // Gate único do WaVoIP (plano + interruptor do tenant) — mesma camada dos dois acima.
   const wavoipEnabled = useAuthStore((s) => s.isWavoipEnabled());
   // Demanda obrigatória ao encerrar (config de tenant) — mesmo gate do cabeçalho do atendimento.
@@ -236,6 +320,15 @@ export function TicketDetail({
   const activeIntegrations = INTEGRATION_CONFIG.filter(
     (c) => (settings[c.settingKey] || "").toLowerCase() === "enabled"
   );
+  // Agente de IA neste atendimento: respondendo (mesmo critério do selo da lista) ou
+  // pausado (Pausar / "Bloquear chatbot neste atendimento"). O cartão não depende do
+  // Setting "chatgpt": o agente também não depende dele.
+  const aiAgentActive = !!ticket && ticket.status !== "closed" && getTicketAutomations(ticket).aiAgent;
+  const aiAgentPaused = !!ticket && ticket.status !== "closed" && isAiAgentPaused(ticket);
+  const aiAgentCardVisible = aiAgentActive || aiAgentPaused;
+  const tAiRelease = useTranslations("aiAgentRelease");
+  const tRegion = useTranslations("regionSettings");
+  const [releaseAiAgentOpen, setReleaseAiAgentOpen] = useState(false);
  // Telephony conditions — mirrors the legacy front: !isGroup && channel !== 'webchat' && !restrictedUser && (wavoip || sip || sms || vapi)
   const whatsappData = ticketData.whatsapp as Record<string, unknown> | undefined;
   const bloquearWavoip = !!user?.blockWavoip;
@@ -254,7 +347,10 @@ export function TicketDetail({
     !!(localUsuario.sipServer && localUsuario.sipUsername);
   const [smsAtivo, setSmsAtivo] = useState(false);
   const [vapiAtivo, setVapiAtivo] = useState(false);
-  const [ratingPrivacy, setRatingPrivacy] = useState("disabled");
+  // null = configuração da empresa ainda não carregou: o card Avaliação fica escondido para
+  // quem não administra avaliações (o envio manual entregaria a pesquisa e o servidor
+  // recusaria o registro com a privacidade ligada).
+  const [ratingPrivacy, setRatingPrivacy] = useState<string | null>(null);
   const [ratingMaxScore, setRatingMaxScore] = useState(5);
   // hasWabaCall cobre WABA Cloud + BSPs (Gupshup, Dialog360) — ambos têm Calls nativas.
   const hasWabaCall = ticket.channel === 'waba' || ticket.channel === 'gupshup' || ticket.channel === 'dialog360';
@@ -398,8 +494,70 @@ export function TicketDetail({
   // phone.phone (preenchido em canais baileys-like quando number está vazio).
   const handoffTargetNumber = String(handoffTarget?.number || handoffTarget?.phone?.phone || "").replace(/\D/g, "");
   const handoffLink = handoffTargetNumber
-    ? `https://wa.me/${handoffTargetNumber}?text=${encodeURIComponent((ticket as unknown as { protocol?: string }).protocol || "Ola")}`
+    ? `https://wa.me/${handoffTargetNumber}?text=${encodeURIComponent((ticket as unknown as { protocol?: string }).protocol || regionText("ticket.waGreeting", undefined, "Olá"))}`
     : "";
+
+  // ── Convite para o Telegram (PLANO_TELEGRAM_LINK_CONVITE D5/D12) ───────────
+  // Só para contato sem Telegram, fora de grupo, usuário não restrito e com
+  // permissão de editar contato (custom exige contacts_edit — o backend exige o
+  // mesmo), e só se há bot Telegram CONECTADO que o usuário enxerga. O store
+  // (atualizado por socket) é a fonte; a prop da página é o fallback. Empresa sem
+  // bot Telegram não paga nada: o diálogo só monta quando o botão existe.
+  const tTelegramInvite = useTranslations("telegramInvite");
+  const supervisorAdmin = useAuthStore((s) => s.supervisorAdmin);
+  const [telegramInviteOpen, setTelegramInviteOpen] = useState(false);
+  const telegramInviteBotSource: { id: number; type?: string; status?: string; isDeleted?: boolean }[] =
+    storeWhatsapps.length > 0 ? storeWhatsapps : whatsapps;
+  const hasVisibleTelegramBot = filterWhatsappsByUserAccess(
+    telegramInviteBotSource.filter(
+      (w) =>
+        !w.isDeleted &&
+        String(w.type || "").toLowerCase() === "telegram" &&
+        String(w.status || "").toUpperCase() === "CONNECTED"
+    ),
+    user,
+    supervisorAdmin
+  ).length > 0;
+  const telegramInviteAvailable =
+    !!contact?.id &&
+    !contact?.telegramId &&
+    !ticket.isGroup &&
+    (ticket.channel || "").toLowerCase() !== "telegram" &&
+    !isRestrictedUser() &&
+    hasPermission("contacts_edit") &&
+    hasVisibleTelegramBot;
+
+  // Envio do convite no atendimento atual: mesmo despacho por canal do protocolo
+  // (doSendProtocol) — Meta/BSP pelos serviços próprios com idFront único (sem
+  // ele o service cria uma 2ª Message e o bubble duplica), demais pelo endpoint
+  // do canal. O doHandoff não serve: só envia por WABA. Rejeita em falha (o
+  // diálogo mostra o erro e continua aberto); WABA/BSP fora da janela de 24h
+  // recusam texto livre e o erro do backend sobe como está.
+  const sendTelegramInviteInTicket = async (text: string) => {
+    const body = (text || "").trim();
+    if (!body) throw new Error("empty");
+    const ch = (ticket.channel || "").toLowerCase();
+    if (ch === "waba" || ch === "instagram" || ch === "messenger" || ch === "dialog360" || ch === "gupshup") {
+      const idFront = `tginvite-${ticket.id}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const metaPayload = {
+        read: 1, fromMe: true, mediaUrl: "", body,
+        scheduleDate: null, quotedMsg: null,
+        from: ticket.contact?.number, tokenApi: ticket.whatsapp?.tokenAPI,
+        whatsappId: ticket.whatsapp?.id,
+        ticketId: ticket.id,
+        idFront,
+      };
+      if (ch === "waba") await sendTextWaba(metaPayload);
+      else if (ch === "instagram") await sendTextInstagramMeta(metaPayload);
+      else if (ch === "messenger") await sendTextMessengerMeta(metaPayload);
+      else if (ch === "dialog360") await sendTextDialog360(metaPayload);
+      else await sendTextGupshup(metaPayload);
+    } else {
+      await sendMessage(ticket.id, { body, read: 1, fromMe: true, mediaUrl: "", scheduleDate: null, quotedMsg: null }, { channel: ticket.channel });
+    }
+    onRefresh?.();
+  };
+
   const [noteText, setNoteText] = useState("");
   const [noteFile, setNoteFile] = useState<File | null>(null);
   const [noteFilePreview, setNoteFilePreview] = useState<string | null>(null);
@@ -513,6 +671,10 @@ export function TicketDetail({
     retriesLimitQueue: t("logRetriesLimitQueue"),
     retriesLimitUserDefine: t("logRetriesLimitUserDefine"),
     chatBot: t("logChatBot"), autoClose: t("logAutoClose"),
+    channelDefine: t("logChannelDefine"),
+    firstInteractionQueue: t("logFirstInteractionQueue"),
+    firstInteractionUserDefine: t("logFirstInteractionUserDefine"),
+    closeDefine: t("logCloseDefine"), deleteForce: t("logDeleteForce"),
   };
   const [ticketLogsOpen, setTicketLogsOpen] = useState(false);
   const [ticketLogs, setTicketLogs] = useState<TicketLogEntry[]>([]);
@@ -525,7 +687,7 @@ export function TicketDetail({
     try {
       const res = await fetchTicketLogs(ticket.id);
       setTicketLogs((res.data as TicketLogEntry[]) ?? []);
-    } catch { toast.error(t("errorLoadingLogs")); }
+    } catch { toast.error(t("errorLoadingTicketLogs")); }
     finally { setTicketLogsLoading(false); }
   };
 
@@ -591,7 +753,7 @@ export function TicketDetail({
       );
       setSmsAtivo(hasSms);
       setVapiAtivo(!!(tenant.vapiToken as string | undefined)?.trim());
-      setRatingPrivacy((tenant.ratingPrivacy as string | undefined) || "disabled");
+      setRatingPrivacy(tenant.ratingPrivacy === "enabled" ? "enabled" : "disabled");
       setRatingMaxScore(typeof tenant.ratingMaxScore === "number" ? tenant.ratingMaxScore : 5);
     }).catch(() => { /* ignore — tenant fetch failure shouldn't block the panel */ });
   }, [open, user?.tenantId]);
@@ -699,8 +861,9 @@ export function TicketDetail({
         try {
           await sendEvaluationForTicket(ticket, { config, questionLabel: tEx("evaluationLabel") });
           if (behavior === "closeOnResolve") {
-            await updateTicket(ticket.id, { status: "closed" });
+            const closeRes = await updateTicket(ticket.id, { status: "closed" });
             toast.success(t("ticketClosed"));
+            if (farewellFailed(closeRes)) toast.warning(tEx("farewellNotSent"));
           } else {
             toast.success(tEx("evaluationSentWaiting"));
           }
@@ -716,8 +879,9 @@ export function TicketDetail({
     }
     setIsClosing(true);
     try {
-      await updateTicket(ticket.id, { status: "closed" });
+      const closeRes = await updateTicket(ticket.id, { status: "closed" });
       toast.success(t("ticketClosed"));
+      if (farewellFailed(closeRes)) toast.warning(tEx("farewellNotSent"));
       onRefresh?.();
     } catch {
       toast.error(t("errorClosing"));
@@ -761,7 +925,8 @@ export function TicketDetail({
 
   const handleReturnToQueue = async () => {
     try {
-      await updateTicket(ticket.id, { status: "pending", userId: null });
+      // transferIntent: registra a devolução no histórico de transferências (backend antigo ignora).
+      await updateTicket(ticket.id, { status: "pending", userId: null, transferIntent: "return_to_queue" });
       toast.success(t("returnedToQueue"));
       onRefresh?.();
     } catch {
@@ -910,8 +1075,16 @@ export function TicketDetail({
         toast.success(t("pauseApplied"));
       }
       onRefresh?.();
-    } catch {
-      toast.error(t("errorPause"));
+    } catch (err) {
+      // Tela desatualizada (outra aba, retomada automática, clique duplo): o servidor diz
+      // em que estado o atendimento já está, e a tela só precisa recarregar.
+      const code = getBackendErrorCode(err);
+      if (code === "ERR_TICKET_ALREADY_PAUSED" || code === "ERR_TICKET_NOT_PAUSED") {
+        toast.info(tEx(code === "ERR_TICKET_ALREADY_PAUSED" ? "ticketAlreadyPaused" : "ticketAlreadyResumed"));
+        onRefresh?.();
+      } else {
+        toast.error(t("errorPause"));
+      }
     }
   };
 
@@ -927,8 +1100,17 @@ export function TicketDetail({
     }
   };
 
-  const handleNoteFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    applyNoteFile(e.target.files?.[0] ?? null);
+  const handleNoteFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0] ?? null;
+    if (!file) { applyNoteFile(null); return; }
+    // Android: imagem/vídeo do seletor de mídia pode chegar ilegível (vide lib/picked-file).
+    const ready = await preparePickedFile(file, undefined, { preparingMessage: tMsgInput("pickedFilePreparing") });
+    if (!ready) {
+      e.target.value = "";
+      notifyUnreadablePickedFile(tMsgInput("pickedFileUnreadable"), tMsgInput("pickedFileOpenFiles"), noteFileInputRef.current);
+      return;
+    }
+    applyNoteFile(ready);
   };
 
   const handleNotePaste = (e: React.ClipboardEvent) => {
@@ -963,9 +1145,8 @@ export function TicketDetail({
   const handleSelectGalleryForNote = async (item: GalleryItem) => {
     setNoteGalleryOpen(false);
     try {
-      const response = await fetch(item.url);
-      if (!response.ok) throw new Error("fetch failed");
-      const blob = await response.blob();
+      // Com S3/R2 sem CORS a leitura direta falha: cai no download da galeria pelo backend.
+      const blob = await fetchGalleryBlob(item);
       const file = new File([blob], item.name, { type: item.type || blob.type || "application/octet-stream" });
       applyNoteFile(file);
     } catch { toast.error(t("errorAddingNote")); }
@@ -1011,6 +1192,7 @@ export function TicketDetail({
   const tPrompts = useTranslations("copilotPrompts");
   const tContactSummary = useTranslations("contactSummary");
   const tCopilot = useTranslations("copilot");
+  const tCommon = useTranslations("common");
 
   const handleGenerateContactSummary = async () => {
     if (!contact?.id || loadingContactSummary || contactSummaryCooldown) return;
@@ -1080,8 +1262,8 @@ export function TicketDetail({
         });
       }
       toast.success(t("tagAdded"));
-    } catch {
-      toast.error(t("errorAddingTag"));
+    } catch (err) {
+      toast.error(isTagNotFound(err) ? tCommon("tagNotFoundReload") : t("errorAddingTag"));
     }
   };
 
@@ -1098,8 +1280,8 @@ export function TicketDetail({
         tags: updatedTags as { id: number; name: string; color: string }[],
       });
       toast.success(t("tagRemoved"));
-    } catch {
-      toast.error(t("errorRemovingTag"));
+    } catch (err) {
+      toast.error(isTagNotFound(err) ? tCommon("tagNotFoundReload") : t("errorRemovingTag"));
     }
   };
 
@@ -1251,7 +1433,10 @@ export function TicketDetail({
         ticket.whatsapp?.id ?? "",
         ticket.channel ?? "",
       ].join("");
-      const body = `Protocolo de atendimento: ${protocol}`;
+      // Texto ao cliente sai do catálogo da Região (idioma da empresa), com o PT de antes
+      // de reserva. Os textos normalmente já vieram no boot; a espera tem teto de 3 s.
+      await Promise.race([ensureRegionTexts(), new Promise<void>((resolve) => setTimeout(resolve, 3000))]);
+      const body = getRegionText("ticket.protocolMessage", { protocol }, "Protocolo de atendimento: {protocol}");
       const ch = (ticket.channel || "").toLowerCase();
       if (ch === "waba" || ch === "instagram" || ch === "messenger" || ch === "dialog360" || ch === "gupshup") {
         // idFront e obrigatorio: sem ele, o SendMeta/BSP service cria uma 2a Message
@@ -1393,10 +1578,16 @@ export function TicketDetail({
   };
 
   const handleBloquearChatbot = async (checked: boolean) => {
-    if (!contact?.id || !contact.number) return;
+    // Contato sem número (Instagram, Messenger, Telegram, WebChat) também alterna. O
+    // número só vai no corpo quando existe: `undefined` sai do JSON e o servidor grava
+    // o bloqueio sem tocar no número (mesmo ramo do PUT /contacts sem número).
+    if (!contact?.id) return;
     setBloquearChatbot(checked);
     try {
-      await updateContactBlock(contact.id, { number: contact.number, bloquearChatbot: checked });
+      await updateContactBlock(contact.id, {
+        number: contact.number || (undefined as unknown as string),
+        bloquearChatbot: checked,
+      });
       toast.success(checked ? t("chatbotBlocked") : t("chatbotUnblocked"));
       onRefresh?.();
     } catch {
@@ -1893,11 +2084,11 @@ export function TicketDetail({
     const to = contactNumber || (ticket as any).contact?.number || "";
 
     if (!whatsappId) {
-      toast.error("Canal WABA não identificado (whatsappId ausente)");
+      toast.error(t("wabaCallNoChannel"));
       return;
     }
     if (!to) {
-      toast.error("Número do contato não disponível");
+      toast.error(t("wabaCallNoNumber"));
       return;
     }
 
@@ -1962,9 +2153,9 @@ export function TicketDetail({
         err?.message?.includes('Permission denied') ||
         err?.message?.includes('not allowed')
       ) {
-        toast.error("Microfone bloqueado pelo navegador. Verifique as permissões.");
+        toast.error(t("callMicBlocked"));
       } else {
-        toast.error(`Erro ao ligar: ${err?.message || 'desconhecido'}`);
+        toast.error(t("callError", { error: err?.message || t("callErrorUnknown") }));
       }
     }
   };
@@ -2106,10 +2297,12 @@ export function TicketDetail({
                         {contactPic && <AvatarImage src={contactPic} />}
                         <AvatarFallback className="text-xl">{getInitials(contactName)}</AvatarFallback>
                       </Avatar>
-                      <div className="flex items-center gap-2 mb-2">
+                      <div className="flex flex-wrap items-center gap-2 mb-2">
                         <Badge variant={ticket.isGroup ? "default" : "secondary"}>
                           {ticket.isGroup ? t("group") : t("private")}
                         </Badge>
+                        {/* Atendimento trazido de outro servidor: número que ele tinha lá */}
+                        <TicketMigrationRefBadge migrationRef={ticket.migrationRef} />
                         {!isRestricted && contact?.id && (
                           <Button
                             type="button"
@@ -2162,6 +2355,15 @@ export function TicketDetail({
                             <InfoRow key={idx} icon={ExternalLink} label={field.name} value={String(field.value ?? "")} />
                           ))}
                         </>
+                      )}
+                      {/* Navegadores do WebChat ligados pelo link de convite (PLANO_WEBCHAT_LINK_CONVITE
+                          D16): só aparece com algum ligado; "Desligar" com as travas do convite do Telegram. */}
+                      {!isRestricted && !ticket.isGroup && contact?.id && (
+                        <WebchatLinksRow
+                          contactId={contact.id}
+                          canUnlink={!isRestricted && hasPermission("contacts_edit")}
+                          className="border-t border-border/40 mt-1"
+                        />
                       )}
                       {/* Editar contato: disponível também para grupos (edita o contato do grupo). Telefonia segue oculta via hasTelephony (false em grupo). */}
                       <div className="flex gap-2 mt-2">
@@ -2476,7 +2678,7 @@ export function TicketDetail({
                     </Card>
                   )}
 
-                  {ticket.channel !== "telegram" && (ratingPrivacy !== "enabled" || user?.profile === "admin" || user?.profile === "super") && (
+                  {ticket.channel !== "telegram" && (ratingPrivacy === "disabled" || user?.profile === "admin" || user?.profile === "super") && (
                     <Card>
                       <CardHeader className="py-2">
                         <CardTitle className="text-sm">{t("evaluationLabel")}</CardTitle>
@@ -2685,6 +2887,13 @@ export function TicketDetail({
                           tooltip={!handoffTargetNumber ? t("handoffNoNumber") : undefined}
                         />
                       )}
+                      {telegramInviteAvailable && (
+                        <ActionBtn
+                          icon={Send}
+                          label={tTelegramInvite("actionLabel")}
+                          onClick={() => setTelegramInviteOpen(true)}
+                        />
+                      )}
                     </CardContent>
                   </Card>
 
@@ -2810,6 +3019,8 @@ export function TicketDetail({
                     </Card>
                   )}
 
+                  {/* Funil e oportunidades só com o funil no plano (sem ele as chamadas voltariam 402). */}
+                  {hasFunnelFeature && (
                   <Card>
                     <CardHeader className="py-2">
                       <CardTitle className="text-sm">{t("funnel")}</CardTitle>
@@ -2826,6 +3037,12 @@ export function TicketDetail({
                       </Button>
                     </CardContent>
                   </Card>
+                  )}
+
+                  {/* PLANO_TAREFAS_ATENDIMENTO_LEMBRETES: tarefas do contato (D2 plano; some para restrito, D21; aparece também com o atendimento encerrado, D22) */}
+                  {!isRestricted && contact?.id && (
+                    <ContactTasksCard contactId={contact.id} ticketId={ticket.id} variant="ticket" />
+                  )}
 
                   {kanbans.length > 0 && (
                     <Card>
@@ -2938,8 +3155,13 @@ export function TicketDetail({
                   )}
 
                   <Card>
-                    <CardContent className="py-3 flex items-center justify-between">
-                      <Label className="text-sm">{t("blockChatbot")}</Label>
+                    <CardContent className="py-3 flex items-center justify-between gap-2">
+                      <div className="flex min-w-0 items-center gap-1.5">
+                        <Label className="text-sm">{t("blockChatbot")}</Label>
+                        <HelpPopover label={tRegion("moreInfo")}>
+                          <p>{t("blockChatbotHelp")}</p>
+                        </HelpPopover>
+                      </div>
                       <Switch checked={bloquearChatbot} onCheckedChange={handleBloquearChatbot} />
                     </CardContent>
                   </Card>
@@ -2949,8 +3171,45 @@ export function TicketDetail({
  {/* === INTEGRAÇÕES (como front legado: integracoes) — só listadas se ativas nas configurações === */}
                 <TabsContent value="integracoes" className="mt-0 space-y-3">
                   <p className="text-xs text-muted-foreground">{t("integrationsDesc")}</p>
+                  {aiAgentCardVisible && (
+                    <Card>
+                      <CardContent className="py-3 flex flex-wrap items-center justify-between gap-2">
+                        {/* Largura mínima no texto: no painel estreito os botões descem para a
+                            linha de baixo em vez de espremer o título até "A.". */}
+                        <div className="min-w-[10rem] flex-1">
+                          <span className="text-sm font-medium flex items-center gap-1.5">
+                            <Bot className={cn("h-3.5 w-3.5 shrink-0", aiAgentPaused ? "text-amber-500" : "text-violet-500")} />
+                            <span className="truncate">{tAiRelease("cardTitle")}</span>
+                            <HelpPopover label={tRegion("moreInfo")}>
+                              <p>{tAiRelease("pauseHelp")}</p>
+                              <p>{tAiRelease("help")}</p>
+                            </HelpPopover>
+                          </span>
+                          <p className="text-xs text-muted-foreground">
+                            {aiAgentPaused ? tAiRelease("cardStatusPaused") : tAiRelease("cardStatus")}
+                          </p>
+                        </div>
+                        <div className="flex shrink-0 items-center gap-2">
+                          <AiAgentPauseButton ticket={ticket} />
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="h-8 shrink-0 text-destructive hover:text-destructive"
+                            onClick={() => setReleaseAiAgentOpen(true)}
+                          >
+                            <BotOff className="mr-1.5 h-3.5 w-3.5" /> {tAiRelease("cardButton")}
+                          </Button>
+                        </div>
+                      </CardContent>
+                    </Card>
+                  )}
+                  <ReleaseAiAgentDialog
+                    ticketId={ticket.id}
+                    open={releaseAiAgentOpen}
+                    onOpenChange={setReleaseAiAgentOpen}
+                  />
                   {activeIntegrations.length === 0 ? (
-                    <p className="text-xs text-muted-foreground">{t("noIntegrations")}</p>
+                    aiAgentCardVisible ? null : <p className="text-xs text-muted-foreground">{t("noIntegrations")}</p>
                   ) : (
                     activeIntegrations.map((c) => (
                       <Card key={c.settingKey}>
@@ -3426,6 +3685,22 @@ export function TicketDetail({
       onSaved={() => onRefresh?.()}
     />
 
+    {/* Convite para o Telegram: monta só quando o botão existe (ou o diálogo já está aberto). */}
+    {(telegramInviteAvailable || telegramInviteOpen) && contact?.id != null && (
+      <TelegramInviteDialog
+        open={telegramInviteOpen}
+        onOpenChange={setTelegramInviteOpen}
+        contact={{
+          id: contact.id,
+          name: contactName,
+          number: contact.number || null,
+          email: contact.email || null,
+        }}
+        mode="ticket"
+        onSendInTicket={sendTelegramInviteInTicket}
+      />
+    )}
+
     {/* Modal: Mensagens Favoritas */}
     <Dialog open={starredOpen} onOpenChange={(v) => { setStarredOpen(v); if (!v) setStarredMessages([]); }}>
       <DialogContent className="max-w-md max-h-[80vh] flex flex-col overflow-hidden">
@@ -3454,7 +3729,7 @@ export function TicketDetail({
                   <p className="text-muted-foreground">
                     {new Date(msg.createdAt).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" })}
                   </p>
-                  <p className="truncate text-foreground">{msg.mediaUrl && !msg.body ? `[${msg.mediaType ?? "mídia"}]` : msg.body}</p>
+                  <p className="truncate text-foreground">{msg.mediaUrl && !msg.body ? `[${msg.mediaType ?? t("mediaFallback")}]` : msg.body}</p>
                 </button>
               ))}
             </div>
@@ -3630,14 +3905,16 @@ export function TicketDetail({
     {/* Lightbox: mídia de log de nota */}
     <Dialog open={!!noteLogLightboxSrc} onOpenChange={(v) => { if (!v) setNoteLogLightboxSrc(null); }}>
       <DialogContent className="max-w-4xl w-full h-[85vh] flex flex-col p-0 gap-0">
-        <DialogTitle className="sr-only">mídia</DialogTitle>
+        <DialogTitle className="sr-only">{t("mediaFallback")}</DialogTitle>
         <div className="flex items-center justify-between px-4 py-3 border-b shrink-0 pr-12">
-          <span className="text-sm font-medium truncate">{noteLogLightboxSrc?.split("/").pop() ?? "imagem"}</span>
+          <span className="text-sm font-medium truncate">{noteLogLightboxSrc?.split("/").pop() ?? t("imageFallback")}</span>
           <button
             type="button"
             className="rounded-full p-1.5 hover:bg-muted transition-colors"
-            onClick={() => { const a = document.createElement("a"); a.href = noteLogLightboxSrc!; a.download = noteLogLightboxSrc!.split("/").pop() ?? "imagem"; a.click(); }}
-            title="Download"
+            // Link com "download" para outro domínio (S3 ou API em outro subdomínio) é
+            // ignorado e trocava a aba do atendimento pela imagem.
+            onClick={() => { if (noteLogLightboxSrc) downloadMediaFile(noteLogLightboxSrc, mediaFileNameFromUrl(noteLogLightboxSrc, "imagem")); }}
+            title={tCommon("download")}
           >
             <FileDown className="h-4 w-4" />
           </button>
@@ -3974,9 +4251,21 @@ export function TicketDetail({
                   </div>
                   {op.pipeline != null && <p className="text-muted-foreground">{t("pipelineLabel")} {String((op.pipeline as Record<string, unknown>)?.name ?? op.pipelineId ?? "")}</p>}
                   {op.stage != null && <p className="text-muted-foreground">{t("stageLabel")} {String((op.stage as Record<string, unknown>)?.name ?? "")}</p>}
-                  {op.value != null && <p className="text-muted-foreground">{t("valueLabel", { value: Number(op.value).toLocaleString("pt-BR", { minimumFractionDigits: 2 }) })}</p>}
+                  {op.value != null && <p className="text-muted-foreground">{t("valueLabelMoney", { value: formatMoney(op.value) })}</p>}
                   <p className="text-muted-foreground">{t("statusLabel")} {op.status === "open" ? t("statusOpen") : op.status === "win" ? t("statusWin") : op.status === "lose" ? t("statusLose") : String(op.status ?? "")}</p>
                   {op.createdAt != null && <p className="text-muted-foreground">{new Date(op.createdAt as string).toLocaleDateString("pt-BR")}</p>}
+                  {canOpenFunnelPage && op.id != null && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setOportunidadesOpen(false);
+                        router.push(`/funil/kanban?opportunity=${encodeURIComponent(String(op.id))}`);
+                      }}
+                      className="mt-1 inline-flex items-center gap-1 text-primary hover:underline"
+                    >
+                      <ExternalLink className="h-3 w-3" /> {t("viewInFunnel")}
+                    </button>
+                  )}
                 </div>
               ))}
             </div>
@@ -4012,9 +4301,13 @@ export function TicketDetail({
             <div className="space-y-2 p-1">
               {ticketLogs.map((log, i) => (
                 <div key={log.id ?? i} className="border rounded p-2 text-xs space-y-0.5">
-                  <p className="font-medium">{log.user?.name ?? "Bot"}</p>
+                  <p className="font-medium">{log.user?.name ?? t("logActorBot")}</p>
                   <p>{TICKET_LOG_LABELS[log.type ?? ""] ?? log.type ?? ""}</p>
-                  {log.createdAt && <p className="text-muted-foreground">{new Date(log.createdAt).toLocaleString("pt-BR")}</p>}
+                  {log.createdAt && (
+                    <p className="text-muted-foreground">
+                      {formatDateTime(log.createdAt, { dateStyle: "short", timeStyle: "short" })}
+                    </p>
+                  )}
                 </div>
               ))}
             </div>
@@ -4434,6 +4727,29 @@ function formatContactAddress(contact?: Ticket["contact"] | null): string {
   const street = [part(contact.logradouro), part(contact.numeroEndereco)].filter(Boolean).join(", ");
   const cityUf = [part(contact.cidade), part(contact.estado)].filter(Boolean).join("/");
   return [street, part(contact.complemento), part(contact.bairro), cityUf, part(contact.cep)].filter(Boolean).join(" - ");
+}
+
+// Explicação ao lado de um controle: Popover (abre no toque, ao contrário do Tooltip do Radix).
+function HelpPopover({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <Popover>
+      <PopoverTrigger asChild>
+        <button
+          type="button"
+          aria-label={label}
+          className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-muted-foreground opacity-70 transition-opacity hover:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+        >
+          <Info className="h-3.5 w-3.5" />
+        </button>
+      </PopoverTrigger>
+      <PopoverContent
+        align="start"
+        className="w-72 max-w-[calc(100vw-2rem)] space-y-1.5 p-3 text-xs font-normal leading-relaxed text-muted-foreground"
+      >
+        {children}
+      </PopoverContent>
+    </Popover>
+  );
 }
 
 function InfoRow({ icon: Icon, label, value, onCopy, sensitive = true }: { icon: React.ElementType; label: string; value: string; onCopy?: () => void; sensitive?: boolean }) {

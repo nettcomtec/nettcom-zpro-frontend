@@ -1,6 +1,7 @@
 "use client";
 
 import { HelpCircle } from "lucide-react";
+import { useTranslations } from "next-intl";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
@@ -16,6 +17,7 @@ export interface PageHelpProps {
 }
 
 export function PageHelp({ description, sections }: PageHelpProps) {
+  const t = useTranslations("pageHelp");
   return (
     <Popover>
       <PopoverTrigger asChild>
@@ -23,7 +25,7 @@ export function PageHelp({ description, sections }: PageHelpProps) {
           variant="ghost"
           size="icon"
           className="h-7 w-7 text-muted-foreground/60 hover:text-muted-foreground"
-          aria-label="Ajuda da página"
+          aria-label={t("ariaLabel")}
         >
           <HelpCircle className="h-4 w-4" />
         </Button>
@@ -36,7 +38,7 @@ export function PageHelp({ description, sections }: PageHelpProps) {
       >
         <div className="flex items-center gap-2 px-4 pt-4 pb-3 border-b shrink-0">
           <HelpCircle className="h-4 w-4 text-primary shrink-0" />
-          <span className="font-semibold text-foreground">Como usar esta página</span>
+          <span className="font-semibold text-foreground">{t("title")}</span>
         </div>
         <div className="overflow-y-auto min-h-0 flex-1 px-4 py-3">
           <p className="text-muted-foreground leading-relaxed">{description}</p>

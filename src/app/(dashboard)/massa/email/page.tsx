@@ -180,7 +180,7 @@ export default function MassaEmailPage() {
                 rows={8}
                 value={recipientsText}
                 onChange={e => setRecipientsText(e.target.value)}
-                placeholder={"nome@dominio.com\noutro@dominio.com"}
+                placeholder={t("recipientsPlaceholder")}
               />
               <p className="text-xs text-muted-foreground">
                 {t("recipientsHint", { count: recipients.length })}

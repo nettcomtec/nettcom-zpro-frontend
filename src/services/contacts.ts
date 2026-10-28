@@ -1,4 +1,5 @@
-import api from "@/lib/api";
+import api, { BACKGROUND_REQUEST } from "@/lib/api";
+import { getBackendErrorCode } from "@/lib/backend-error-code";
 
 export interface Contact {
   id: number;
@@ -58,6 +59,7 @@ export interface Contact {
   bsuid?: string | null;
   username?: string | null;
   parentBsuid?: string | null;
+  isGroup?: boolean;
 }
 
 export interface ContactPayload {
@@ -287,12 +289,56 @@ export async function smartImportContacts(
   return data;
 }
 
-export async function syncContacts() {
-  return api.post("/contacts/sync");
+// Resultado por canal de /contacts/sync e /groups/sync: a falha de um canal
+// não derruba mais a resposta. 400 só quando NENHUM canal sincronizou, com a
+// mesma lista no corpo. Backend antigo não manda `failedChannels` (lista vazia).
+export interface SyncChannelFailure {
+  id: number;
+  name: string;
+  type: string;
+  reason: string;
+  code?: string;
 }
 
-export async function syncContactGroups() {
-  return api.post("/groups/sync");
+// Canal que passou do prazo da resposta (20 s) e segue sincronizando em segundo plano.
+export interface SyncChannelPending {
+  id: number;
+  name: string;
+  type: string;
+}
+
+export interface SyncChannelsResult {
+  total?: number;
+  failedChannels: SyncChannelFailure[];
+  pendingChannels: SyncChannelPending[];
+}
+
+function parseSyncChannelsResult(data: unknown): SyncChannelsResult | null {
+  const body = data as { total?: unknown; failedChannels?: unknown; pendingChannels?: unknown } | null | undefined;
+  if (!body || !Array.isArray(body.failedChannels)) return null;
+  const byId = <T extends { id: number }>(list: unknown): T[] =>
+    Array.isArray(list) ? (list as T[]).filter((f) => f && typeof f.id === "number") : [];
+  return {
+    total: typeof body.total === "number" ? body.total : undefined,
+    failedChannels: byId<SyncChannelFailure>(body.failedChannels),
+    pendingChannels: byId<SyncChannelPending>(body.pendingChannels),
+  };
+}
+
+/** Lista de canais do 400 "nenhum canal sincronizou" (null em qualquer outro erro). */
+export function extractSyncChannelsFailure(err: unknown): SyncChannelsResult | null {
+  const e = err as { data?: unknown; response?: { data?: unknown } } | null | undefined;
+  return parseSyncChannelsResult(e?.data ?? e?.response?.data);
+}
+
+export async function syncContacts(): Promise<SyncChannelsResult> {
+  const { data } = await api.post("/contacts/sync");
+  return parseSyncChannelsResult(data) ?? { failedChannels: [], pendingChannels: [] };
+}
+
+export async function syncContactGroups(): Promise<SyncChannelsResult> {
+  const { data } = await api.post("/groups/sync");
+  return parseSyncChannelsResult(data) ?? { failedChannels: [], pendingChannels: [] };
 }
 
 export interface DuplicateCleanupPairResult {
@@ -328,6 +374,12 @@ export async function checkNinthDigit(): Promise<DuplicateCleanupResult> {
 
 export async function removeContactProfilePicture(contactId: number) {
   return api.post(`/contactsRemovePicture/${contactId}`);
+}
+
+// Foto do WhatsApp vencida: o backend busca de novo em segundo plano pela sessão
+// do canal do atendimento e a foto nova chega pelo contact:update do socket.
+export async function refreshContactPicture(ticketId: number) {
+  return api.post(`/contactsRefreshPicture/${ticketId}`, undefined, BACKGROUND_REQUEST);
 }
 
 export async function updateContactBlock(contactId: number, data: { number: string; bloquearContato?: boolean; bloquearChatbot?: boolean }) {
@@ -430,4 +482,52 @@ export async function updateContactNumber(contactId: number, number: string) {
 
 export async function migrateContact(contactId: number) {
   return api.post("/contactMigrate", { contactId });
+}
+
+// Convite do Telegram: link t.me/<bot>?start=<código> de uso único (7 dias) que liga o
+// Telegram da pessoa a este contato. O código só existe nesta resposta (o backend guarda
+// o hash) e o @ do bot vem pronto, porque o front não conhece o username.
+export interface TelegramInviteResponse {
+  link: string;
+  expiresAt: string;
+  whatsappId: number;
+  botUsername: string;
+  contactId: number;
+}
+
+export async function createTelegramInvite(contactId: number | string, body: { whatsappId?: number }) {
+  return api.post<TelegramInviteResponse>(`/contacts/${contactId}/telegram-invite`, body);
+}
+
+// Navegadores do WebChat ligados ao contato pelo link de convite (PLANO_WEBCHAT_LINK_CONVITE
+// D16/D21). `available: false` = servidor sem a rota (backend antigo, 404 sem código — fica
+// memorizado na carga da página para não repetir a cada contato aberto) ou falha da leitura:
+// a tela não mostra nada.
+export interface ContactWebchatLinks {
+  count: number;
+  available: boolean;
+}
+
+let webchatLinksRouteMissing = false;
+
+export async function getContactWebchatLinks(contactId: number | string): Promise<ContactWebchatLinks> {
+  if (webchatLinksRouteMissing) return { count: 0, available: false };
+  try {
+    const { data } = await api.get<{ count?: unknown }>(`/contacts/${contactId}/webchat-links`, BACKGROUND_REQUEST);
+    const count = Number(data?.count);
+    return { count: Number.isFinite(count) && count > 0 ? Math.floor(count) : 0, available: true };
+  } catch (err) {
+    const e = err as { status?: unknown; response?: { status?: unknown } } | null;
+    const status = e?.status ?? e?.response?.status;
+    // Rota inexistente responde 404 sem código; contato inexistente traz código e não marca.
+    if (status === 404 && !getBackendErrorCode(err)) webchatLinksRouteMissing = true;
+    return { count: 0, available: false };
+  }
+}
+
+/** Desliga todos os navegadores do contato; os links já enviados e ainda não abertos deixam de valer. */
+export async function deleteContactWebchatLinks(contactId: number | string): Promise<{ removed: number }> {
+  const { data } = await api.delete<{ removed?: unknown }>(`/contacts/${contactId}/webchat-links`);
+  const removed = Number(data?.removed);
+  return { removed: Number.isFinite(removed) && removed > 0 ? Math.floor(removed) : 0 };
 }

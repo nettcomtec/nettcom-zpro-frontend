@@ -11,6 +11,7 @@ import { loginService } from "@/services/auth";
 import { useAuthStore } from "@/stores/auth-store";
 import { connectWithToken } from "@/lib/socket";
 import { useLocale } from "@/i18n/locale-provider";
+import { getLoginFailureKind } from "@/lib/login-failure-kind";
 
 export type MasterkeyFormFields = {
   email: string;
@@ -78,6 +79,7 @@ export function useMasterkeyForm() {
         INVALID_LICENSE: t("errorUserLicense"),
         INVALID_DOMAIN: t("errorDomainLicense"),
         LICENSE_ERROR: t("errorServerLicense"),
+        LICENSE_UNAVAILABLE: t("errorServerLicense"),
         INVALID_TENANT: t("errorInvalidTenant"),
         ERR_USER_INACTIVE: t("errorUserInactive"),
         ERR_TENANT_INACTIVE: t("errorTenantInactive"),
@@ -90,7 +92,14 @@ export function useMasterkeyForm() {
       // Mesmo atalho do login por senha: recusa por dominio nao e erro de
       // credencial, e sem um caminho visivel o cliente so ve um toast sem saber o
       // motivo. Antes esta tela mapeava o codigo mas nao oferecia a saida.
-      const message = errorMap[errorMsg || ""] || t("errorInvalidCredentials");
+      const failureKind = getLoginFailureKind(error);
+      const message =
+        errorMap[errorMsg || ""] ||
+        (failureKind === "network"
+          ? t("errorNetwork")
+          : failureKind === "server"
+            ? t("errorServerUnavailable")
+            : t("errorInvalidCredentials"));
       if (errorMsg === "INVALID_DOMAIN") {
         toast.error(message, {
           action: {

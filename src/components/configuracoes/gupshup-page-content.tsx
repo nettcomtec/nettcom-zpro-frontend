@@ -424,7 +424,7 @@ Include only the components requested.`
       setAiDialogOpen(false)
       toast.success(t("tplCreateSuccess"))
     } catch (e: any) {
-      toast.error(e?.response?.data?.error === "ERR_COPILOT_NO_API_KEY" ? "Copilot sem API key configurada" : t("tplCreateError"))
+      toast.error(e?.response?.data?.error === "ERR_COPILOT_NO_API_KEY" ? t("aiCopilotNoApiKey") : t("tplCreateError"))
     } finally {
       setAiGenerating(false)
     }
@@ -547,7 +547,7 @@ Include only the components requested.`
         <TabsList className="grid grid-cols-3 w-full sm:w-auto">
           <TabsTrigger value="channels">{t("tabChannels")}</TabsTrigger>
           <TabsTrigger value="templates">{t("tabTemplates")}</TabsTrigger>
-          <TabsTrigger value="credentials">Credenciais</TabsTrigger>
+          <TabsTrigger value="credentials">{t("tabCredentials")}</TabsTrigger>
         </TabsList>
 
         {/* ─── CHANNELS TAB ─────────────────────────────────────────────── */}
@@ -933,14 +933,14 @@ Include only the components requested.`
                 onClick={() => { setAiPrompt(""); setAiDialogOpen(true); }}
               >
                 <Sparkles className="w-4 h-4 mr-1 text-purple-500" />
-                Gerar com IA
+                {t("generateAI")}
               </Button>
             </div>
           </DialogHeader>
           <div className="space-y-4">
             {/* Basic info */}
             <div className="space-y-3 border rounded-md p-3">
-              <p className="text-sm font-semibold text-muted-foreground">Informacoes basicas</p>
+              <p className="text-sm font-semibold text-muted-foreground">{t("basicInfoTitle")}</p>
               <div className="space-y-1">
                 <Label>{t("tplNameLabel")}</Label>
                 <Input
@@ -951,7 +951,7 @@ Include only the components requested.`
                   disabled={!!editingTpl}
                 />
                 <p className="text-xs text-muted-foreground">
-                  {editingTpl ? t("tplImmutableNote") : "apenas minusculas, numeros e underscore"}
+                  {editingTpl ? t("tplImmutableNote") : t("nameHint")}
                 </p>
               </div>
               <div className="grid grid-cols-2 gap-3">
@@ -963,16 +963,16 @@ Include only the components requested.`
                       <SelectItem value="pt_BR">Portugues (BR)</SelectItem>
                       <SelectItem value="en_US">English (US)</SelectItem>
                       <SelectItem value="es">Espanol</SelectItem>
-                      <SelectItem value="fr">Frances</SelectItem>
+                      <SelectItem value="fr">{t("langFr")}</SelectItem>
                       <SelectItem value="de">Deutsch</SelectItem>
                       <SelectItem value="it">Italiano</SelectItem>
-                      <SelectItem value="ja">Japones</SelectItem>
-                      <SelectItem value="zh_CN">Chines (Simpl.)</SelectItem>
-                      <SelectItem value="ar">Arabe</SelectItem>
+                      <SelectItem value="ja">{t("langJa")}</SelectItem>
+                      <SelectItem value="zh_CN">{t("langZh")}</SelectItem>
+                      <SelectItem value="ar">{t("langAr")}</SelectItem>
                       <SelectItem value="hi">Hindi</SelectItem>
-                      <SelectItem value="id">Indonesio</SelectItem>
-                      <SelectItem value="ru">Russo</SelectItem>
-                      <SelectItem value="tr">Turco</SelectItem>
+                      <SelectItem value="id">{t("langId")}</SelectItem>
+                      <SelectItem value="ru">{t("langRu")}</SelectItem>
+                      <SelectItem value="tr">{t("langTr")}</SelectItem>
                     </SelectContent>
                   </Select>
                 </div>
@@ -981,9 +981,9 @@ Include only the components requested.`
                   <Select value={tplCategory} onValueChange={setTplCategory}>
                     <SelectTrigger><SelectValue /></SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="MARKETING">Marketing</SelectItem>
-                      <SelectItem value="UTILITY">Utilidade</SelectItem>
-                      <SelectItem value="AUTHENTICATION">Autenticacao</SelectItem>
+                      <SelectItem value="MARKETING">{t("catMarketing")}</SelectItem>
+                      <SelectItem value="UTILITY">{t("catUtility")}</SelectItem>
+                      <SelectItem value="AUTHENTICATION">{t("catAuthentication")}</SelectItem>
                     </SelectContent>
                   </Select>
                 </div>
@@ -993,15 +993,15 @@ Include only the components requested.`
             {/* Header opcional — TEXT, IMAGE, VIDEO, DOCUMENT */}
             <div className="space-y-2 border rounded-md p-3">
               <div className="flex items-center justify-between">
-                <p className="text-sm font-semibold text-muted-foreground">Header (opcional)</p>
+                <p className="text-sm font-semibold text-muted-foreground">{t("headerOptional")}</p>
                 <Select value={tplHeaderFormat} onValueChange={(v) => setTplHeaderFormat(v as any)}>
                   <SelectTrigger className="w-36 h-8 text-xs"><SelectValue /></SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="NONE">Sem header</SelectItem>
-                    <SelectItem value="TEXT">Texto</SelectItem>
-                    <SelectItem value="IMAGE">Imagem</SelectItem>
-                    <SelectItem value="VIDEO">Video</SelectItem>
-                    <SelectItem value="DOCUMENT">Documento</SelectItem>
+                    <SelectItem value="NONE">{t("headerNone")}</SelectItem>
+                    <SelectItem value="TEXT">{t("headerText")}</SelectItem>
+                    <SelectItem value="IMAGE">{t("headerImage")}</SelectItem>
+                    <SelectItem value="VIDEO">{t("headerVideo")}</SelectItem>
+                    <SelectItem value="DOCUMENT">{t("headerDocument")}</SelectItem>
                   </SelectContent>
                 </Select>
               </div>
@@ -1010,10 +1010,10 @@ Include only the components requested.`
                   <Input
                     value={tplHeaderText}
                     onChange={(e) => setTplHeaderText(e.target.value)}
-                    placeholder="Titulo do cabecalho (texto)"
+                    placeholder={t("headerTextPlaceholder")}
                     maxLength={60}
                   />
-                  <p className="text-xs text-muted-foreground">Maximo 60 caracteres. Use {"{{1}}"} para variavel.</p>
+                  <p className="text-xs text-muted-foreground">{t.raw("headerTextHint") as string}</p>
                 </>
               )}
               {(tplHeaderFormat === "IMAGE" || tplHeaderFormat === "VIDEO" || tplHeaderFormat === "DOCUMENT") && (
@@ -1022,11 +1022,11 @@ Include only the components requested.`
                     <Input
                       value={tplHeaderMediaUrl}
                       onChange={(e) => setTplHeaderMediaUrl(e.target.value)}
-                      placeholder="URL da midia (https://...)"
+                      placeholder={t("headerMediaUrlPlaceholder")}
                       className="flex-1"
                     />
                     <Button type="button" variant="outline" size="sm" onClick={() => setTplGalleryOpen(true)}>
-                      <ImageIcon className="w-4 h-4 mr-1" /> Galeria
+                      <ImageIcon className="w-4 h-4 mr-1" /> {t("galleryButton")}
                     </Button>
                   </div>
                   {tplHeaderMediaUrl && tplHeaderFormat === "IMAGE" && (
@@ -1034,7 +1034,7 @@ Include only the components requested.`
                     <img src={tplHeaderMediaUrl} alt="header preview" className="max-h-32 rounded border" />
                   )}
                   <p className="text-xs text-muted-foreground">
-                    {tplHeaderFormat === "IMAGE" ? "JPG/PNG max 5MB" : tplHeaderFormat === "VIDEO" ? "MP4 max 16MB" : "PDF max 100MB"}
+                    {tplHeaderFormat === "IMAGE" ? t("imageHint") : tplHeaderFormat === "VIDEO" ? t("videoHint") : t("documentHint")}
                   </p>
                 </>
               )}
@@ -1042,43 +1042,43 @@ Include only the components requested.`
 
             {/* Body obrigatorio */}
             <div className="space-y-2 border rounded-md p-3">
-              <p className="text-sm font-semibold text-muted-foreground">Corpo da mensagem *</p>
+              <p className="text-sm font-semibold text-muted-foreground">{t("bodyRequired")}</p>
               <textarea
                 value={tplBody}
                 onChange={(e) => setTplBody(e.target.value)}
                 rows={4}
                 maxLength={1024}
-                placeholder="Ola {{1}}, seja bem-vindo!"
+                placeholder={t("bodyPlaceholderEx")}
                 className="flex w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
               />
-              <p className="text-xs text-muted-foreground">Use {"{{1}}"}, {"{{2}}"}... para variaveis. Maximo 1024 caracteres.</p>
+              <p className="text-xs text-muted-foreground">{t.raw("bodyHint") as string}</p>
             </div>
 
             {/* Footer opcional */}
             <div className="space-y-2 border rounded-md p-3">
-              <p className="text-sm font-semibold text-muted-foreground">Footer (opcional)</p>
+              <p className="text-sm font-semibold text-muted-foreground">{t("footerOptional")}</p>
               <Input
                 value={tplFooter}
                 onChange={(e) => setTplFooter(e.target.value)}
-                placeholder="Texto do rodape"
+                placeholder={t("footerPlaceholder")}
                 maxLength={60}
               />
-              <p className="text-xs text-muted-foreground">Maximo 60 caracteres. Sem variaveis.</p>
+              <p className="text-xs text-muted-foreground">{t("footerHint")}</p>
             </div>
 
             {/* Buttons opcional — paridade com WABA (QUICK_REPLY/URL/PHONE_NUMBER/OTP) */}
             <TemplateButtonsEditor
               buttons={tplButtons}
               onChange={setTplButtons}
-              title="Botoes (opcional, ate 3)"
+              title={t("buttonsOptionalShort")}
             />
 
             {/* Preview */}
             <div className="space-y-2 border rounded-md p-3 bg-[#e5ddd5]">
-              <p className="text-xs font-semibold text-gray-700">Preview</p>
+              <p className="text-xs font-semibold text-gray-700">{t("previewTitle")}</p>
               <div className="bg-white rounded-lg shadow-sm p-3 space-y-1.5 max-w-sm">
                 {tplHeaderText && <p className="font-bold text-sm text-gray-900">{tplHeaderText}</p>}
-                <p className="text-sm text-gray-900 whitespace-pre-wrap">{tplBody || "Corpo da mensagem"}</p>
+                <p className="text-sm text-gray-900 whitespace-pre-wrap">{tplBody || t("previewBodyDefault")}</p>
                 {tplFooter && <p className="text-xs text-gray-500">{tplFooter}</p>}
                 {tplButtons.some((b) => b.text.trim()) && (
                   <div className="pt-1 space-y-1 border-t mt-2">
@@ -1198,77 +1198,77 @@ Include only the components requested.`
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <Sparkles className="w-4 h-4 text-purple-500" />
-              Gerar template via IA Copilot
+              {t("aiTitle")}
             </DialogTitle>
             <DialogDescription>
-              Descreva o objetivo do template em linguagem natural. O Copilot gera nome, BODY e componentes opcionais.
+              {t("aiDesc")}
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-3">
             <div className="space-y-1">
-              <Label>O que voce quer enviar?</Label>
+              <Label>{t("aiPromptLabel")}</Label>
               <Textarea
                 value={aiPrompt}
                 onChange={(e) => setAiPrompt(e.target.value)}
                 rows={4}
-                placeholder="Ex: Mensagem de boas vindas pra novos clientes da loja, com nome do cliente e botao 'Ver catalogo'"
+                placeholder={t("aiPromptPlaceholder")}
               />
             </div>
             <div className="grid grid-cols-2 gap-3">
               <div className="space-y-1">
-                <Label>Idioma</Label>
+                <Label>{t("tplLangLabel")}</Label>
                 <Select value={tplLanguage} onValueChange={setTplLanguage}>
                   <SelectTrigger><SelectValue /></SelectTrigger>
                   <SelectContent>
                     <SelectItem value="pt_BR">Portugues (BR)</SelectItem>
                     <SelectItem value="en_US">English (US)</SelectItem>
                     <SelectItem value="es">Espanol</SelectItem>
-                    <SelectItem value="fr">Frances</SelectItem>
+                    <SelectItem value="fr">{t("langFr")}</SelectItem>
                     <SelectItem value="de">Deutsch</SelectItem>
                     <SelectItem value="it">Italiano</SelectItem>
-                    <SelectItem value="ja">Japones</SelectItem>
-                    <SelectItem value="zh_CN">Chines (Simpl.)</SelectItem>
-                    <SelectItem value="ar">Arabe</SelectItem>
+                    <SelectItem value="ja">{t("langJa")}</SelectItem>
+                    <SelectItem value="zh_CN">{t("langZh")}</SelectItem>
+                    <SelectItem value="ar">{t("langAr")}</SelectItem>
                     <SelectItem value="hi">Hindi</SelectItem>
-                    <SelectItem value="id">Indonesio</SelectItem>
-                    <SelectItem value="ru">Russo</SelectItem>
-                    <SelectItem value="tr">Turco</SelectItem>
+                    <SelectItem value="id">{t("langId")}</SelectItem>
+                    <SelectItem value="ru">{t("langRu")}</SelectItem>
+                    <SelectItem value="tr">{t("langTr")}</SelectItem>
                   </SelectContent>
                 </Select>
               </div>
               <div className="space-y-1">
-                <Label>Categoria</Label>
+                <Label>{t("tplCategoryLabel")}</Label>
                 <Select value={tplCategory} onValueChange={setTplCategory}>
                   <SelectTrigger><SelectValue /></SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="MARKETING">Marketing</SelectItem>
-                    <SelectItem value="UTILITY">Utilidade</SelectItem>
-                    <SelectItem value="AUTHENTICATION">Autenticacao</SelectItem>
+                    <SelectItem value="MARKETING">{t("catMarketing")}</SelectItem>
+                    <SelectItem value="UTILITY">{t("catUtility")}</SelectItem>
+                    <SelectItem value="AUTHENTICATION">{t("catAuthentication")}</SelectItem>
                   </SelectContent>
                 </Select>
               </div>
             </div>
             <div className="space-y-2 border rounded-md p-3">
-              <p className="text-sm font-semibold text-muted-foreground">Componentes a incluir</p>
+              <p className="text-sm font-semibold text-muted-foreground">{t("aiComponentsTitle")}</p>
               <label className="flex items-center justify-between text-sm">
-                <span>Header (texto)</span>
+                <span>{t("aiIncludeHeader")}</span>
                 <Switch checked={aiIncludeHeader} onCheckedChange={setAiIncludeHeader} />
               </label>
               <label className="flex items-center justify-between text-sm">
-                <span>Footer</span>
+                <span>{t("aiIncludeFooter")}</span>
                 <Switch checked={aiIncludeFooter} onCheckedChange={setAiIncludeFooter} />
               </label>
               <label className="flex items-center justify-between text-sm">
-                <span>Botoes Quick Reply</span>
+                <span>{t("aiIncludeButtons")}</span>
                 <Switch checked={aiIncludeButtons} onCheckedChange={setAiIncludeButtons} />
               </label>
             </div>
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setAiDialogOpen(false)} disabled={aiGenerating}>Cancelar</Button>
+            <Button variant="outline" onClick={() => setAiDialogOpen(false)} disabled={aiGenerating}>{t("aiCancel")}</Button>
             <Button onClick={generateTemplateAI} disabled={aiGenerating || !aiPrompt.trim()}>
               {aiGenerating ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Sparkles className="w-4 h-4 mr-2" />}
-              Gerar
+              {t("aiGenerate")}
             </Button>
           </DialogFooter>
         </DialogContent>

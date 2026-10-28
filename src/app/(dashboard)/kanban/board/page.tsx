@@ -169,12 +169,10 @@ interface KanbanCardProps {
   onStartTicket: (contact: KanbanContact, ch: typeof CHANNEL_TYPES[0], connections: { id: number; name: string }[]) => void;
   channelOptions: { ch: typeof CHANNEL_TYPES[0]; connections: { id: number; name: string }[] }[];
   onTouchStart: (e: React.TouchEvent<HTMLElement>, item: { contact: KanbanContact; laneId: number }) => void;
-  onTouchMove: (e: React.TouchEvent) => void;
-  onTouchEnd: (e: React.TouchEvent) => void;
   onOpenCrm: (contact: KanbanContact) => void;
 }
 
-function KanbanCard({ contact, laneId, onDragStart, onRemove, onStartTicket, channelOptions, onTouchStart, onTouchMove, onTouchEnd, onOpenCrm }: KanbanCardProps) {
+function KanbanCard({ contact, laneId, onDragStart, onRemove, onStartTicket, channelOptions, onTouchStart, onOpenCrm }: KanbanCardProps) {
   const t = useTranslations("kanbanBoardPage");
   const { isLiveMode } = useLiveMode();
   const walletName =
@@ -192,9 +190,7 @@ function KanbanCard({ contact, laneId, onDragStart, onRemove, onStartTicket, cha
         onDragStart(contact, laneId);
       }}
       onTouchStart={(e) => onTouchStart(e, { contact, laneId })}
-      onTouchMove={onTouchMove}
-      onTouchEnd={onTouchEnd}
-      className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg p-3 shadow-sm cursor-grab active:cursor-grabbing hover:shadow-md transition-all hover:-translate-y-0.5 space-y-2 select-none touch-none"
+      className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg p-3 shadow-sm cursor-grab active:cursor-grabbing hover:shadow-md transition-all hover:-translate-y-0.5 space-y-2 select-none [-webkit-touch-callout:none]"
     >
       {/* Header: avatar + name + actions */}
       <div className="flex items-start gap-2">
@@ -711,8 +707,12 @@ export default function KanbanBoardPage() {
 
   // ── Drag & drop ──────────────────────────────────────────────────────────
 
-  const { touchStart, touchMove, touchEnd } = useTouchDrag<{ contact: KanbanContact; laneId: number }>({
+  // Touch: segurar o card ~300 ms; antes disso o dedo rola a lane
+  const { touchStart } = useTouchDrag<{ contact: KanbanContact; laneId: number }>({
     dataAttr: "data-lane-id",
+    // Mesmo auto-scroll de borda do drag nativo, usando a posicao do dedo
+    onMove: (clientX) => updateEdgeAutoScroll(clientX),
+    onEnd: stopEdgeAutoScroll,
     onDrop: ({ contact, laneId: fromLaneId }, zoneId) => {
       const targetLaneId = Number(zoneId);
       if (fromLaneId === targetLaneId) return;
@@ -728,18 +728,6 @@ export default function KanbanBoardPage() {
       setDirty(true);
     },
   });
-
-  // Touch: mesmo auto-scroll de borda do drag nativo, usando a posicao do dedo
-  const handleCardTouchMove = (e: React.TouchEvent) => {
-    touchMove(e);
-    const touch = e.touches[0];
-    if (touch) updateEdgeAutoScroll(touch.clientX);
-  };
-
-  const handleCardTouchEnd = (e: React.TouchEvent) => {
-    stopEdgeAutoScroll();
-    touchEnd(e);
-  };
 
   const handleDragStart = (contact: KanbanContact, fromLaneId: number) => {
     dragContact.current = contact;
@@ -918,7 +906,7 @@ export default function KanbanBoardPage() {
         <PageHelp
           description={t("helpDesc")}
           sections={[
-            { title: t("helpS0T"), items: [t("helpS0I0"), t("helpS0I1"), t("helpS0I2")] },
+            { title: t("helpS0T"), items: [t("helpS0I0"), t("helpS0I1"), tCommon("touchDragHint"), t("helpS0I2")] },
             { title: t("helpS1T"), items: [t("helpS1I0"), t("helpS1I1"), t("helpS1I2")] },
             { title: t("helpS2T"), items: [t("helpS2I0"), t("helpS2I1")] },
           ]}
@@ -1116,8 +1104,6 @@ export default function KanbanBoardPage() {
                         onStartTicket={openStartTicketModal}
                         channelOptions={channelOptions}
                         onTouchStart={touchStart}
-                        onTouchMove={handleCardTouchMove}
-                        onTouchEnd={handleCardTouchEnd}
                         onOpenCrm={(c) => { setCrmContact(c); setCrmOpen(true); }}
                       />
                     );

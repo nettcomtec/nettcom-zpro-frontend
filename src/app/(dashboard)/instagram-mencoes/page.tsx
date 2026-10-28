@@ -22,6 +22,7 @@ import { fetchWhatsapps, type Whatsapp } from "@/services/whatsapp";
 import { usePageAccess } from "@/hooks/use-page-access";
 import { AccessDenied } from "@/components/layout/access-denied";
 import api from "@/lib/api";
+import { useTranslations } from "next-intl";
 
 type ActiveTab = "tags" | "mentions";
 
@@ -50,6 +51,8 @@ interface ReplyTarget {
 }
 
 export default function InstagramMencoesPage() {
+  const t = useTranslations("instagramMencoes");
+  const tCommon = useTranslations("common");
   const allowed = usePageAccess("instagramMencoes", { adminSuperOnly: true });
   if (!allowed) return <AccessDenied />;
 
@@ -78,7 +81,7 @@ export default function InstagramMencoesPage() {
       const all = Array.isArray(res.data) ? res.data : [];
       setConnections(all.filter((c) => c.type === "instagram"));
     } catch {
-      toast.error("Erro ao carregar conexoes");
+      toast.error(t("errorLoadConnections"));
     } finally {
       setLoading(false);
     }
@@ -96,7 +99,7 @@ export default function InstagramMencoesPage() {
       const list: TaggedMedia[] = Array.isArray(raw) ? raw : (raw as { data?: TaggedMedia[] })?.data ?? [];
       setTaggedMediaList(list);
     } catch {
-      toast.error("Erro ao carregar midias tagueadas");
+      toast.error(t("errorLoadTagged"));
     } finally {
       setLoadingTags(false);
     }
@@ -112,7 +115,7 @@ export default function InstagramMencoesPage() {
       const list: MentionComment[] = Array.isArray(raw) ? raw : (raw as { data?: MentionComment[] })?.data ?? [];
       setMentionList(list);
     } catch {
-      toast.error("Erro ao carregar mencoes");
+      toast.error(t("errorLoadMentions"));
     } finally {
       setLoadingMentions(false);
     }
@@ -126,7 +129,7 @@ export default function InstagramMencoesPage() {
 
   const handleReply = async () => {
     if (!replyingTo || !replyText.trim()) {
-      toast.error("Informe o texto da resposta");
+      toast.error(t("replyRequired"));
       return;
     }
     setSubmitting(true);
@@ -137,12 +140,12 @@ export default function InstagramMencoesPage() {
         commentId: replyingTo.id,
         message: replyText,
       });
-      toast.success("Resposta enviada com sucesso");
+      toast.success(t("replySent"));
       setReplyDialogOpen(false);
       setReplyText("");
       setReplyingTo(null);
     } catch {
-      toast.error("Erro ao enviar resposta");
+      toast.error(t("errorSendReply"));
     } finally {
       setSubmitting(false);
     }
@@ -157,8 +160,8 @@ export default function InstagramMencoesPage() {
     return (
       <div className="space-y-6">
         <PageHeader
-          title="Instagram Mencoes"
-          description="Gerencie midias tagueadas e mencoes em comentarios no Instagram"
+          title={t("title")}
+          description={t("description")}
         />
         <div className="space-y-4">
           <Skeleton className="h-10 w-full max-w-md" />
@@ -171,20 +174,20 @@ export default function InstagramMencoesPage() {
   return (
     <div className="space-y-6">
       <PageHeader
-        title="Instagram Mencoes"
-        description="Gerencie midias tagueadas e mencoes em comentarios no Instagram"
+        title={t("title")}
+        description={t("description")}
       />
 
       <Card>
         <CardContent className="pt-6 space-y-4">
           <div className="grid gap-4 md:grid-cols-3">
             <div className="grid gap-2">
-              <Label>Conexao</Label>
+              <Label>{t("connectionLabel")}</Label>
               <SearchableSelect
                 options={connections.map((c) => ({ value: String(c.id), label: `${c.name} — ${c.status}` }))}
                 value={selectedConnection}
                 onValueChange={setSelectedConnection}
-                placeholder="Selecione a conexao Instagram..."
+                placeholder={t("connectionPlaceholder")}
               />
             </div>
             <div className="flex items-end gap-2">
@@ -201,7 +204,7 @@ export default function InstagramMencoesPage() {
                 ) : (
                   <Instagram className="mr-2 h-4 w-4" />
                 )}
-                Atualizar
+                {tCommon("atualizar")}
               </Button>
             </div>
           </div>
@@ -219,7 +222,7 @@ export default function InstagramMencoesPage() {
               }
             >
               <Tag className="h-4 w-4" />
-              Midias Tagueadas
+              {t("taggedMedia")}
             </button>
             <button
               type="button"
@@ -232,7 +235,7 @@ export default function InstagramMencoesPage() {
               }
             >
               <AtSign className="h-4 w-4" />
-              Mencoes em Comentarios
+              {t("mentionsInComments")}
             </button>
           </div>
         </CardContent>
@@ -247,9 +250,9 @@ export default function InstagramMencoesPage() {
             <CardContent className="p-6">
               <div className="flex flex-col items-center justify-center py-12 text-center">
                 <Tag className="h-12 w-12 text-muted-foreground mb-4" />
-                <h3 className="text-lg font-medium">Nenhuma midia tagueada encontrada</h3>
+                <h3 className="text-lg font-medium">{t("noTagged")}</h3>
                 <p className="text-sm text-muted-foreground mt-1">
-                  Selecione uma conexao para ver as midias onde voce foi marcado
+                  {t("noTaggedHint")}
                 </p>
               </div>
             </CardContent>
@@ -260,11 +263,11 @@ export default function InstagramMencoesPage() {
               <Table>
                 <TableHeader>
                   <TableRow>
-                    <TableHead>Midia</TableHead>
-                    <TableHead>Tipo</TableHead>
-                    <TableHead>Legenda</TableHead>
-                    <TableHead>Data</TableHead>
-                    <TableHead className="w-[100px]">Acoes</TableHead>
+                    <TableHead>{t("colMedia")}</TableHead>
+                    <TableHead>{t("colType")}</TableHead>
+                    <TableHead>{t("colCaption")}</TableHead>
+                    <TableHead>{t("colDate")}</TableHead>
+                    <TableHead className="w-[100px]">{tCommon("actions")}</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -294,7 +297,7 @@ export default function InstagramMencoesPage() {
                         <Button
                           variant="ghost"
                           size="icon"
-                          title="Responder"
+                          title={t("reply")}
                           onClick={() => openReply({ id: media.id, mediaId: media.id, text: media.caption || media.id })}
                         >
                           <Reply className="h-4 w-4" />
@@ -318,9 +321,9 @@ export default function InstagramMencoesPage() {
             <CardContent className="p-6">
               <div className="flex flex-col items-center justify-center py-12 text-center">
                 <AtSign className="h-12 w-12 text-muted-foreground mb-4" />
-                <h3 className="text-lg font-medium">Nenhuma mencao encontrada</h3>
+                <h3 className="text-lg font-medium">{t("noMentions")}</h3>
                 <p className="text-sm text-muted-foreground mt-1">
-                  Selecione uma conexao para ver os comentarios com mencoes
+                  {t("noMentionsHint")}
                 </p>
               </div>
             </CardContent>
@@ -331,10 +334,10 @@ export default function InstagramMencoesPage() {
               <Table>
                 <TableHeader>
                   <TableRow>
-                    <TableHead>Usuario</TableHead>
-                    <TableHead>Comentario</TableHead>
-                    <TableHead>Data</TableHead>
-                    <TableHead className="w-[100px]">Acoes</TableHead>
+                    <TableHead>{t("colUser")}</TableHead>
+                    <TableHead>{t("colComment")}</TableHead>
+                    <TableHead>{t("colDate")}</TableHead>
+                    <TableHead className="w-[100px]">{tCommon("actions")}</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -351,7 +354,7 @@ export default function InstagramMencoesPage() {
                         <Button
                           variant="ghost"
                           size="icon"
-                          title="Responder"
+                          title={t("reply")}
                           onClick={() => openReply({
                             id: mention.id,
                             mediaId: mention.media_id || mention.id,
@@ -375,9 +378,9 @@ export default function InstagramMencoesPage() {
       <Dialog open={replyDialogOpen} onOpenChange={setReplyDialogOpen}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Responder Mencao</DialogTitle>
+            <DialogTitle>{t("replyDialogTitle")}</DialogTitle>
             <DialogDescription>
-              {replyingTo?.username ? `Respondendo a @${replyingTo.username}` : "Respondendo a mencao"}
+              {replyingTo?.username ? t("replyingToUser", { username: replyingTo.username }) : t("replyingToMention")}
             </DialogDescription>
           </DialogHeader>
           {replyingTo && (
@@ -386,9 +389,9 @@ export default function InstagramMencoesPage() {
             </div>
           )}
           <div className="grid gap-2">
-            <Label>Resposta</Label>
+            <Label>{t("replyLabel")}</Label>
             <Textarea
-              placeholder="Digite sua resposta..."
+              placeholder={t("replyPlaceholder")}
               value={replyText}
               onChange={(e) => setReplyText(e.target.value)}
               rows={3}
@@ -396,7 +399,7 @@ export default function InstagramMencoesPage() {
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setReplyDialogOpen(false)}>
-              Cancelar
+              {t("cancel")}
             </Button>
             <Button onClick={handleReply} disabled={submitting}>
               {submitting ? (
@@ -404,7 +407,7 @@ export default function InstagramMencoesPage() {
               ) : (
                 <Reply className="mr-2 h-4 w-4" />
               )}
-              {submitting ? "Enviando..." : "Responder"}
+              {submitting ? t("sending") : t("reply")}
             </Button>
           </DialogFooter>
         </DialogContent>

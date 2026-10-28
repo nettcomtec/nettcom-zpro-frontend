@@ -2,9 +2,10 @@
 
 import React, { useMemo, useState } from "react";
 import { useTranslations } from "next-intl";
-import { AlertTriangle, Clock, UserX, ChevronDown, ChevronUp } from "lucide-react";
+import { AlertTriangle, Clock, UserX, ChevronDown, ChevronUp, Info } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { daysUntilClosing } from "@/lib/opportunity-date";
 
 export interface AlertOpportunity {
@@ -112,9 +113,28 @@ export function OpportunityAlerts({ opportunities, onOpen }: Props) {
     <Card className="border-amber-300/60 bg-amber-50/60 dark:bg-amber-950/20">
       <CardContent className="py-3 px-3">
         <div className="flex items-center justify-between gap-2 mb-2">
-          <p className="text-xs font-semibold flex items-center gap-1">
-            <AlertTriangle className="h-3.5 w-3.5 text-amber-600" /> {t("alertsTitle")} ({alerts.length})
-          </p>
+          <div className="flex items-center gap-1 min-w-0">
+            <p className="text-xs font-semibold flex items-center gap-1">
+              <AlertTriangle className="h-3.5 w-3.5 text-amber-600" /> {t("alertsTitle")} ({alerts.length})
+            </p>
+            {/* A lista que chega já é só do funil aberto no quadro (D12) */}
+            <TooltipProvider delayDuration={200}>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <button
+                    type="button"
+                    aria-label={t("alertsScopeHint")}
+                    className="text-muted-foreground/70 hover:text-foreground transition-colors"
+                  >
+                    <Info className="h-3.5 w-3.5" />
+                  </button>
+                </TooltipTrigger>
+                <TooltipContent className="max-w-xs text-xs font-normal">
+                  {t("alertsScopeHint")}
+                </TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
+          </div>
           {alerts.length > 3 ? (
             <Button type="button" size="sm" variant="ghost" className="h-6 text-xs" onClick={() => setExpanded((v) => !v)}>
               {expanded ? (<><ChevronUp className="h-3 w-3 mr-1" />{t("alertsCollapse")}</>) : (<><ChevronDown className="h-3 w-3 mr-1" />{t("alertsExpand")}</>)}

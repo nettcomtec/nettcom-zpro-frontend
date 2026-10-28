@@ -23,7 +23,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import {
   Send, Plus, Search, Pencil, Trash2, RefreshCw, Paperclip, Mic, X, ChevronDown,
-  Download, Square, Loader2,
+  Download, Square, Loader2, Info, AlertTriangle,
 } from "lucide-react";
 import { toast } from "sonner";
 import {
@@ -32,6 +32,7 @@ import {
   updateFastReply,
   deleteFastReply,
   parseFastReplyMedias,
+  canManagePublicQuickReplies,
   type FastReply,
 } from "@/services/fast-reply";
 import { convertWebmBlobToMp3 } from "@/lib/audio-webm-to-mp3";
@@ -40,7 +41,16 @@ import { usePageAccess } from "@/hooks/use-page-access";
 import { AccessDenied } from "@/components/layout/access-denied";
 import { useAuthStore } from "@/stores/auth-store";
 import { useSortable } from "@/hooks/use-sortable";
+import { getBackendErrorCode } from "@/lib/backend-error-code";
 import { SortableTableHead } from "@/components/ui/sortable-table-head";
+import {
+  LocationPickerFields,
+  locationValueFrom,
+  locationValueToPoint,
+  type LocationPickerValue,
+} from "@/components/atendimento/location-picker-fields";
+import { buildQuickReplyLocationMessage, formatCoord, parseQuickReplyLocationMessage } from "@/lib/location-message";
+import { fetchWebchatInviteAvailability } from "@/services/webchat";
 
 const API_BASE_URL =
   (typeof process !== "undefined" && process.env?.NEXT_PUBLIC_API_URL) ||
@@ -67,7 +77,7 @@ function getFileType(url: string): "image" | "audio" | "video" | "pdf" | "other"
   return "other";
 }
 
-const VARIABLES = [
+const VARIABLES: { label: string; value: string; descKey?: string }[] = [
   { label: "{{name}}", value: "{{name}}" },
   { label: "{{greeting}}", value: "{{greeting}}" },
   { label: "{{protocol}}", value: "{{protocol}}" },
@@ -79,7 +89,13 @@ const VARIABLES = [
   { label: "{{firstName}}", value: "{{firstName}}" },
   { label: "{{lastName}}", value: "{{lastName}}" },
   { label: "{{businessName}}", value: "{{businessName}}" },
+  // Link de avaliação do Google configurado em Avaliações (vazio sem link configurado).
+  { label: "{{linkAvaliacaoGoogle}}", value: "{{linkAvaliacaoGoogle}}", descKey: "varLinkAvaliacaoGoogleDesc" },
 ];
+
+// Link de convite do WebChat (PLANO_WEBCHAT_LINK_CONVITE D9): só entra na lista quando o
+// servidor entende a variável (backend antigo = some).
+const WEBCHAT_INVITE_VARIABLE = { label: "{{linkWebchat}}", value: "{{linkWebchat}}", descKey: "varLinkWebchatDesc" };
 
 const MAX_FILES = 5;
 
@@ -87,9 +103,11 @@ export default function MensagensRapidasPage() {
   const t = useTranslations("mensagensRapidasPage");
   const tCommon = useTranslations("common");
   const tUnsaved = useTranslations("flowBuilderNodeForm");
+  const tShare = useTranslations("locationShare");
+  const tInput = useTranslations("messageInput");
   const allowed = usePageAccess("mensagens-rapidas", { allowIfNotSet: true });
-  const { user, isAdmin, isSuporte } = useAuthStore();
-  const canManagePublic = isAdmin || isSuporte || ["admin", "super", "supervisor", "superadmin"].includes(user?.profile ?? "");
+  const { user, isAdmin, isSuporte, hasPermission } = useAuthStore();
+  const canManagePublic = canManagePublicQuickReplies({ user, isAdmin, isSuporte, hasPermission });
   const [items, setItems] = useState<FastReply[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
@@ -109,13 +127,16 @@ export default function MensagensRapidasPage() {
   const [removeMedia, setRemoveMedia] = useState(false);
 
   // Structured message fields
-  const [formMessageType, setFormMessageType] = useState<"text" | "buttons" | "list" | "template">("text");
+  const [formMessageType, setFormMessageType] = useState<"text" | "buttons" | "list" | "template" | "location">("text");
   const [formButtons, setFormButtons] = useState({ title: "", footer: "", buttons: [{ id: "1", title: "" }] });
   const [formList, setFormList] = useState({ title: "", footer: "", buttonText: "", sections: [{ title: "", rows: [{ id: "1", title: "", description: "" }] }] });
   const [formTemplate, setFormTemplate] = useState({ name: "", language: "" });
+  // Tipo Localização: os campos ficam aqui e só viram o `message` (texto + links) ao salvar.
+  const [formLocation, setFormLocation] = useState<LocationPickerValue>(() => locationValueFrom(null));
+  const [locationUnreadable, setLocationUnreadable] = useState(false);
 
   // Erros inline de validação do form (toast permanece como reforço)
-  const [formErrors, setFormErrors] = useState<{ key?: string; message?: string; buttons?: string; list?: string; template?: string }>({});
+  const [formErrors, setFormErrors] = useState<{ key?: string; message?: string; buttons?: string; list?: string; template?: string; location?: string }>({});
   // Snapshot do form no momento da abertura do dialog (dirty-guard)
   const dialogSnapshotRef = useRef<string>("");
 
@@ -147,6 +168,16 @@ export default function MensagensRapidasPage() {
     return false;
   };
 
+  // Lista: a de Localização mostra nome/endereço (ou as coordenadas) no lugar dos links do
+  // `message`; ilegível = o texto salvo, como as outras.
+  const describeLocationReply = (msg: FastReply): string | null => {
+    if (msg.messageType !== "location") return null;
+    const loc = parseQuickReplyLocationMessage(msg.message);
+    if (!loc) return null;
+    const label = [loc.name, loc.address].filter(Boolean).join(" - ");
+    return label || `${formatCoord(loc.lat)}, ${formatCoord(loc.lng)}`;
+  };
+
   const load = useCallback(async () => {
     setLoading(true);
     try {
@@ -163,10 +194,22 @@ export default function MensagensRapidasPage() {
     load();
   }, [load]);
 
+  const [webchatInviteAvailable, setWebchatInviteAvailable] = useState(false);
+  useEffect(() => {
+    let alive = true;
+    fetchWebchatInviteAvailability().then((res) => {
+      if (alive) setWebchatInviteAvailable(res.available);
+    });
+    return () => {
+      alive = false;
+    };
+  }, []);
+  const variableOptions = webchatInviteAvailable ? [...VARIABLES, WEBCHAT_INVITE_VARIABLE] : VARIABLES;
+
   // Estado relevante do form serializado — comparado contra o snapshot de abertura
   const buildFormSnapshot = () => JSON.stringify({
     formKey, formMessage, formIsPublic, formVoice, formMessageType,
-    formButtons, formList, formTemplate, removeMedia,
+    formButtons, formList, formTemplate, formLocation, removeMedia,
     files: formFiles.map((f) => `${f.name}:${f.size}`),
   });
 
@@ -197,6 +240,8 @@ export default function MensagensRapidasPage() {
     setFormButtons({ title: "", footer: "", buttons: [{ id: "1", title: "" }] });
     setFormList({ title: "", footer: "", buttonText: "", sections: [{ title: "", rows: [{ id: "1", title: "", description: "" }] }] });
     setFormTemplate({ name: "", language: "" });
+    setFormLocation(locationValueFrom(null));
+    setLocationUnreadable(false);
     setFormErrors({});
     stopRecordingAndDiscard();
   };
@@ -220,6 +265,10 @@ export default function MensagensRapidasPage() {
     try { setFormButtons(item.buttonsJson ? { ...{ title: "", footer: "", buttons: [{ id: "1", title: "" }] }, ...JSON.parse(item.buttonsJson) } : { title: "", footer: "", buttons: [{ id: "1", title: "" }] }); } catch { setFormButtons({ title: "", footer: "", buttons: [{ id: "1", title: "" }] }); }
     try { setFormList(item.listJson ? { ...{ title: "", footer: "", buttonText: "", sections: [{ title: "", rows: [{ id: "1", title: "", description: "" }] }] }, ...JSON.parse(item.listJson) } : { title: "", footer: "", buttonText: "", sections: [{ title: "", rows: [{ id: "1", title: "", description: "" }] }] }); } catch { setFormList({ title: "", footer: "", buttonText: "", sections: [{ title: "", rows: [{ id: "1", title: "", description: "" }] }] }); }
     try { setFormTemplate(item.templateJson ? JSON.parse(item.templateJson) : { name: "", language: "" }); } catch { setFormTemplate({ name: "", language: "" }); }
+    // Localização: os campos saem do próprio `message`; ilegível = campos vazios + aviso.
+    const savedLocation = mt === "location" ? parseQuickReplyLocationMessage(item.message) : null;
+    setFormLocation(locationValueFrom(savedLocation));
+    setLocationUnreadable(mt === "location" && !savedLocation);
     setFormErrors({});
     stopRecordingAndDiscard();
     setDialogOpen(true);
@@ -290,6 +339,9 @@ export default function MensagensRapidasPage() {
           const mp3Blob = await convertWebmBlobToMp3(blob);
           const file = new File([mp3Blob], `audio_${Date.now()}.mp3`, { type: "audio/mpeg" });
           setFormFiles((prev) => [...prev, file].slice(0, MAX_FILES));
+          // Áudio gravado aqui vai como mensagem de voz por padrão (dá para desligar antes
+          // de salvar). Arquivo escolhido pelo seletor não mexe na chave.
+          setFormVoice(true);
           setFormErrors((p) => (p.message ? { ...p, message: undefined } : p));
           toast.success(t("audioRecordedAdded"));
         } catch {
@@ -337,7 +389,7 @@ export default function MensagensRapidasPage() {
   const onSubmit = async () => {
     // Validação inline: marca campos inválidos (borda + mensagem) e foca o primeiro;
     // toast permanece como reforço. Regras inalteradas.
-    const errs: { key?: string; message?: string; buttons?: string; list?: string; template?: string } = {};
+    const errs: { key?: string; message?: string; buttons?: string; list?: string; template?: string; location?: string } = {};
     if (!formKey.trim() || !formKey.startsWith("/")) {
       errs.key = t("errorKeyRequired");
     }
@@ -355,11 +407,17 @@ export default function MensagensRapidasPage() {
     if (formMessageType === "template" && !formTemplate.name.trim()) {
       errs.template = t("errorTemplateNameRequired");
     }
+    const isLocationType = formMessageType === "location";
+    const locationPoint = isLocationType ? locationValueToPoint(formLocation) : null;
+    if (isLocationType && !locationPoint) {
+      errs.location = tInput("invalidLatLng");
+    }
     setFormErrors(errs);
-    const firstInvalid = (["key", "message", "buttons", "list", "template"] as const).find((k) => errs[k]);
+    const firstInvalid = (["key", "message", "buttons", "list", "template", "location"] as const).find((k) => errs[k]);
     if (firstInvalid) {
       toast.error(errs[firstInvalid] as string);
-      const el = document.getElementById(`fastreply-field-${firstInvalid}`);
+      // Localização: o foco vai para a latitude (os campos são do LocationPickerFields).
+      const el = document.getElementById(firstInvalid === "location" ? "fastreply-field-location-lat" : `fastreply-field-${firstInvalid}`);
       el?.scrollIntoView({ behavior: "smooth", block: "center" });
       (el as HTMLElement | null)?.focus?.({ preventScroll: true });
       return;
@@ -371,35 +429,40 @@ export default function MensagensRapidasPage() {
       listJson: formMessageType === "list" ? formList : null,
       templateJson: formMessageType === "template" ? formTemplate : null,
     };
+    // Localização: o `message` é montado dos campos (nome, endereço, Google Maps e Waze —
+    // legível como texto nos canais sem localização e no app antigo) e nunca leva mídia nem voz.
+    const messageToSave = isLocationType && locationPoint ? buildQuickReplyLocationMessage(locationPoint) : formMessage;
 
     setSaving(true);
     try {
       if (editing) {
         await updateFastReply(editing.id, {
           key: formKey,
-          message: formMessage,
+          message: messageToSave,
           isPublic: formIsPublic,
-          voice: formVoice,
-          mediaFiles: formFiles.length > 0 ? formFiles : undefined,
-          removeMedia: formFiles.length === 0 ? removeMedia : false,
+          voice: isLocationType ? false : formVoice,
+          mediaFiles: !isLocationType && formFiles.length > 0 ? formFiles : undefined,
+          // Trocada para Localização: a mídia que ela tinha sai junto (sem isso o servidor a mantém).
+          removeMedia: isLocationType ? true : formFiles.length === 0 ? removeMedia : false,
           ...structuredPayload,
         });
         toast.success(t("successUpdate"));
       } else {
         await createFastReply({
           key: formKey,
-          message: formMessage,
+          message: messageToSave,
           isPublic: formIsPublic,
-          voice: formVoice,
-          mediaFiles: formFiles.length > 0 ? formFiles : undefined,
+          voice: isLocationType ? false : formVoice,
+          mediaFiles: !isLocationType && formFiles.length > 0 ? formFiles : undefined,
           ...structuredPayload,
         });
         toast.success(t("successCreate"));
       }
       setDialogOpen(false);
       load();
-    } catch {
-      toast.error(editing ? t("errorUpdate") : t("errorCreate"));
+    } catch (err) {
+      if (getBackendErrorCode(err) === "ERR_FASTREPLY_KEY_TOO_LONG") toast.error(t("shortcutTooLong"));
+      else toast.error(editing ? t("errorUpdate") : t("errorCreate"));
     } finally {
       setSaving(false);
     }
@@ -499,13 +562,14 @@ export default function MensagensRapidasPage() {
                         </code>
                       </TableCell>
                       <TableCell className="max-w-xs">
-                        <p className="truncate text-sm">{msg.message || "—"}</p>
+                        <p className="truncate text-sm">{describeLocationReply(msg) ?? (msg.message || "—")}</p>
                       </TableCell>
                       <TableCell>
                         {(!msg.messageType || msg.messageType === "text") && <Badge variant="secondary" className="text-[10px]">{t("typeText")}</Badge>}
                         {msg.messageType === "buttons" && <Badge variant="outline" className="text-[10px] border-blue-400 text-blue-600">{t("typeButtons")}</Badge>}
                         {msg.messageType === "list" && <Badge variant="outline" className="text-[10px] border-purple-400 text-purple-600">{t("typeList")}</Badge>}
                         {msg.messageType === "template" && <Badge variant="outline" className="text-[10px] border-amber-500 text-amber-600">{t("typeTemplate")}</Badge>}
+                        {msg.messageType === "location" && <Badge variant="outline" className="text-[10px] border-emerald-500 text-emerald-600" title={tShare("quickReplyTypeNote")}>{tShare("quickReplyBadge")}</Badge>}
                       </TableCell>
                       <TableCell>
                         {mediaUrls.length > 0 ? (
@@ -593,6 +657,7 @@ export default function MensagensRapidasPage() {
               <Input
                 id="fastreply-field-key"
                 value={formKey}
+                maxLength={255}
                 aria-invalid={!!formErrors.key}
                 className={formErrors.key ? "border-destructive focus-visible:ring-destructive" : undefined}
                 onChange={(e) => { setFormKey(e.target.value); if (formErrors.key) setFormErrors((p) => ({ ...p, key: undefined })); }}
@@ -604,6 +669,8 @@ export default function MensagensRapidasPage() {
               </p>
             </div>
 
+            {/* Localização: o texto é montado dos campos do local (sem mensagem nem variáveis) */}
+            {formMessageType !== "location" && (
             <div className="space-y-2">
               <div className="flex items-center justify-between">
                 <Label>{t("messageLabel")}</Label>
@@ -614,9 +681,16 @@ export default function MensagensRapidasPage() {
                     </Button>
                   </DropdownMenuTrigger>
                   <DropdownMenuContent align="end" className="max-h-60 overflow-y-auto">
-                    {VARIABLES.map((v) => (
-                      <DropdownMenuItem key={v.value} onClick={() => insertVariable(v.value)}>
+                    {variableOptions.map((v) => (
+                      <DropdownMenuItem
+                        key={v.value}
+                        onClick={() => insertVariable(v.value)}
+                        className={v.descKey ? "flex-col items-start gap-0.5" : undefined}
+                      >
                         <code className="text-xs">{v.label}</code>
+                        {v.descKey && (
+                          <span className="max-w-[220px] text-[11px] leading-snug text-muted-foreground">{t(v.descKey)}</span>
+                        )}
                       </DropdownMenuItem>
                     ))}
                   </DropdownMenuContent>
@@ -634,17 +708,24 @@ export default function MensagensRapidasPage() {
               />
               {formErrors.message && <p className="text-xs text-destructive">{formErrors.message}</p>}
             </div>
+            )}
 
             {/* Message type selector */}
             <div className="space-y-2">
               <Label>{t("msgType")}</Label>
               <div className="flex gap-1 flex-wrap">
-                {(["text", "buttons", "list", "template"] as const).map((type) => (
+                {(["text", "buttons", "list", "template", "location"] as const).map((type) => (
                   <Button key={type} type="button" size="sm"
                     variant={formMessageType === type ? "default" : "outline"}
                     className="h-7 text-xs"
-                    onClick={() => { setFormMessageType(type); setFormErrors((p) => ({ key: p.key })); }}>
-                    {t(`type${type.charAt(0).toUpperCase() + type.slice(1)}` as any)}
+                    onClick={() => {
+                      // Localização não tem anexo nem voz: a gravação em andamento é descartada
+                      // (a barra some junto com os anexos e o microfone não fica ligado).
+                      if (type === "location" && recording) stopRecordingAndDiscard();
+                      setFormMessageType(type);
+                      setFormErrors((p) => ({ key: p.key }));
+                    }}>
+                    {type === "location" ? tShare("quickReplyType") : t(`type${type.charAt(0).toUpperCase() + type.slice(1)}` as any)}
                   </Button>
                 ))}
               </div>
@@ -797,10 +878,48 @@ export default function MensagensRapidasPage() {
                     <Input value={formTemplate.language} onChange={(e) => setFormTemplate((p) => ({ ...p, language: e.target.value }))} placeholder={t("templateLanguagePlaceholder")} className="h-8 text-sm" />
                   </div>
                 </div>
+                <p className="flex items-start gap-1.5 text-xs text-muted-foreground">
+                  <Info className="h-3.5 w-3.5 mt-0.5 shrink-0" />
+                  <span>{t("templateHowItWorks")}</span>
+                </p>
+                <p className="flex items-start gap-1.5 text-xs text-amber-700 dark:text-amber-400">
+                  <AlertTriangle className="h-3.5 w-3.5 mt-0.5 shrink-0" />
+                  <span>{t("templateAlert")}</span>
+                </p>
               </div>
             )}
 
-            {/* Media attachments — up to 5 files + audio recording */}
+            {/* Localização: colar link ou coordenadas, conferir no mapa, nome e endereço */}
+            {formMessageType === "location" && (
+              <div className="space-y-3 rounded border p-3 bg-muted/30">
+                {locationUnreadable && (
+                  <p className="flex items-start gap-1.5 text-xs text-amber-700 dark:text-amber-400">
+                    <AlertTriangle className="h-3.5 w-3.5 mt-0.5 shrink-0" />
+                    <span>{tShare("quickReplyUnreadable")}</span>
+                  </p>
+                )}
+                {formErrors.location && <p className="text-xs text-destructive">{formErrors.location}</p>}
+                <LocationPickerFields
+                  compact
+                  idPrefix="fastreply-field-location"
+                  value={formLocation}
+                  onChange={(next) => {
+                    setFormLocation(next);
+                    if (formErrors.location) setFormErrors((p) => ({ ...p, location: undefined }));
+                    // O aviso de "não consegui ler" sai quando o local volta a ser válido.
+                    if (locationUnreadable && locationValueToPoint(next)) setLocationUnreadable(false);
+                  }}
+                />
+                <p className="flex items-start gap-1.5 text-xs text-muted-foreground">
+                  <Info className="h-3.5 w-3.5 mt-0.5 shrink-0" />
+                  <span>{tShare("quickReplyTypeNote")}</span>
+                </p>
+              </div>
+            )}
+
+            {/* Media attachments — up to 5 files + audio recording (Localização não leva anexo nem voz) */}
+            {formMessageType !== "location" && (
+            <>
             <div className="space-y-2">
               <div className="flex items-center justify-between">
                 <Label>{t("attachmentLabel")}</Label>
@@ -950,6 +1069,8 @@ export default function MensagensRapidasPage() {
                 </p>
               </div>
             </div>
+            </>
+            )}
 
             <div className="flex items-center gap-3">
               <Switch

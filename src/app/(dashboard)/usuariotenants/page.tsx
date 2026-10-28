@@ -53,13 +53,18 @@ const MENU_PERMISSION_KEYS = [
   "relatorios", "painel-atendimentos", "filas", "equipes", "mensagens-rapidas", "chat-flow",
   "agendamentos", "aniversarios", "fechamento", "etiquetas", "notas",
   "protocolos", "avaliacoes", "horarioAtendimento", "campanhas", "contatos",
-  "google-calendar", "agendamento-publico", "email-marketing",
+  "google-calendar", "agendamento-publico", "formularios", "email-marketing",
+  "instagramComentarios", "facebookComentarios",
 ];
 
-const USER_ONLY_PERMS = ["massa", "campanhas", "grupo", "chat-privado", "kanban", "funil", "tarefas", "agenda", "contatos"];
+const USER_ONLY_PERMS = ["massa", "campanhas", "grupo", "chat-privado", "kanban", "funil", "tarefas", "agenda", "contatos", "instagramComentarios", "facebookComentarios"];
+
+// Igual /usuarios: comentários do Instagram/Facebook só abrem com a chave MARCADA,
+// então chave ausente = desmarcada (nunca o default true dos outros menus).
+const OPT_IN_MENU_PERMISSION_KEYS = ["instagramComentarios", "facebookComentarios"];
 
 const DEFAULT_MENU: Record<string, boolean> = Object.fromEntries(
-  MENU_PERMISSION_KEYS.map((k) => [k, true])
+  MENU_PERMISSION_KEYS.map((k) => [k, !OPT_IN_MENU_PERMISSION_KEYS.includes(k)])
 );
 
 // Tela superadmin-only: page size alto para carregar todos os usuários em
@@ -90,12 +95,35 @@ const profileIconMap: Record<string, { icon: React.ElementType; variant: "defaul
   superadmin: { icon: Shield, variant: "destructive" },
 };
 
+// Mesmo critério de /usuarios: horário salvo sem algum dos 7 dias (gravado pela API
+// ou dado antigo) — o editor só desenha os dias que existem e o servidor procura o
+// dia de hoje nessa lista (sem ele o login do atendente é recusado naquele dia).
+// Completa só os dias que faltam com o padrão de usuário novo, de domingo a sábado;
+// o dia que existe fica como veio. Sem lista, o padrão inteiro, como antes.
+function withAllBusinessDays(raw: unknown): BusinessHour[] {
+  const defaults = getDefaultBusinessHours();
+  if (!Array.isArray(raw) || raw.length === 0) return defaults;
+  const entries = raw as Array<{ day?: unknown } | null | undefined>;
+  return defaults.map((fallback) => {
+    // Mesma busca do servidor (dia numérico, a primeira que casa). Dia gravado como
+    // texto ("1") só entra na falta dela, já como número: assim o servidor o acha.
+    const exact = entries.find((h) => h?.day === fallback.day);
+    if (exact) return exact as unknown as BusinessHour;
+    const asText = entries.find((h) => {
+      const day = h?.day;
+      return typeof day === "string" && /^\d+$/.test(day.trim()) && Number(day) === fallback.day;
+    });
+    return asText ? ({ ...asText, day: fallback.day } as unknown as BusinessHour) : fallback;
+  });
+}
+
 export default function UsuarioTenantsPage() {
   const t = useTranslations("usuariotenantsPage");
   const tBh = useTranslations("businessHoursEditor");
   const tSidebar = useTranslations("layoutSidebar");
   // Rótulos reusados da tela /usuarios — mesma lista, mesmo nome de item nas duas telas.
   const tUsuarios = useTranslations("usuariosPage");
+  const tCustomProfiles = useTranslations("customProfiles");
 
   const menuLabelMap: Record<string, string> = {
     "massa": tUsuarios("menuMassa"),
@@ -124,7 +152,10 @@ export default function UsuarioTenantsPage() {
     "contatos": tUsuarios("menuContatos"),
     "google-calendar": tUsuarios("menuGoogleCalendar"),
     "agendamento-publico": tSidebar("item.agendamentoPublico"),
+    "formularios": tSidebar("item.formularios"),
     "painel-atendimentos": tSidebar("item.painelAtendimentos"),
+    "instagramComentarios": tCustomProfiles("menuLabels.instagramComentarios"),
+    "facebookComentarios": tCustomProfiles("menuLabels.facebookComentarios"),
   };
 
   const MENU_PERMISSIONS = MENU_PERMISSION_KEYS.map((key) => ({
@@ -321,7 +352,7 @@ export default function UsuarioTenantsPage() {
     );
     setRestrictedUser(u.restrictedUser === "enabled" ? "enabled" : "disabled");
     const rawBh = u.businessHours as BusinessHour[] | undefined;
-    setBusinessHours(Array.isArray(rawBh) && rawBh.length > 0 ? rawBh : getDefaultBusinessHours());
+    setBusinessHours(withAllBusinessDays(rawBh));
     setMenuOpen(false);
     setBhOpen(Array.isArray(rawBh) && rawBh.length > 0);
     setDialogOpen(true);
@@ -611,6 +642,9 @@ export default function UsuarioTenantsPage() {
               </CollapsibleTrigger>
               <CollapsibleContent className="pt-2">
                 <p className="text-xs text-muted-foreground mb-2">{tUsuarios("menuPainelAtendimentosHint")}</p>
+                {(form.watch("profile") === "user" || form.watch("profile") === "super") && (
+                  <p className="text-xs text-muted-foreground mb-2">{tUsuarios("menuSocialCommentsHint")}</p>
+                )}
                 <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2">
                   {getMenuPermsForProfile(form.watch("profile")).map((perm) => (
                     <label

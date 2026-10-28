@@ -3,8 +3,10 @@ import { toast } from "sonner";
 import { useAuthStore } from "@/stores/auth-store";
 import { logger } from "./logger";
 import { showBackendOfflineToast, dismissBackendOfflineToast } from "./backend-offline-toast";
-import { defaultLocale, locales, type Locale } from "@/i18n/config";
+import { getUiLocale } from "./ui-locale";
 import { getMessages } from "@/i18n/get-messages";
+import { readCsrfToken, rememberCsrfToken, setAuthRouteCookie } from "./auth-session";
+import { uiT } from "./ui-t";
 
 if (!process.env.NEXT_PUBLIC_API_URL) {
   logger.warn("NEXT_PUBLIC_API_URL is not set — falling back to http://localhost:3101");
@@ -61,6 +63,7 @@ const api = axios.create({
 let isRefreshing = false;
 let refreshQueue: Array<(token: string | null) => void> = [];
 let isRedirecting = false;
+let lastUploadStorageToastAt = 0;
 let healthPollTimer: ReturnType<typeof setTimeout> | null = null;
 let healthProbeInFlight: Promise<boolean> | null = null;
 
@@ -118,17 +121,66 @@ function readStoredToken(): string | null {
   }
 }
 
+// Renovação que falhou sem o servidor recusar a sessão: rede do celular caiu, prazo
+// estourou, servidor reiniciando. Antes isso deslogava na hora. O interceptor rejeita
+// com o RESPONSE quando houve resposta (status na raiz) e com o AxiosError quando não.
+const TRANSIENT_REFRESH_STATUS = new Set([408, 429, 500, 502, 503, 504]);
+// Prazo próprio da renovação (o padrão do axios é 30 s): a falha aparece cedo e a nova
+// tentativa sai logo em seguida. Se o 1º pedido chegou ao servidor e só a resposta se
+// perdeu, a nova tentativa cai na tolerância de 60 s do backend para o refresh já usado
+// — passado isso, o reuso é tratado como roubo e derruba todas as sessões do usuário.
+const REFRESH_TIMEOUT_MS = 7000;
+const REFRESH_QUICK_RETRY_MS = 1500;
+// Depois de uma falha passageira, as próximas 401 não tentam renovar por este tempo.
+const REFRESH_PAUSE_AFTER_FAILURE_MS = 15000;
+// Servidor responde (as 401 chegam) mas a renovação falha seguidas vezes: algo quebrou
+// nela, e o painel ficaria aberto com toda chamada falhando. Aí desloga.
+const MAX_TRANSIENT_REFRESH_FAILURES = 4;
+let refreshPausedUntil = 0;
+let transientRefreshFailures = 0;
+
+function isTransientRefreshFailure(err: unknown): boolean {
+  if (axios.isAxiosError(err)) {
+    if (!err.response) return true;
+    return TRANSIENT_REFRESH_STATUS.has(err.response.status);
+  }
+  const status = (err as { status?: unknown } | null)?.status;
+  return typeof status === "number" && TRANSIENT_REFRESH_STATUS.has(status);
+}
+
 async function refreshWithCrossTabLock(staleToken: string | null): Promise<string | null> {
   const doRefresh = async (): Promise<string | null> => {
     const current = readStoredToken();
-    if (current && current !== staleToken) return current;
-    const csrfToken =
-      document.cookie.split("; ").find((c) => c.startsWith("csrf_token="))?.split("=")[1] ?? "";
-    const res = await api.post("/auth/refresh_token", undefined, {
-      headers: { "X-CSRF-Token": csrfToken },
-    });
+    // "Sair" em outra aba apagou a sessão: não renova (senão a resposta regravaria
+    // token e cookies de quem acabou de sair). Erro comum = desloga esta aba também.
+    if (!current) throw new Error("ERR_NO_LOCAL_SESSION");
+    if (current !== staleToken) return current;
+    const postRefresh = () =>
+      api.post("/auth/refresh_token", undefined, {
+        headers: { "X-CSRF-Token": readCsrfToken() },
+        timeout: REFRESH_TIMEOUT_MS,
+      });
+    let res;
+    try {
+      res = await postRefresh();
+    } catch (err) {
+      if (!isTransientRefreshFailure(err)) throw err;
+      await new Promise((resolve) => setTimeout(resolve, REFRESH_QUICK_RETRY_MS));
+      // Sem navigator.locks outra aba pode ter renovado enquanto esperávamos.
+      const renewed = readStoredToken();
+      if (renewed && renewed !== staleToken) return renewed;
+      res = await postRefresh();
+    }
+    // Saiu em outra aba enquanto a renovação estava no ar: não regrava nada.
+    if (!readStoredToken()) throw new Error("ERR_NO_LOCAL_SESSION");
+    rememberCsrfToken(res.data?.csrfToken);
     const newToken = (res.data?.token as string | undefined) ?? null;
-    if (newToken) localStorage.setItem("token", JSON.stringify(newToken));
+    if (newToken) {
+      localStorage.setItem("token", JSON.stringify(newToken));
+      // Quem lê o token do store (e não do localStorage) não fica com o vencido.
+      useAuthStore.setState({ token: newToken });
+      setAuthRouteCookie();
+    }
     return newToken;
   };
   const locks = (navigator as { locks?: { request: (n: string, cb: () => Promise<string | null>) => Promise<string | null> } }).locks;
@@ -153,9 +205,7 @@ async function showSessionEndedToast(): Promise<void> {
   let message = "Sua sessão foi encerrada. Faça login novamente.";
 
   try {
-    const stored = typeof window !== "undefined" ? localStorage.getItem("language") : null;
-    const locale: Locale =
-      stored && (locales as readonly string[]).includes(stored) ? (stored as Locale) : defaultLocale;
+    const locale = getUiLocale();
     const messages = (await getMessages(locale)) as {
       api?: { sessionExpiredToast?: string };
       useSocketAuth?: { forceLogout?: string };
@@ -348,6 +398,22 @@ api.interceptors.response.use(
       });
     }
 
+    // Arquivo enviado que o servidor não conseguiu gravar (pasta sem permissão, disco
+    // cheio): a tela de cada envio mostra o erro genérico dela, e este aviso diz o que
+    // fazer. No máximo 1 a cada 30 s.
+    const uploadCode = (error.response?.data as { error?: unknown } | undefined)?.error;
+    if (status === 500 && (uploadCode === "ERR_UPLOAD_STORAGE_DENIED" || uploadCode === "ERR_UPLOAD_DISK_FULL")) {
+      const now = Date.now();
+      if (now - lastUploadStorageToastAt > 30000) {
+        lastUploadStorageToastAt = now;
+        toast.error(
+          uploadCode === "ERR_UPLOAD_DISK_FULL"
+            ? uiT("common.uploadDiskFull", undefined, "O servidor está sem espaço em disco e não gravou o arquivo. Avise o administrador da instalação.")
+            : uiT("common.uploadStorageDenied", undefined, "O servidor não tem permissão para gravar o arquivo enviado. Avise o administrador da instalação.")
+        );
+      }
+    }
+
     // Allowlist de "JWT/sessao expirada" — unicos casos onde 401 deve disparar refresh.
     // Backend usa 403 para JWT invalido/expirado (isAuthZPRO:125 -> ERR_AUTH_INVALID_TOKEN).
     // Os 401 que sao genuinamente "sessao expirou":
@@ -357,8 +423,11 @@ api.interceptors.response.use(
     // vai direto pro redirect. Demais 401 com codigo de erro sao erros de aplicacao
     // (ERR_USER_NOT_FOUND, ERR_INVALID_CREDENTIALS, ERR_TENANT_*, ERR_GOOGLE_*, etc) —
     // devolvem o erro pro chamador sem refresh nem deslogar.
-    const errBody = error.response?.data as { error?: string; message?: string } | undefined;
-    const errorCode = errBody?.error ?? errBody?.message ?? "";
+    const errBody = error.response?.data as { error?: unknown; message?: unknown } | undefined;
+    // Rota antiga pode mandar o objeto do erro em `error`/`message`: texto vale como
+    // código; objeto conta como "tem código" (não é sessão vencida) sem quebrar o startsWith.
+    const rawErrorCode = errBody?.error ?? errBody?.message;
+    const errorCode = typeof rawErrorCode === "string" ? rawErrorCode : rawErrorCode ? "ERR_UNKNOWN" : "";
     const isJwtExpired =
       !errorCode ||
       errorCode === "TokenExpiredError" ||
@@ -375,12 +444,19 @@ api.interceptors.response.use(
     if (!originalRequest._retry && !isAuthCall && !isForceLogout && ((status === 401 && isJwtExpired) || isMaybeExpired403)) {
       originalRequest._retry = true;
 
+      // Renovação acabou de falhar por rede/servidor: a sessão segue, só não insiste
+      // a cada request até a pausa acabar.
+      if (Date.now() < refreshPausedUntil) {
+        return Promise.reject(error.response || error);
+      }
+
       if (!isRefreshing) {
         isRefreshing = true;
         try {
           const reqAuth = String(originalRequest.headers?.Authorization ?? "");
           const staleToken = reqAuth.startsWith("Bearer ") ? reqAuth.slice(7) : null;
           const newToken = await refreshWithCrossTabLock(staleToken);
+          transientRefreshFailures = 0;
           refreshQueue.forEach((cb) => cb(newToken));
           refreshQueue = [];
           if (newToken) {
@@ -391,14 +467,28 @@ api.interceptors.response.use(
         } catch (refreshErr) {
           refreshQueue.forEach((cb) => cb(null));
           refreshQueue = [];
+          if (isTransientRefreshFailure(refreshErr)) {
+            transientRefreshFailures += 1;
+            if (transientRefreshFailures < MAX_TRANSIENT_REFRESH_FAILURES) {
+              refreshPausedUntil = Date.now() + REFRESH_PAUSE_AFTER_FAILURE_MS;
+              logger.warn("[auth] renovação da sessão falhou por rede/servidor; sessão mantida", { url });
+              return Promise.reject(error.response || error);
+            }
+            transientRefreshFailures = 0;
+          }
+          // O interceptor rejeita com o RESPONSE (status/data na raiz) quando houve
+          // resposta; o AxiosError fica para quando não houve.
           const refreshAxios = refreshErr as AxiosError;
-          const refreshBody = refreshAxios?.response?.data as { error?: string; message?: string } | undefined;
+          const refreshRes = refreshErr as { status?: number; data?: unknown } | null;
+          const refreshData = (refreshRes?.data ?? refreshAxios?.response?.data) as
+            | { error?: string; message?: string }
+            | undefined;
           redirectToLogin({
-            status: refreshAxios?.response?.status ?? status,
-            code: refreshBody?.error ?? "REFRESH_FAILED",
+            status: (typeof refreshRes?.status === "number" ? refreshRes.status : refreshAxios?.response?.status) ?? status,
+            code: refreshData?.error ?? (refreshErr instanceof Error && !axios.isAxiosError(refreshErr) ? refreshErr.message : "REFRESH_FAILED"),
             url: "/auth/refresh_token",
-            message: refreshBody?.message ?? `Falha ao renovar sessão (request original: ${url})`,
-            responseData: refreshAxios?.response?.data,
+            message: refreshData?.message ?? `Falha ao renovar sessão (request original: ${url})`,
+            responseData: refreshData,
           });
           return Promise.reject(error);
         } finally {
@@ -408,7 +498,7 @@ api.interceptors.response.use(
 
       return new Promise((resolve, reject) => {
         refreshQueue.push((newToken) => {
-          if (!newToken) return reject(error);
+          if (!newToken) return reject(error.response || error);
           originalRequest.headers = originalRequest.headers || {};
           originalRequest.headers.Authorization = `Bearer ${newToken}`;
           resolve(api(originalRequest));
@@ -425,7 +515,7 @@ api.interceptors.response.use(
         status,
         code: errorCode || "FORCE_LOGOUT",
         url,
-        message: errBody?.message,
+        message: typeof errBody?.message === "string" ? errBody.message : undefined,
         responseData: errBody,
       });
     }
@@ -435,7 +525,7 @@ api.interceptors.response.use(
         status,
         code: errorCode,
         url,
-        message: errBody?.message,
+        message: typeof errBody?.message === "string" ? errBody.message : undefined,
         responseData: errBody,
       });
     }

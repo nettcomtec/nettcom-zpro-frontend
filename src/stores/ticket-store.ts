@@ -37,9 +37,11 @@ export interface Message {
   read: boolean;
   ack?: number;
   /** Detalhe do status "failed" do webhook WABA/BSP (ack=-1) — exibido no tooltip do ack */
-  statusError?: { code?: number | string; title?: string; details?: string } | null;
+  statusError?: { code?: number | string; subcode?: number | string; title?: string; details?: string } | null;
   /** Progresso de upload (0-100) da mídia otimista (id front-*) — barra na bolha durante o envio */
   uploadProgress?: number;
+  /** WABA: texto do atendente esperando para juntar com o próximo (só na tela; lib/waba-agent-grouping) */
+  groupingPending?: boolean;
   mediaUrl?: string;
   /** URL pública do storage externo (S3/R2). Quando presente, deve ser preferida ao mediaUrl
    *  para evitar 404 em deployments com keepLocalCopy=false. */
@@ -56,6 +58,9 @@ export interface Message {
   /** Transporte real da mensagem no modo híbrido: 'linked_baileys' = enviada roteada pela
    *  conexão vinculada (sem cobrança por mensagem da Meta) — exibe selo na bolha. */
   sentVia?: string | null;
+  /** WhatsApp oficial: "marketing_lite" quando a Meta confirmou que o template saiu pela
+   *  Marketing Messages API (selo na bolha). Ausente/null em backend antigo e nos demais envios. */
+  wabaPricingCategory?: string | null;
   /** Origem do envio gravada pelo backend. 'API'/'externalApi' = disparo da API externa
    *  (ou envio automatico que usa a mesma marca) — o chat mostra "Sistema" como autor. */
   sendType?: string | null;
@@ -120,6 +125,9 @@ export interface Contact {
   bsuid?: string | null;
   instagramPK?: string | number;
   messengerId?: string | number;
+  // Id do chat no bot do Telegram (gravado na 1ª mensagem ou pelo link de convite).
+  // null = o payload trouxe o campo vazio (Telegram tirado do cadastro); undefined = não trouxe.
+  telegramId?: string | null;
   email?: string;
   profilePicUrl?: string;
   cpf?: string;
@@ -153,6 +161,11 @@ export interface Ticket {
   chatbot?: boolean;
   /** Agente de IA armado no ticket (efetivo só com chatgptStatus ligado — ver lib/ticket-automations) */
   aiAgentId?: number | null;
+  /**
+   * "Bloquear chatbot neste atendimento": para o fluxo e, com agente de IA, a pausa do
+   * agente (ver isAiAgentPaused). Ausente = o servidor não informou (lista de backend antigo).
+   */
+  botStopped?: boolean;
   autoClose?: boolean;
   typebotStatus?: string;
   dialogflowStatus?: string;
@@ -191,6 +204,14 @@ export interface Ticket {
   sentiment?: "positive" | "neutral" | "negative" | "frustrated" | null;
   sentimentSummary?: string | null;
   sentimentAnalyzedAt?: string | null;
+  /**
+   * Atendimento trazido de outro servidor (migração de empresa): número e protocolo que
+   * ele tinha lá e a data da migração. Só vem no GET /tickets/:id (nunca no socket nem
+   * na lista) — os merges do store preservam o valor porque o patch não traz a chave.
+   */
+  migrationRef?: { oldId: string; legacyProtocol: string | null; migratedAt: string } | null;
+  /** Selo "Anúncio": 1º anúncio registrado no atendimento (lista, abertura e aviso `ticket:adReferral`). Ausente = o servidor não informou. */
+  adReferral?: { adId?: string | null; adTitle?: string | null; channel?: string | null } | null;
   scheduledMessages?: Array<{
     id: number;
     body: string;
@@ -282,6 +303,8 @@ function mergeContactIdentity(incoming: Contact, existing: Contact | undefined):
     profilePicUrl: incoming.profilePicUrl || existing.profilePicUrl,
     instagramPK: incoming.instagramPK ?? existing.instagramPK,
     messengerId: incoming.messengerId ?? existing.messengerId,
+    // null (campo vazio no payload) limpa; undefined (payload magro, sem o campo) preserva.
+    telegramId: incoming.telegramId !== undefined ? incoming.telegramId : existing.telegramId,
     // Etiquetas: patch magro chega sem a chave (normalizeTicket a omite quando o
     // payload nao traz nem ticket.tags nem contact.tags) — preserva as ja
     // carregadas. Array vazio de um payload gordo continua limpando de verdade.

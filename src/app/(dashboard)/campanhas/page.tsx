@@ -1,12 +1,15 @@
 "use client";
 
 import { formatDate as formatDateIntl } from "@/lib/format";
+import { uiT } from "@/lib/ui-t";
 
 import React, { useState, useEffect, useCallback, useRef } from "react";
 import { format, sub } from "date-fns";
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
-import { useTranslations } from "next-intl";
+import { createTranslator, useTranslations } from "next-intl";
+import { getMessages } from "@/i18n/get-messages";
+import { createPdfDateFormatter, ensurePdfUnicodeFont, fitTextToPdfFont, pdfFontKindForLocale } from "@/lib/pdf-unicode-font";
 import { PageHeader } from "@/components/layout/page-header";
 import { WabaConnectionQualityBadge } from "@/components/atendimento/waba-connection-quality-badge";
 import { Card, CardContent } from "@/components/ui/card";
@@ -46,7 +49,7 @@ import {
   createCampaign, updateCampaign, addCampaignContacts, fetchContactsReportCampaign,
   fetchCampaignContacts, deleteCampaignContact, deleteAllCampaignContacts,
   skipCampaignMessage, forceFinishCampaign, getCampaignReport,
-  pauseCampaign, resumeCampaign,
+  pauseCampaign, resumeCampaign, getCampaignReplies, indexCampaignReplies,
 } from "@/services/campaigns";
 import {
   fetchEmailTemplates, fetchEmailTemplate, fetchEmailEditorCapabilities, readApiError,
@@ -243,24 +246,24 @@ function getTemplateVarFields(template: WABATemplate | null): TemplateVarField[]
         (!!comp.text && /\{\{[a-zA-Z_][a-zA-Z0-9_]*\}\}/.test(comp.text));
       if (isNamed && comp.example?.body_text_named_params) {
         comp.example.body_text_named_params.forEach((p, i) => {
-          fields.push({ label: p.param_name || `Variável ${i + 1}`, key: `body_named_${i}` });
+          fields.push({ label: p.param_name || uiT("campanhasPage.templateVarN", { n: i + 1 }, "Variável {n}"), key: `body_named_${i}` });
         });
       } else {
         const matches = comp.text?.match(/{{\d+}}/g) || [];
         matches.forEach((_, i) => {
-          fields.push({ label: `Variável ${i + 1}`, key: `body_${i}` });
+          fields.push({ label: uiT("campanhasPage.templateVarN", { n: i + 1 }, "Variável {n}"), key: `body_${i}` });
         });
       }
     }
     if (comp.type === "BUTTONS" && comp.buttons) {
       comp.buttons.forEach((btn, idx) => {
         if (btn.type === "COPY_CODE" || btn.type === "QUICK_REPLY") {
-          fields.push({ label: `Botão ${idx + 1}`, key: `button_${idx}` });
+          fields.push({ label: uiT("campanhasPage.templateButtonN", { n: idx + 1 }, "Botão {n}"), key: `button_${idx}` });
         }
         // Botao URL dinamico: Meta permite ate 1 variavel `{{N}}` no final da URL.
         // Detectamos qualquer `{{...}}` na URL e expomos como campo `button_url_${idx}`.
         if (btn.type === "URL" && btn.url && /\{\{[^}]+\}\}/.test(btn.url)) {
-          fields.push({ label: `Botão ${idx + 1} — URL (${btn.text || "link"})`, key: `button_url_${idx}` });
+          fields.push({ label: uiT("campanhasPage.templateButtonUrlN", { n: idx + 1, text: btn.text || "link" }, "Botão {n} — URL ({text})"), key: `button_url_${idx}` });
         }
       });
     }
@@ -465,6 +468,7 @@ function buildPreviewTemplate(template: WABATemplate | null, vars: Record<string
 }
 
 function TemplateMobilePreview({ template }: { template: WABATemplate | null }) {
+  const t = useTranslations("campanhasPage");
   if (!template) return null;
   const components = (template.components || []) as Record<string, unknown>[];
   const header = components.find((c) => c.type === "HEADER");
@@ -548,7 +552,7 @@ function TemplateMobilePreview({ template }: { template: WABATemplate | null }) 
                   <div key={i} className="bg-white rounded border border-green-200 text-center py-1 px-2 text-xs text-green-600 font-medium shadow-sm flex items-center justify-center gap-1">
                     {btn.type === "URL" && <Globe className="w-3 h-3 shrink-0" />}
                     {btn.type === "PHONE_NUMBER" && <Phone className="w-3 h-3 shrink-0" />}
-                    <span>{(btn.text as string) || (btn.type === "URL" ? (btn.url as string) || "URL" : btn.type === "PHONE_NUMBER" ? (btn.phone_number as string) || "Telefone" : "Resposta Rápida")}</span>
+                    <span>{(btn.text as string) || (btn.type === "URL" ? (btn.url as string) || "URL" : btn.type === "PHONE_NUMBER" ? (btn.phone_number as string) || t("contactPhone") : t("quickReplyButton"))}</span>
                   </div>
                 ))}
               </div>
@@ -1255,7 +1259,7 @@ function CampaignFormDialog({ open, onClose, onSaved, editCampaign, sessions }: 
           {isWabaSession ? (
             <>
               <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
-                Canal WABA: campanhas enviam apenas templates aprovados.
+                {t("wabaOnlyTemplatesNote")}
               </div>
               <div className="space-y-2">
                 <Label>{t("template")}</Label>
@@ -1310,7 +1314,7 @@ function CampaignFormDialog({ open, onClose, onSaved, editCampaign, sessions }: 
                                 <Input
                                   value={formTemplateVars[field.key] || ""}
                                   onChange={(e) => setFormTemplateVars((p) => ({ ...p, [field.key]: e.target.value }))}
-                                  placeholder="https://... ou selecione da galeria"
+                                  placeholder={t("headerUrlPlaceholder")}
                                   className="h-8 text-sm flex-1"
                                 />
                                 <Button
@@ -1328,7 +1332,7 @@ function CampaignFormDialog({ open, onClose, onSaved, editCampaign, sessions }: 
                               <Input
                                 value={formTemplateVars[field.key] || ""}
                                 onChange={(e) => setFormTemplateVars((p) => ({ ...p, [field.key]: e.target.value }))}
-                                placeholder={`{{name}} ou valor fixo`}
+                                placeholder={t.raw("templateVarPlaceholder") as string}
                                 className="h-8 text-sm"
                               />
                             )}
@@ -1643,7 +1647,7 @@ function CampaignFormDialog({ open, onClose, onSaved, editCampaign, sessions }: 
                           title={tCampaignAI("title")}
                         >
                           <Sparkles className="h-3.5 w-3.5" />
-                          IA
+                          {tCampaignAI("aiButton")}
                         </Button>
                         <DropdownMenu>
                           <DropdownMenuTrigger asChild>
@@ -1917,7 +1921,7 @@ function ContactSelectDialog({ open, campaignId, campaignStatus, onClose, onAdde
                 <Popover>
                   <PopoverTrigger asChild>
                     <Button variant="outline" size="sm" className="w-full justify-between font-normal h-8 text-xs">
-                      {contactFilters.tags.length ? `${contactFilters.tags.length} tag(s)` : "Todas"}
+                      {contactFilters.tags.length ? t("tagsSelectedCount", { count: contactFilters.tags.length }) : t("allTags")}
                       <ChevronDown className="h-3 w-3 opacity-50" />
                     </Button>
                   </PopoverTrigger>
@@ -1944,7 +1948,7 @@ function ContactSelectDialog({ open, campaignId, campaignStatus, onClose, onAdde
                 <Popover>
                   <PopoverTrigger asChild>
                     <Button variant="outline" size="sm" className="w-full justify-between font-normal h-8 text-xs">
-                      {contactFilters.wallets.length ? `${contactFilters.wallets.length} carteira(s)` : "Todas"}
+                      {contactFilters.wallets.length ? t("walletsSelectedCount", { count: contactFilters.wallets.length }) : t("allWallets")}
                       <ChevronDown className="h-3 w-3 opacity-50" />
                     </Button>
                   </PopoverTrigger>
@@ -2060,14 +2064,14 @@ function ContactSelectDialog({ open, campaignId, campaignStatus, onClose, onAdde
             {loadingContacts ? (
               <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
             ) : (
-              <p className="text-sm text-muted-foreground">Use os filtros acima e clique em Buscar</p>
+              <p className="text-sm text-muted-foreground">{t("useFiltersHint")}</p>
             )}
           </div>
         )}
 
         {canEdit && contacts.length > 0 && (
           <p className="text-sm text-muted-foreground shrink-0">
-            {selectedContacts.length} de {contacts.length} contato(s) selecionado(s)
+            {t("contactsSelectedOfTotal", { selected: selectedContacts.length, total: contacts.length })}
           </p>
         )}
 
@@ -2185,10 +2189,10 @@ function CampaignContactsViewDialog({ open, campaign, onClose, onRefresh }: Camp
         <DialogContent className="max-w-3xl max-h-[90vh] overflow-hidden flex flex-col">
           <DialogHeader>
             <DialogTitle>
-              Contatos — {campaign?.name}
+              {t("contactsDialogTitle", { name: campaign?.name ?? "" })}
             </DialogTitle>
             <DialogDescription>
-              Início: {campaign?.start ? formatDate(campaign.start) : "—"} · Status: {campaign?.status ? (statusMap[campaign.status]?.label ?? campaign.status) : "—"}
+              {t("contactsDialogDescription", { start: campaign?.start ? formatDate(campaign.start) : "—", status: campaign?.status ? (statusMap[campaign.status]?.label ?? campaign.status) : "—" })}
             </DialogDescription>
           </DialogHeader>
 
@@ -2225,7 +2229,7 @@ function CampaignContactsViewDialog({ open, campaign, onClose, onRefresh }: Camp
             ) : filtered.length === 0 ? (
               <div className="flex items-center justify-center h-32">
                 <p className="text-sm text-muted-foreground">
-                  {contacts.length === 0 ? "Nenhum contato vinculado" : "Nenhum contato corresponde à busca"}
+                  {contacts.length === 0 ? t("noLinkedContacts") : t("noContactsMatchSearch")}
                 </p>
               </div>
             ) : (
@@ -2264,7 +2268,7 @@ function CampaignContactsViewDialog({ open, campaign, onClose, onRefresh }: Camp
             )}
           </div>
 
-          <p className="text-xs text-muted-foreground shrink-0">{contacts.length} contato(s) vinculado(s)</p>
+          <p className="text-xs text-muted-foreground shrink-0">{t("linkedContactsCount", { count: contacts.length })}</p>
 
           <DialogFooter className="shrink-0">
             <Button variant="outline" onClick={onClose}>{t("cancel")}</Button>
@@ -2285,11 +2289,42 @@ function CampaignContactsViewDialog({ open, campaign, onClose, onRefresh }: Camp
 
 // ─── Main Page ────────────────────────────────────────────────────────────────
 
+// Rótulos (campanhasPage.*) que o PDF do relatório desenha: decide se precisa das
+// mensagens em pt para os idiomas que a fonte do PDF não desenha.
+const PDF_REPORT_KEYS = [
+  "reportTitle", "reportStatusLine", "reportStartLine", "reportTotalContactsLine",
+  "reportSummaryAccepted", "reportSummaryConfirmedDelivered", "reportSummaryConfirmedRead",
+  "reportSummaryAwaiting", "delivered", "pending", "failed", "reportAcceptanceNote", "ackOptOut",
+  "colName", "reportColEmail", "reportColNumber", "colStatus", "reportColSentAt",
+  "reportGeneratedAt", "reportPageOf", "ackSkippedActiveConversation", "ackNoEmail",
+  "ackDuplicateEmail", "ackError", "ackRead", "ackReceived", "ackSent", "ackPending",
+  "reportStatusAccepted", "statusPending", "statusScheduled", "statusInProgress", "statusCompleted",
+  "statusCancelled", "statusFailed", "statusPaused", "reportSummaryReplied", "reportRepliedNote",
+];
+
+// Quem respondeu, para o PDF e o CSV: leitura à parte que nunca derruba o relatório
+// (backend anterior = 404, prazo estourado = sem a informação).
+const fetchCampaignRepliesSafe = async (campaignId: number) => {
+  try {
+    const res = await getCampaignReplies(campaignId);
+    return indexCampaignReplies(res.data);
+  } catch {
+    return null;
+  }
+};
+
+// A checagem de acesso fica fora do componente com os hooks: se a permissão mudar com a
+// página aberta, trocar o componente inteiro não quebra a ordem dos hooks.
 export default function CampanhasPage() {
   const allowed = usePageAccess("campanhas");
   if (!allowed) return <AccessDenied />;
+  return <CampanhasPageContent />;
+}
+
+function CampanhasPageContent() {
   const { density, updateDensity, rowClassName, cellClassName } = useTableDensity();
   const t = useTranslations("campanhasPage");
+  const tCommon = useTranslations("common");
   const [loading, setLoading] = useState(true);
   const [data, setData] = useState<Campaign[]>([]);
   const [sessions, setSessions] = useState<Whatsapp[]>([]);
@@ -2346,7 +2381,7 @@ export default function CampanhasPage() {
       const filtered = arr.filter((w: Whatsapp) => allowedTypes.includes(w.type ?? ""));
       setSessions(filtered);
     } catch {
-      toast.error("Erro ao carregar sessões");
+      toast.error(t("errorLoadSessions"));
     }
   }, []);
 
@@ -2432,7 +2467,7 @@ export default function CampanhasPage() {
 
   const handleCancel = async (campaign: Campaign) => {
     if (campaign.status === "processing") {
-      toast.error("Não é possível cancelar uma campanha em andamento");
+      toast.error(t("cannotCancelProcessing"));
       return;
     }
     try {
@@ -2447,24 +2482,26 @@ export default function CampanhasPage() {
   const handleSkipMessage = async (campaign: Campaign) => {
     try {
       await skipCampaignMessage(campaign.id);
-      toast.success("Mensagem pulada com sucesso");
+      toast.success(t("messageSkipped"));
       await loadCampaigns();
     } catch {
-      toast.error("Erro ao pular mensagem");
+      toast.error(t("errorSkipMessage"));
     }
   };
 
   const handleForceFinish = async (campaign: Campaign) => {
     try {
       await forceFinishCampaign(campaign.id);
-      toast.success("Campanha finalizada");
+      toast.success(t("campaignFinished"));
       await loadCampaigns();
     } catch {
-      toast.error("Erro ao finalizar campanha");
+      toast.error(t("errorFinish"));
     }
   };
 
   type ReportContact = {
+    /** Id do contato (o relatório devolve `contactId` como `id`) */
+    id?: number;
     name?: string; number?: string | null; email?: string | null; ack?: number; body?: string; messageRandom?: string; mediaName?: string;
     sentAt?: string | null; messageId?: string | null; providerStatus?: string | null; providerError?: string | null;
   };
@@ -2488,27 +2525,27 @@ export default function CampanhasPage() {
   // Em WABA/BSP o `ack` positivo é gravado quando o provedor ACEITA a solicitação — não
   // prova entrega. A confirmação real chega depois, por webhook, em `providerStatus`.
   // Sem esse cuidado o relatório afirmava "Entregue" para todo destinatário aceito.
-  const ackStatus = (c: ReportContact, acceptanceOnly = false) => {
-    if (isSkippedActiveConversation(c)) return t("ackSkippedActiveConversation");
+  const ackStatus = (c: ReportContact, acceptanceOnly = false, tr: (key: string) => string = t) => {
+    if (isSkippedActiveConversation(c)) return tr("ackSkippedActiveConversation");
     const emailSkip = getEmailSkipMarker(c as any);
-    if (emailSkip === "optout") return t("ackOptOut");
-    if (emailSkip === "no_email") return t("ackNoEmail");
-    if (emailSkip === "duplicate_email") return t("ackDuplicateEmail");
+    if (emailSkip === "optout") return tr("ackOptOut");
+    if (emailSkip === "no_email") return tr("ackNoEmail");
+    if (emailSkip === "duplicate_email") return tr("ackDuplicateEmail");
 
     const provider = String(c.providerStatus || "").toLowerCase();
-    if (provider === "failed") return t("ackError");
-    if (provider === "read") return t("ackRead");
-    if (provider === "delivered") return t("ackReceived");
-    if (provider === "sent") return t("ackSent");
+    if (provider === "failed") return tr("ackError");
+    if (provider === "read") return tr("ackRead");
+    if (provider === "delivered") return tr("ackReceived");
+    if (provider === "sent") return tr("ackSent");
 
-    if (c.ack === -1) return t("ackError");
-    if (c.ack === 0) return t("ackPending");
+    if (c.ack === -1) return tr("ackError");
+    if (c.ack === 0) return tr("ackPending");
     // Aceito pelo provedor, ainda sem nenhum status de entrega.
-    if (acceptanceOnly) return t("reportStatusAccepted");
+    if (acceptanceOnly) return tr("reportStatusAccepted");
     // Canais em que o `ack` vem do próprio WhatsApp: continua valendo como entrega.
-    if (c.ack === 1) return t("ackSent");
-    if (c.ack === 2) return t("ackReceived");
-    return t("ackRead");
+    if (c.ack === 1) return tr("ackSent");
+    if (c.ack === 2) return tr("ackReceived");
+    return tr("ackRead");
   };
 
   // Status cru devolvido pelo provedor, sem interpretação — é o que o cliente confere
@@ -2523,41 +2560,108 @@ export default function CampanhasPage() {
     c.sentAt ? new Date(c.sentAt).toLocaleString("pt-BR") : "—";
 
   // Corpo exibido nos exports: registro pulado nunca imprime a string crua "active_conversation"
-  const reportBody = (c: ReportContact, fallback: string) =>
-    isSkippedActiveConversation(c) ? t("ackSkippedActiveConversation") : (c.body || fallback);
+  const reportBody = (c: ReportContact, fallback: string, tr: (key: string) => string = t) =>
+    isSkippedActiveConversation(c) ? tr("ackSkippedActiveConversation") : (c.body || fallback);
 
   const handleDownloadPDF = async (campaign: Campaign) => {
     try {
-      const res = await getCampaignReport(campaign.id);
+      const [res, replies] = await Promise.all([
+        getCampaignReport(campaign.id),
+        fetchCampaignRepliesSafe(campaign.id),
+      ]);
       const report = res.data as CampaignReport;
 
+      // Tela em russo, turco, japonês ou chinês: fonte Noto baixada do próprio front na
+      // hora (1 vez por sessão) e usada em TODO o texto do PDF. Nos demais idiomas, ou se
+      // o download falhar, fica a helvetica de antes.
       const doc = new jsPDF();
-      doc.setFont("helvetica", "normal");
+      const uiLocale = document.documentElement.lang;
+      const unicodeFont = await ensurePdfUnicodeFont(doc, pdfFontKindForLocale(uiLocale)).catch(() => null);
+      const pdfFamily = unicodeFont ? unicodeFont.family : "helvetica";
+
+      // A helvetica do PDF só desenha Latin-1 (mais a pontuação do WinAnsi, como "—"):
+      // rótulo traduzido fora disso (japonês, chinês, árabe, hindi, russo, letras do turco)
+      // sai em português, como no PDF da conversa, em vez de caracteres trocados. Com a
+      // Noto carregada, vale o que ela desenha. As mensagens em pt só são baixadas quando
+      // algum rótulo precisa delas.
+      const isLatin1 = (s: string) => /^[\x00-\xFF€‚ƒ„…†‡ˆ‰Š‹ŒŽ‘’“”•–—˜™š›œžŸ]*$/.test(s.normalize("NFC"));
+      const canDraw = (s: string) => (unicodeFont ? unicodeFont.canRender(s.normalize("NFC")) : isLatin1(s));
+      // Datas no idioma da tela só quando a fonte as desenha; senão pt-BR, como antes. O
+      // CSV segue com o formato de sempre (quem importa a planilha depende dele).
+      const pdfDates = createPdfDateFormatter(uiLocale, canDraw);
+      const needsPt =
+        PDF_REPORT_KEYS.some((k) => !canDraw(String(t.raw(k) ?? ""))) ||
+        !canDraw(tCommon("unknown")) ||
+        !canDraw(tCommon("message"));
+      let tPt: ((key: string, values?: Record<string, string | number>) => string) | null = null;
+      if (needsPt) {
+        const ptMessages = await getMessages("pt");
+        if (ptMessages && Object.keys(ptMessages).length > 0) {
+          tPt = createTranslator({ locale: "pt", messages: ptMessages as never, onError: () => undefined }) as unknown as (
+            key: string,
+            values?: Record<string, string | number>
+          ) => string;
+        }
+      }
+      // Sem as mensagens em pt (chunk antigo depois de uma atualização), fica o próprio texto.
+      const fromPt = (fullKey: string, localized: string, values?: Record<string, string | number>): string => {
+        if (!tPt) return localized;
+        const out = tPt(fullKey, values);
+        return out && out !== fullKey ? out : localized;
+      };
+      // Com a Noto, o que ela não desenha vira "?" (letra acentuada sem glifo vira a letra
+      // base) — sem isso o jsPDF cortaria a linha ali; sem ela, o texto segue como antes.
+      // Vale para o dado do relatório (nome, número, mensagem) e para a reserva em pt.
+      const cell = (s: string): string => (unicodeFont ? fitTextToPdfFont(unicodeFont, s.normalize("NFC")) : s);
+      // Com a Noto, o texto sai em NFC (o que foi conferido é o que se desenha).
+      const drawable = (s: string) => (unicodeFont ? s.normalize("NFC") : s);
+      const tp = (key: string, values?: Record<string, string | number>): string => {
+        const out = t(key, values);
+        return canDraw(out) ? drawable(out) : cell(fromPt(`campanhasPage.${key}`, out, values));
+      };
+      const tpc = (key: string): string => {
+        const out = tCommon(key);
+        return canDraw(out) ? drawable(out) : cell(fromPt(`common.${key}`, out));
+      };
+
+      doc.setFont(pdfFamily, "normal");
       doc.setFontSize(18);
-      doc.text("Relatório de Campanha", 10, 15);
+      doc.text(tp("reportTitle"), 10, 15);
 
       doc.setFontSize(11);
       let y = 26;
       doc.text(`ID: ${report.id}`, 10, y); y += 7;
-      doc.text(`Status: ${report.status}`, 10, y); y += 7;
-      doc.text(`Início: ${report.start ? new Date(report.start).toLocaleString("pt-BR") : "—"}`, 10, y); y += 7;
-      doc.text(`Total de contatos: ${report.totalContacts}`, 10, y); y += 7;
+      doc.text(tp("reportStatusLine", { status: getStatusMap(tp)[report.status]?.label ?? report.status }), 10, y); y += 7;
+      doc.text(tp("reportStartLine", { start: report.start ? pdfDates.dateTime(report.start) : "—" }), 10, y); y += 7;
+      doc.text(tp("reportTotalContactsLine", { count: report.totalContacts }), 10, y); y += 7;
       if (report.acceptanceOnly) {
         // Canal em que "enviada" = aceite do provedor: o resumo separa o que foi aceito
         // do que teve entrega/leitura efetivamente confirmada por webhook.
-        doc.text(`${t("reportSummaryAccepted")}: ${report.accepted ?? report.delivered}`, 10, y); y += 7;
-        doc.text(`${t("reportSummaryConfirmedDelivered")}: ${report.confirmedDelivered ?? 0}`, 10, y); y += 7;
-        doc.text(`${t("reportSummaryConfirmedRead")}: ${report.confirmedRead ?? 0}`, 10, y); y += 7;
-        doc.text(`${t("reportSummaryAwaiting")}: ${report.awaitingConfirmation ?? 0}`, 10, y); y += 7;
+        doc.text(`${tp("reportSummaryAccepted")}: ${report.accepted ?? report.delivered}`, 10, y); y += 7;
+        doc.text(`${tp("reportSummaryConfirmedDelivered")}: ${report.confirmedDelivered ?? 0}`, 10, y); y += 7;
+        doc.text(`${tp("reportSummaryConfirmedRead")}: ${report.confirmedRead ?? 0}`, 10, y); y += 7;
+        doc.text(`${tp("reportSummaryAwaiting")}: ${report.awaitingConfirmation ?? 0}`, 10, y); y += 7;
       } else {
-        doc.text(`Entregues: ${report.delivered}`, 10, y); y += 7;
+        doc.text(`${tp("delivered")}: ${report.delivered}`, 10, y); y += 7;
       }
-      doc.text(`Pendentes: ${report.pending}`, 10, y); y += 7;
-      doc.text(`Falhas: ${report.failed}`, 10, y); y += 7;
+      doc.text(`${tp("pending")}: ${report.pending}`, 10, y); y += 7;
+      doc.text(`${tp("failed")}: ${report.failed}`, 10, y); y += 7;
+      if (replies) {
+        const { count, checked, windowDays } = replies.summary;
+        const pct = checked > 0 ? ` (${Math.round((count / checked) * 100)}%)` : "";
+        doc.text(`${tp("reportSummaryReplied")}: ${count}${pct}`, 10, y); y += 7;
+        doc.setFontSize(8);
+        doc.setTextColor(110);
+        const repliedNote = doc.splitTextToSize(tp("reportRepliedNote", { days: windowDays }), 190) as string[];
+        repliedNote.forEach((line) => { doc.text(line, 10, y); y += 4; });
+        doc.setTextColor(0);
+        doc.setFontSize(11);
+        y += 2;
+      }
       if (report.acceptanceOnly) {
         doc.setFontSize(8);
         doc.setTextColor(110);
-        const note = doc.splitTextToSize(t("reportAcceptanceNote"), 190) as string[];
+        const note = doc.splitTextToSize(tp("reportAcceptanceNote"), 190) as string[];
         note.forEach((line) => { doc.text(line, 10, y); y += 4; });
         doc.setTextColor(0);
         doc.setFontSize(11);
@@ -2570,27 +2674,30 @@ export default function CampanhasPage() {
       y += 4;
 
       if (isEmailReport(report) && (report.optOut ?? 0) > 0) {
-        doc.text(`${t("ackOptOut")}: ${report.optOut}`, 10, y); y += 7;
+        doc.text(`${tp("ackOptOut")}: ${report.optOut}`, 10, y); y += 7;
       }
 
       const body = (report.contacts || []).map((c, i) => [
         i + 1,
-        c.name || "Desconhecido",
-        reportRecipient(report, c),
-        ackStatus(c, report.acceptanceOnly),
-        sentAtCell(c),
-        (isEmailReport(report)
-          ? reportBody(c, "—").replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim()
-          : reportBody(c, "—")
-        ).substring(0, 60).replace(/\n/g, " "),
+        c.name ? cell(c.name) : tpc("unknown"),
+        cell(reportRecipient(report, c)),
+        ackStatus(c, report.acceptanceOnly, tp),
+        c.sentAt ? pdfDates.dateTime(c.sentAt) : "—",
+        cell(
+          (isEmailReport(report)
+            ? reportBody(c, "—", tp).replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim()
+            : reportBody(c, "—", tp)
+          ).substring(0, 60).replace(/\n/g, " ")
+        ),
       ]);
 
       autoTable(doc, {
         startY: y,
-        head: [["#", "Nome", isEmailReport(report) ? t("reportColEmail") : t("reportColNumber"), "Status", t("reportColSentAt"), "Mensagem"]],
+        head: [["#", tp("colName"), isEmailReport(report) ? tp("reportColEmail") : tp("reportColNumber"), tp("colStatus"), tp("reportColSentAt"), tpc("message")]],
         body,
-        styles: { font: "helvetica", fontSize: 8, cellPadding: 2, overflow: "linebreak" },
-        headStyles: { fillColor: [33, 102, 172], textColor: 255, fontStyle: "bold", halign: "center" },
+        styles: { font: pdfFamily, fontSize: 8, cellPadding: 2, overflow: "linebreak" },
+        // Noto sem arquivo negrito (japonês, chinês): o cabeçalho usa a regular.
+        headStyles: { fillColor: [33, 102, 172], textColor: 255, fontStyle: unicodeFont && !unicodeFont.hasBold ? "normal" : "bold", halign: "center" },
         alternateRowStyles: { fillColor: [240, 245, 255] },
         columnStyles: {
           0: { cellWidth: 8, halign: "center" },
@@ -2608,48 +2715,59 @@ export default function CampanhasPage() {
         doc.setPage(i);
         doc.setFontSize(7);
         doc.setTextColor(150);
-        doc.text(`Gerado em: ${new Date().toLocaleString("pt-BR")}`, 10, 290);
-        doc.text(`Página ${i}/${pages}`, 200, 290, { align: "right" });
+        doc.text(tp("reportGeneratedAt", { date: pdfDates.dateTime(new Date()) }), 10, 290);
+        doc.text(tp("reportPageOf", { page: i, total: pages }), 200, 290, { align: "right" });
       }
 
       doc.save(`relatorio-campanha-${report.id}.pdf`);
-      toast.success("Relatório PDF exportado");
+      toast.success(t("pdfExported"));
     } catch {
-      toast.error("Erro ao gerar relatório PDF");
+      toast.error(t("errorPdf"));
     }
   };
 
   const handleDownloadCSV = async (campaign: Campaign) => {
     try {
-      const res = await getCampaignReport(campaign.id);
+      const [res, replies] = await Promise.all([
+        getCampaignReport(campaign.id),
+        fetchCampaignRepliesSafe(campaign.id),
+      ]);
       const report = res.data as CampaignReport;
       // CSV é o material de conferência contra o painel do provedor: leva o número, o
-      // status cru do provedor e o ID da mensagem, além do rótulo consolidado.
+      // status cru do provedor e o ID da mensagem, além do rótulo consolidado. Quem
+      // respondeu entra no fim (só a hora e o atendimento; o texto fica no atendimento).
       const headers = [
         "#",
-        "Nome",
+        t("colName"),
         isEmailReport(report) ? t("reportColEmail") : t("reportColNumber"),
-        "Status",
+        t("colStatus"),
         t("reportColProviderStatus"),
         t("reportColSentAt"),
         t("reportColMessageId"),
-        "Mensagem",
-        "Mídia",
+        tCommon("message"),
+        t("reportColMedia"),
+        ...(replies ? [t("reportColRepliedAt"), t("reportColReplyTicket")] : []),
       ];
-      const rows = (report.contacts || []).map((c, i) => [
-        i + 1,
-        c.name || "Desconhecido",
-        reportRecipient(report, c),
-        ackStatus(c, report.acceptanceOnly),
-        providerStatusCell(c),
-        sentAtCell(c),
-        c.messageId || "—",
-        (isEmailReport(report)
-          ? reportBody(c, "").replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim()
-          : reportBody(c, "")
-        ).substring(0, 80).replace(/\n/g, " "),
-        c.mediaName || "—",
-      ]);
+      const rows = (report.contacts || []).map((c, i) => {
+        const reply = typeof c.id === "number" ? replies?.byContact.get(c.id) : undefined;
+        return [
+          i + 1,
+          c.name || tCommon("unknown"),
+          reportRecipient(report, c),
+          ackStatus(c, report.acceptanceOnly),
+          providerStatusCell(c),
+          sentAtCell(c),
+          c.messageId || "—",
+          (isEmailReport(report)
+            ? reportBody(c, "").replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim()
+            : reportBody(c, "")
+          ).substring(0, 80).replace(/\n/g, " "),
+          c.mediaName || "—",
+          ...(replies
+            ? [reply ? new Date(reply.repliedAt).toLocaleString("pt-BR") : "—", reply?.ticketId ? String(reply.ticketId) : "—"]
+            : []),
+        ];
+      });
       let csv = headers.join(";") + "\n";
       rows.forEach((row) => {
         csv += row.map((f) => `"${String(f).replace(/"/g, '""')}"`).join(";") + "\n";
@@ -2663,9 +2781,9 @@ export default function CampanhasPage() {
       a.click();
       document.body.removeChild(a);
       URL.revokeObjectURL(url);
-      toast.success("Relatório CSV exportado");
+      toast.success(t("csvExported"));
     } catch {
-      toast.error("Erro ao gerar relatório CSV");
+      toast.error(t("errorCsv"));
     }
   };
 
@@ -2721,7 +2839,7 @@ export default function CampanhasPage() {
             },
             {
               title: t("helpS1T"),
-              items: [t("helpS1I0"), t("helpS1I1"), t("helpS1I2"), t("helpS1I3")],
+              items: [t("helpS1I0"), t("helpS1I1"), t("helpS1I2"), t("helpS1I3"), t("helpS1I4")],
             },
             {
               title: t("helpS2T"),
@@ -2756,7 +2874,7 @@ export default function CampanhasPage() {
                 className="pl-9"
               />
             </div>
-            <Button variant="outline" size="icon" onClick={loadCampaigns} title="Atualizar">
+            <Button variant="outline" size="icon" onClick={loadCampaigns} title={t("refresh")}>
               <RefreshCw className="h-4 w-4" />
             </Button>
             <TableDensityToggle density={density} onChange={updateDensity} />
@@ -2831,13 +2949,13 @@ export default function CampanhasPage() {
                                 </div>
                                 <div className="flex items-center justify-between gap-1">
                                   <span className="text-xs text-muted-foreground">
-                                    {sent} de {total} enviados
+                                    {t("progressText", { sent, total })}
                                   </span>
                                   {isSending && (
                                     <span className="text-xs text-muted-foreground">
                                       {estimatedMinutes > 0
                                         ? `~${estimatedMinutes}min`
-                                        : "em andamento..."}
+                                        : t("inProgressEllipsis")}
                                     </span>
                                   )}
                                 </div>

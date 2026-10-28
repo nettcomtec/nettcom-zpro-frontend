@@ -3,7 +3,14 @@ import api from "@/lib/api";
 export interface TicketEvaluation {
   id: number;
   ticketId: number;
-  evaluation: number;
+  /**
+   * Gravada como TEXTO no backend: a nota ("5"), a pergunta enviada (pesquisa pendente
+   * ou sem resposta) ou "external". Consumo numérico só por parser.
+   */
+  evaluation: number | string;
+  /** Tentativas de leitura da nota: < 2 = aguardando resposta. */
+  attempts?: number;
+  userId?: number | null;
   /** 'native' = nota do cliente. 'external' = link externo enviado (sem retorno). */
   type?: string;
   /** URL externa efetivamente enviada (com variáveis resolvidas). */
@@ -14,7 +21,19 @@ export interface TicketEvaluation {
   user?: { id: number; name: string };
   ticket?: {
     id: number;
-    contact?: { id: number; name: string; number: string };
+    /** Campos aditivos do backend novo (ausentes no antigo). */
+    protocol?: string | null;
+    createdAt?: string;
+    channel?: string | null;
+    queue?: { id: number; queue: string } | null;
+    whatsapp?: { id: number; name: string; type?: string } | null;
+    contact?: {
+      id: number;
+      name: string;
+      number: string;
+      username?: string | null;
+      bsuid?: string | null;
+    };
     user?: { id: number; name: string };
   };
 }
@@ -25,6 +44,11 @@ export interface EvaluationsResponse {
   page: number;
   limit: number;
   totalPages: number;
+  /**
+   * Eco do filtro por agente aplicado pelo servidor (null = sem filtro). A chave sai
+   * SEMPRE no servidor novo; ausente = servidor antigo, que ignora o `userId`.
+   */
+  userFilter?: number | null;
 }
 
 export interface EvaluationFilters {
@@ -34,6 +58,8 @@ export interface EvaluationFilters {
   startDate?: string;
   endDate?: string;
   evaluation?: number;
+  /** Agente gravado na avaliação. */
+  userId?: number;
 }
 
 export interface RatingItem {
@@ -67,6 +93,39 @@ export interface EvaluationConfig {
   ratingCloseBehavior?: string;
   /** Minutos de tolerância do modo 'timer' antes do fechamento automático. */
   ratingCloseTimerMinutes?: number;
+  /**
+   * Pergunta da pesquisa (vai ao cliente, no envio automático e no manual).
+   * null/"" = pergunta padrão no idioma da empresa. Chave AUSENTE no GET = backend
+   * antigo: a tela esconde o campo e o save não manda a chave (ausente = não mexe).
+   */
+  ratingQuestion?: string | null;
+  /**
+   * Pedido de avaliação no Google anexado à resposta da nota (qualquer nota).
+   * Chave AUSENTE no GET = backend antigo ou banco sem a coluna: a tela esconde o card
+   * e o save não manda as 3 chaves.
+   */
+  ratingGoogleReview?: "enabled" | "disabled";
+  /** Link de avaliação do Google (https). Também vale como {{linkAvaliacaoGoogle}}. */
+  ratingGoogleReviewUrl?: string | null;
+  /** Texto do pedido; null/"" = texto padrão no idioma da empresa. */
+  ratingGoogleReviewText?: string | null;
+}
+
+/** Limites do pedido de avaliação no Google (iguais aos do backend). */
+export const GOOGLE_REVIEW_URL_MAX = 1000;
+export const GOOGLE_REVIEW_TEXT_MAX = 500;
+
+/** Mesma regra do backend: https com host, sem espaço, aspas, sinais de tag, chaves nem barra invertida. */
+export function isValidGoogleReviewUrl(value: string): boolean {
+  const url = (value || "").trim();
+  if (!url || url.length > GOOGLE_REVIEW_URL_MAX) return false;
+  if (/[\s"'<>{}\\]/.test(url)) return false;
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === "https:" && !!parsed.hostname;
+  } catch {
+    return false;
+  }
 }
 
 export interface NpsSummary {
@@ -124,7 +183,10 @@ export interface NpsReport {
   responseRate: { closed: number; answered: number; rate: number };
 }
 
-export async function fetchEvaluations(filters: EvaluationFilters = {}) {
+export async function fetchEvaluations(
+  filters: EvaluationFilters = {},
+  opts: { signal?: AbortSignal } = {}
+) {
   const params = new URLSearchParams();
   if (filters.page) params.set("page", String(filters.page));
   if (filters.limit) params.set("limit", String(filters.limit));
@@ -133,7 +195,10 @@ export async function fetchEvaluations(filters: EvaluationFilters = {}) {
   if (filters.endDate) params.set("endDate", filters.endDate);
   // Checagem explícita: 0 é nota legítima da escala e a checagem falsy a descartava
   if (filters.evaluation !== undefined) params.set("evaluation", String(filters.evaluation));
-  return api.get<EvaluationsResponse>(`/ticketEvaluations?${params.toString()}`);
+  if (filters.userId !== undefined) params.set("userId", String(filters.userId));
+  return api.get<EvaluationsResponse>(`/ticketEvaluations?${params.toString()}`, {
+    signal: opts.signal,
+  });
 }
 
 export async function deleteEvaluation(id: number) {
@@ -157,7 +222,19 @@ export async function updateRatings(data: RatingItem[]) {
   return api.put("/tenants/rating/", data);
 }
 
-export async function updateTenantRatingData(tenantId: number, data: Record<string, unknown>) {
+/**
+ * `data.ratingQuestion`: "" volta à pergunta padrão da Região; ausente = não mexe.
+ * `ratingGoogleReview*`: só mandar quando o GET trouxe a chave; ausentes = não mexe.
+ */
+export async function updateTenantRatingData(
+  tenantId: number,
+  data: Record<string, unknown> & {
+    ratingQuestion?: string | null;
+    ratingGoogleReview?: "enabled" | "disabled";
+    ratingGoogleReviewUrl?: string | null;
+    ratingGoogleReviewText?: string | null;
+  }
+) {
   return api.put(`/tenantsRatingData/${tenantId}`, data);
 }
 
@@ -188,9 +265,4 @@ export function resolveExternalRatingUrl(
 
 export async function fetchEvaluationLogs(ticketId: number) {
   return api.get(`/ticketEvaluations/${ticketId}/logs`);
-}
-
-/** Atualiza o registro de avaliação pelo ticketId (equivalente ao AlterarAvaliacao do front legado) */
-export async function updateEvaluationByTicket(ticketId: number, data: { attempts?: number; evaluation?: string }) {
-  return api.put(`/ticketEvaluations/${ticketId}`, { ...data, id: ticketId, ticketId });
 }

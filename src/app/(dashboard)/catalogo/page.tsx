@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect, useCallback, useRef } from "react";
+import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { useTranslations } from "next-intl";
 import { PageHeader } from "@/components/layout/page-header";
 import { Card, CardContent } from "@/components/ui/card";
@@ -30,6 +30,8 @@ import {
 import { fetchGallery, uploadGalleryFiles, getGalleryPreviewUrl, type GalleryItem } from "@/services/gallery";
 import { usePageAccess } from "@/hooks/use-page-access";
 import { AccessDenied } from "@/components/layout/access-denied";
+import { useRegion, type UseRegionResult } from "@/hooks/use-region";
+import { countryLocale } from "@/lib/region";
 
 const API_BASE_URL =
   (typeof process !== "undefined" && process.env?.NEXT_PUBLIC_API_URL) ||
@@ -56,11 +58,25 @@ function InfoTip({ text }: { text: string }) {
   );
 }
 
-function formatPrice(value: string | number | null | undefined): string {
+// O preço gravado não tem moeda: aparece na moeda e no formato do país da empresa.
+function formatPrice(
+  value: string | number | null | undefined,
+  formatMoney: UseRegionResult["formatMoney"]
+): string {
   if (value === null || value === undefined || value === "") return "";
   const n = Number(value);
   if (!Number.isFinite(n)) return "";
-  return `R$ ${n.toFixed(2).replace(".", ",")}`;
+  return formatMoney(n);
+}
+
+// Exemplo do campo de preço com o separador decimal do país ("0,00" no BR, "0.00" nos EUA).
+// A entrada segue decimal: o salvar aceita vírgula ou ponto.
+function decimalPlaceholder(country: string): string {
+  try {
+    return new Intl.NumberFormat(countryLocale(country), { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(0);
+  } catch {
+    return "0,00";
+  }
 }
 
 interface VariationForm {
@@ -68,13 +84,31 @@ interface VariationForm {
   optionsText: string;
 }
 
+// Junta a página nova sem repetir produto (a lista pode mudar entre uma página e outra).
+function appendNewProducts(prev: Product[], next: Product[]): Product[] {
+  const seen = new Set(prev.map((p) => p.id));
+  return [...prev, ...next.filter((p) => !seen.has(p.id))];
+}
+
 export default function CatalogoPage() {
   const t = useTranslations("catalogoPage");
   const allowed = usePageAccess("catalogo", { adminSuperOnly: true });
+  const { formatMoney, country } = useRegion();
+  const pricePlaceholder = useMemo(() => decimalPlaceholder(country), [country]);
 
   const [items, setItems] = useState<Product[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
+  // "Carregar mais": o servidor manda 20 por vez. `loadingMore` = próxima página;
+  // `reloading` = releitura das páginas já abertas (Atualizar, criar, excluir).
+  const [hasMore, setHasMore] = useState(false);
+  const [totalCount, setTotalCount] = useState(0);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [reloading, setReloading] = useState(false);
+  const pageRef = useRef(1);
+  const loadedSearchRef = useRef<string | undefined>(undefined);
+  const busyRef = useRef(false);
+  const requestIdRef = useRef(0);
 
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editing, setEditing] = useState<Product | null>(null);
@@ -103,15 +137,26 @@ export default function CatalogoPage() {
   const [galleryTarget, setGalleryTarget] = useState<"main" | "extra">("main");
   const galleryFileRef = useRef<HTMLInputElement>(null);
 
+  // 1ª página da busca atual. Resposta de busca anterior que chega depois é descartada.
   const load = useCallback(async () => {
+    const reqId = ++requestIdRef.current;
+    const term = search.trim() || undefined;
+    busyRef.current = false;
+    setLoadingMore(false);
+    setReloading(false);
     setLoading(true);
     try {
-      const result = await fetchProducts({ pageNumber: 1, searchParam: search.trim() || undefined });
+      const result = await fetchProducts({ pageNumber: 1, searchParam: term });
+      if (reqId !== requestIdRef.current) return;
       setItems(result.data);
+      setHasMore(result.hasMore);
+      setTotalCount(result.count);
+      pageRef.current = 1;
+      loadedSearchRef.current = term;
     } catch {
-      toast.error(t("errorLoad"));
+      if (reqId === requestIdRef.current) toast.error(t("errorLoad"));
     } finally {
-      setLoading(false);
+      if (reqId === requestIdRef.current) setLoading(false);
     }
   }, [search, t]);
 
@@ -119,6 +164,69 @@ export default function CatalogoPage() {
     const id = setTimeout(load, 300);
     return () => clearTimeout(id);
   }, [load]);
+
+  const loadMore = async () => {
+    if (busyRef.current) return;
+    busyRef.current = true;
+    const reqId = requestIdRef.current;
+    const nextPage = pageRef.current + 1;
+    setLoadingMore(true);
+    try {
+      // Mesma busca que montou a lista (o campo pode ter mudado e a nova busca ainda não rodou).
+      const result = await fetchProducts({ pageNumber: nextPage, searchParam: loadedSearchRef.current });
+      if (reqId !== requestIdRef.current) return;
+      setItems((prev) => appendNewProducts(prev, result.data));
+      setHasMore(result.hasMore);
+      setTotalCount(result.count);
+      pageRef.current = nextPage;
+    } catch {
+      if (reqId === requestIdRef.current) toast.error(t("errorLoad"));
+    } finally {
+      if (reqId === requestIdRef.current) {
+        busyRef.current = false;
+        setLoadingMore(false);
+      }
+    }
+  };
+
+  // Relê as páginas já abertas: a lista não volta para os 20 primeiros e, depois de excluir,
+  // o próximo "Carregar mais" não pula o produto que subiu de página.
+  const reloadLoaded = async () => {
+    const reqId = ++requestIdRef.current;
+    const pages = pageRef.current;
+    const term = loadedSearchRef.current;
+    busyRef.current = true;
+    setLoadingMore(false);
+    setReloading(true);
+    try {
+      let list: Product[] = [];
+      let more = false;
+      let count = 0;
+      let lastPage = 1;
+      for (let page = 1; page <= pages; page++) {
+        const result = await fetchProducts({ pageNumber: page, searchParam: term });
+        if (reqId !== requestIdRef.current) return;
+        list = appendNewProducts(list, result.data);
+        more = result.hasMore;
+        count = result.count;
+        lastPage = page;
+        if (!result.hasMore) break;
+      }
+      setItems(list);
+      setHasMore(more);
+      setTotalCount(count);
+      pageRef.current = lastPage;
+    } catch {
+      if (reqId === requestIdRef.current) toast.error(t("errorLoad"));
+    } finally {
+      if (reqId === requestIdRef.current) {
+        busyRef.current = false;
+        setReloading(false);
+        // Pode ter passado na frente da 1ª carga, que então não desliga o esqueleto.
+        setLoading(false);
+      }
+    }
+  };
 
   const resetForm = () => {
     setFormName("");
@@ -194,14 +302,21 @@ export default function CatalogoPage() {
     setSaving(true);
     try {
       if (editing) {
-        await updateProduct(editing.id, payload);
+        const { data } = await updateProduct(editing.id, payload);
         toast.success(t("successUpdate"));
+        setDialogOpen(false);
+        // Editar não muda a posição na lista: troca a linha sem reler as páginas abertas.
+        if (data && data.id === editing.id) {
+          setItems((prev) => prev.map((p) => (p.id === data.id ? data : p)));
+        } else {
+          reloadLoaded();
+        }
       } else {
         await createProduct(payload);
         toast.success(t("successCreate"));
+        setDialogOpen(false);
+        reloadLoaded();
       }
-      setDialogOpen(false);
-      load();
     } catch {
       toast.error(editing ? t("errorUpdate") : t("errorCreate"));
     } finally {
@@ -216,7 +331,7 @@ export default function CatalogoPage() {
       await deleteProduct(deleting.id);
       toast.success(t("successDelete"));
       setDeleting(null);
-      load();
+      reloadLoaded();
     } catch {
       toast.error(t("errorDelete"));
     } finally {
@@ -291,14 +406,14 @@ export default function CatalogoPage() {
         help={{
           description: t("helpDesc"),
           sections: [
-            { title: t("helpS0T"), items: [t("helpS0I0"), t("helpS0I1"), t("helpS0I2")] },
-            { title: t("helpS1T"), items: [t("helpS1I0"), t("helpS1I1")] },
+            { title: t("helpS0T"), items: [t("helpS0I0"), t("helpS0I1"), t("helpS0I2"), t("helpS0I3")] },
+            { title: t("helpS1T"), items: [t("helpS1I0"), t("helpS1I1"), t("helpS1I2")] },
           ],
         }}
       >
         <div className="flex gap-2">
-          <Button variant="outline" size="sm" onClick={load} disabled={loading}>
-            <RefreshCw className={`mr-2 h-4 w-4 ${loading ? "animate-spin" : ""}`} />
+          <Button variant="outline" size="sm" onClick={reloadLoaded} disabled={loading || reloading}>
+            <RefreshCw className={`mr-2 h-4 w-4 ${loading || reloading ? "animate-spin" : ""}`} />
             {t("refresh")}
           </Button>
           <Button size="sm" onClick={openCreate}>
@@ -330,6 +445,7 @@ export default function CatalogoPage() {
           </Button>
         </EmptyState>
       ) : (
+        <>
         <Card>
           <CardContent className="p-0 overflow-x-auto">
             <Table>
@@ -345,8 +461,8 @@ export default function CatalogoPage() {
               <TableBody>
                 {items.map((p) => {
                   const img = resolveImg(p.mainImageUrl);
-                  const promo = formatPrice(p.pricePromo);
-                  const original = formatPrice(p.priceOriginal);
+                  const promo = formatPrice(p.pricePromo, formatMoney);
+                  const original = formatPrice(p.priceOriginal, formatMoney);
                   return (
                     <TableRow key={p.id}>
                       <TableCell>
@@ -395,6 +511,18 @@ export default function CatalogoPage() {
             </Table>
           </CardContent>
         </Card>
+        <div className="flex flex-col items-center gap-2 sm:flex-row sm:justify-between">
+          <p className="text-xs text-muted-foreground">
+            {t("showingCount", { shown: items.length, total: Math.max(totalCount, items.length) })}
+          </p>
+          {hasMore && (
+            <Button variant="outline" size="sm" onClick={loadMore} disabled={loadingMore || reloading}>
+              {loadingMore && <RefreshCw className="mr-2 h-4 w-4 animate-spin" />}
+              {t("loadMore")}
+            </Button>
+          )}
+        </div>
+        </>
       )}
 
       {/* Create/Edit dialog */}
@@ -419,11 +547,11 @@ export default function CatalogoPage() {
             <div className="grid grid-cols-2 gap-3">
               <div className="space-y-1.5">
                 <Label htmlFor="p-po">{t("labelPriceOriginal")}</Label>
-                <Input id="p-po" value={formPriceOriginal} onChange={(e) => setFormPriceOriginal(e.target.value)} placeholder="0,00" inputMode="decimal" />
+                <Input id="p-po" value={formPriceOriginal} onChange={(e) => setFormPriceOriginal(e.target.value)} placeholder={pricePlaceholder} inputMode="decimal" />
               </div>
               <div className="space-y-1.5">
                 <Label htmlFor="p-pp">{t("labelPricePromo")}</Label>
-                <Input id="p-pp" value={formPricePromo} onChange={(e) => setFormPricePromo(e.target.value)} placeholder="0,00" inputMode="decimal" />
+                <Input id="p-pp" value={formPricePromo} onChange={(e) => setFormPricePromo(e.target.value)} placeholder={pricePlaceholder} inputMode="decimal" />
               </div>
             </div>
 

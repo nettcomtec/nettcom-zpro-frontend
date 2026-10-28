@@ -36,6 +36,7 @@ import {
 import { getInitials } from "@/lib/utils";
 import { ProfilePicPreviewDialog, type ProfilePicPreview } from "@/components/shared/profile-pic-preview-dialog";
 import { validateChatFile, formatMaxFileSize, namePastedFile, shouldDeferPasteToText } from "@/lib/chat-upload-validation";
+import { buildMediaDownloadProxyUrl } from "@/lib/media-fetch";
 
 const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL || "";
 
@@ -76,9 +77,13 @@ function AdminMsgContent({ msg, isMine }: { msg: SupportMessage; isMine: boolean
   const downloadFile = (url: string, name = "arquivo") => {
     const isExternal = url.startsWith("http://") || url.startsWith("https://")
     const opts: RequestInit = isExternal ? { credentials: "omit" } : { credentials: "include" }
-    fetch(url, opts).then((r) => r.blob()).then((blob) => {
+    fetch(url, opts).then((r) => { if (!r.ok) throw new Error("not ok"); return r.blob(); }).then((blob) => {
       const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 2000);
-    }).catch(() => { const a = document.createElement("a"); a.href = url; a.download = name; a.click(); });
+    }).catch(() => {
+      // Bucket S3/R2 sem CORS: o "download" é ignorado em URL de outro domínio e o arquivo só abria. A rota do front devolve como anexo.
+      const a = document.createElement("a"); a.href = isExternal ? buildMediaDownloadProxyUrl(url, name) : url; a.download = name;
+      document.body.appendChild(a); a.click(); a.remove();
+    });
   };
 
   if (msg.mediaType === "image") {

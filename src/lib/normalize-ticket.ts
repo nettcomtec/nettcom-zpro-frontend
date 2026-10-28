@@ -45,6 +45,26 @@ function sanitizeProfilePic(url: unknown): string {
   return s;
 }
 
+/** Id de canal opcional como string (o pg devolve BIGINT como string; socket pode mandar number). */
+function optionalIdString(value: unknown): string | undefined {
+  if (value === null || value === undefined) return undefined;
+  const s = String(value).trim();
+  return s ? s : undefined;
+}
+
+/**
+ * Telegram do contato: campo presente e vazio = null (Telegram tirado do cadastro — o
+ * merge do store limpa); campo ausente = undefined (payload magro — o merge preserva).
+ */
+function contactTelegramIdOf(
+  contact: Record<string, unknown>,
+  t: Record<string, unknown>
+): string | null | undefined {
+  if ("telegramId" in contact) return optionalIdString(contact.telegramId) ?? null;
+  if ("contactTelegramId" in t) return optionalIdString(t.contactTelegramId) ?? null;
+  return undefined;
+}
+
 /** Normaliza extraInfo para sempre ser { name, value }[] independente do formato da API */
 function normalizeExtraInfo(raw: unknown): { name: string; value: string }[] | undefined {
   if (!raw) return undefined;
@@ -106,6 +126,10 @@ export function normalizeTicket(raw: Record<string, unknown>): Ticket {
       bsuid: (contact.bsuid ?? t.contactBsuid ?? undefined) as string | undefined,
       instagramPK: contact.instagramPK ?? undefined,
       messengerId: contact.messengerId ?? undefined,
+      // Telegram do contato (gate do "Convidar para o Telegram": só contato sem
+      // Telegram). Da lista vem com alias (contactTelegramId); do ShowTicket, no
+      // contact nested.
+      telegramId: contactTelegramIdOf(contact, t),
       email: (contact.email ?? t.email ?? "") as string,
       profilePicUrl: sanitizeProfilePic(contact.profilePicUrl ?? t.profilePicUrl),
       cpf: (contact.cpf as string) || undefined,

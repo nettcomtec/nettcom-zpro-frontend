@@ -1,4 +1,4 @@
-import api from "@/lib/api";
+import api, { BACKGROUND_REQUEST } from "@/lib/api";
 
 export async function fetchCampaigns(params?: { page?: number; limit?: number }) {
   return api.get("/campaigns", { params: params || { page: 1, limit: 15 } });
@@ -62,6 +62,35 @@ export async function cancelCampaign(campaignId: number) {
 
 export async function getCampaignReport(campaignId: number) {
   return api.get(`/campaigns/${campaignId}/report`);
+}
+
+/** Quem respondeu à campanha: só contato, hora e atendimento (o texto fica no atendimento). */
+export interface CampaignRepliesResponse {
+  campaignId: number;
+  available: boolean;
+  windowDays: number;
+  /** Contatos conferidos (enviados, sem falha nem descadastro) */
+  checked: number;
+  count: number;
+  reason?: "timeout" | "error" | "busy" | "no_channel";
+  replies: Array<{ contactId: number; repliedAt: string; ticketId: number }>;
+}
+
+/** Leitura em segundo plano: backend anterior responde 404 e a tela segue sem a coluna. */
+export async function getCampaignReplies(campaignId: number) {
+  return api.get<CampaignRepliesResponse>(`/campaigns/${campaignId}/replies`, { ...BACKGROUND_REQUEST });
+}
+
+/** Resposta utilizável (`available`) indexada por contato, ou null. */
+export function indexCampaignReplies(
+  data: CampaignRepliesResponse | null | undefined
+): { summary: CampaignRepliesResponse; byContact: Map<number, { repliedAt: string; ticketId: number }> } | null {
+  if (!data || data.available !== true || !Array.isArray(data.replies)) return null;
+  const byContact = new Map<number, { repliedAt: string; ticketId: number }>();
+  for (const r of data.replies) {
+    if (typeof r?.contactId === "number" && r.repliedAt) byContact.set(r.contactId, { repliedAt: r.repliedAt, ticketId: r.ticketId });
+  }
+  return { summary: data, byContact };
 }
 
 export interface ContactsReportCampaignParams {

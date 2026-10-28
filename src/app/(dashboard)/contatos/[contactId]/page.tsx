@@ -11,6 +11,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { EmptyState } from "@/components/layout/empty-state";
 import { PageHeader } from "@/components/layout/page-header";
 import type { PageHelpProps } from "@/components/layout/page-help";
+import { PanelAppOpenButton } from "@/components/panel-apps/panel-app-open-menu";
 import { ContactCrmSummary } from "@/components/contact-crm/contact-crm-summary";
 import { ContactTimeline } from "@/components/contact-crm/contact-timeline";
 import { RelationshipTab } from "@/components/contact-crm/relationship-tab";
@@ -127,6 +128,10 @@ export default function ContactProfilePage() {
 
   const renderHeader = (description: string) => (
     <PageHeader title={t("title")} description={description} help={pageHelp}>
+      {/* "Abrir em...": só depois do acesso ao contato confirmado pelo servidor */}
+      {state.status === "ok" && !restricted && validId && (
+        <PanelAppOpenButton placement="contact" contactId={contactId} ticketIdHint={ticketIdHint} size="sm" />
+      )}
       <Button variant="outline" size="sm" onClick={handleBack}>
         <ArrowLeft className="mr-2 h-4 w-4" />
         {t("back")}

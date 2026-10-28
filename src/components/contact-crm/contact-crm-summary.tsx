@@ -10,8 +10,9 @@ import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { RatingStars } from "@/components/contact-crm/rating-stars";
 import { useLiveMode } from "@/hooks/use-live-mode";
+import { useRegion } from "@/hooks/use-region";
 import { getReadableTextColor } from "@/lib/color-contrast";
-import { formatCurrencyBRL, formatDate, formatNumber } from "@/lib/format";
+import { formatDate, formatNumber } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import type { ContactCrmSummary as ContactCrmSummaryData } from "@/services/contact-crm";
 
@@ -75,6 +76,8 @@ export interface ContactCrmSummaryProps {
 export function ContactCrmSummary({ summary, className }: ContactCrmSummaryProps) {
   const t = useTranslations("contactCrm");
   const { isLiveMode } = useLiveMode();
+  // Valor das oportunidades = dinheiro da empresa: moeda e formato do país da Região.
+  const { formatMoney } = useRegion();
 
   const ticketsTotal = toNumber(summary.tickets?.total);
   const ticketsOpen = toNumber(summary.tickets?.openNow);
@@ -105,7 +108,7 @@ export function ContactCrmSummary({ summary, className }: ContactCrmSummaryProps
           <>
             <SummaryStat
               title={t("sales")}
-              value={formatCurrencyBRL(toNumber(opp.wonValue))}
+              value={formatMoney(toNumber(opp.wonValue))}
               icon={TrendingUp}
               sub={t("wonCount", { count: toNumber(opp.won) })}
               blur={isLiveMode}
@@ -129,14 +132,14 @@ export function ContactCrmSummary({ summary, className }: ContactCrmSummaryProps
             </SummaryStat>
             <SummaryStat
               title={t("openOpportunities")}
-              value={formatCurrencyBRL(toNumber(opp.openValue))}
+              value={formatMoney(toNumber(opp.openValue))}
               icon={Target}
               sub={t("openCount", { count: toNumber(opp.open) })}
               blur={isLiveMode}
             />
             <SummaryStat
               title={t("lostValue")}
-              value={formatCurrencyBRL(toNumber(opp.lostValue))}
+              value={formatMoney(toNumber(opp.lostValue))}
               icon={TrendingDown}
               sub={t("lostCount", { count: toNumber(opp.lost) })}
               blur={isLiveMode}

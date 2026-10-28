@@ -10,12 +10,31 @@ export interface FastReply {
   media?: string;
   mediasJson?: string;
   voice?: string;
-  messageType?: "text" | "buttons" | "list" | "template";
+  // "location": dados dentro do próprio `message` (lib/location-message.ts), sem coluna nova.
+  messageType?: "text" | "buttons" | "list" | "template" | "location";
   buttonsJson?: string;
   listJson?: string;
   templateJson?: string;
   createdAt: string;
   updatedAt: string;
+}
+
+/**
+ * Quem pode criar/editar mensagem rápida PÚBLICA (para toda a equipe): o critério da tela
+ * de Mensagens rápidas + o perfil personalizado com `quickreplies_manage_public`. Só o
+ * `custom` passa pela permissão — `hasPermission` devolve true para todo perfil não-custom.
+ * O backend não confere (pré-existente): é um gate de tela.
+ */
+export function canManagePublicQuickReplies(auth: {
+  user?: { profile?: string | null } | null;
+  isAdmin?: boolean;
+  isSuporte?: boolean;
+  hasPermission?: (key: "quickreplies_manage_public") => boolean;
+}): boolean {
+  const profile = auth.user?.profile ?? "";
+  if (auth.isAdmin || auth.isSuporte) return true;
+  if (["admin", "super", "supervisor", "superadmin"].includes(profile)) return true;
+  return profile === "custom" && !!auth.hasPermission?.("quickreplies_manage_public");
 }
 
 export function parseFastReplyMedias(item: FastReply): string[] {

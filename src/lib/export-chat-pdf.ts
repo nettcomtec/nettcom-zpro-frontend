@@ -1,21 +1,111 @@
 import jsPDF from "jspdf";
 import type { Ticket } from "@/stores/ticket-store";
 import { displayContactIdentity } from "@/lib/contact-identity";
+import { uiT } from "@/lib/ui-t";
+import { buildMediaDownloadProxyUrl } from "@/lib/media-fetch";
+import {
+  createPdfDateFormatter,
+  ensurePdfUnicodeFont,
+  fitTextToPdfFont,
+  pdfFontKindForLocale,
+  type PdfDateFormatter,
+  type PdfUnicodeFont,
+} from "@/lib/pdf-unicode-font";
+import {
+  formatTicketTransferNotice,
+  readTicketTransferNotice,
+  transferBodyWithAsciiArrow,
+  type TicketTransferNotice,
+} from "@/lib/ticket-transfer-notice";
+
+// ─── texto fixo (idioma da tela de quem exporta) ─────────────────────────────
+// A fonte do PDF (helvetica) só desenha Latin-1 mais a pontuação do WinAnsi ("—", "…",
+// aspas curvas, "€"): o jsPDF grava esses num byte só; qualquer outro caractere vira
+// texto de 16 bits ilegível.
+const PDF_SAFE_TEXT = /^[\x00-\xFF€‚ƒ„…†‡ˆ‰Š‹ŒŽ‘’“”•–—˜™š›œžŸ]*$/;
+const PDF_UNSAFE_CHAR = /[^\x00-\xFF€‚ƒ„…†‡ˆ‰Š‹ŒŽ‘’“”•–—˜™š›œžŸ]/g;
+
+// Tela em russo, turco, japonês ou chinês: fonte Noto baixada do próprio front na hora
+// da exportação (lib/pdf-unicode-font). Null = helvetica, exatamente como antes.
+// Definida no início de cada exportação, antes de qualquer texto.
+let pdfUnicodeFont: PdfUnicodeFont | null = null;
+let pdfUiLocale = "";
+// Datas no idioma da tela quando a fonte do PDF as desenha; senão pt-BR (definidas
+// junto com a fonte, no início de cada exportação).
+let pdfDates: PdfDateFormatter = createPdfDateFormatter("pt", () => true);
+
+// Caixa alta dos rótulos: com a Noto, pela regra do idioma da tela (turco: i → İ, não I);
+// sem ela, o toUpperCase() de sempre.
+function pdfUpper(text: string): string {
+  if (!pdfUnicodeFont || !pdfUiLocale) return text.toUpperCase();
+  try {
+    return text.toLocaleUpperCase(pdfUiLocale);
+  } catch {
+    return text.toUpperCase();
+  }
+}
+
+// Tradução que a fonte do PDF não desenha (com a helvetica: japonês, chinês, árabe,
+// russo…; com a Noto: o que ficou fora dela) fica com o português de antes, em vez de "?".
+function pdfT(key: string, fallback: string, values?: Record<string, string | number>): string {
+  const out = uiT(key, values, fallback);
+  if (pdfUnicodeFont) {
+    const nfc = out.normalize("NFC");
+    if (pdfUnicodeFont.canRender(nfc)) return nfc;
+  } else if (PDF_SAFE_TEXT.test(out.normalize("NFC"))) return out;
+  return values
+    ? fallback.replace(/\{(\w+)\}/g, (m, name) => (values[name] === undefined ? m : String(values[name])))
+    : fallback;
+}
+
+// Divisória de transferência (lib/ticket-transfer-notice): mesmas chaves da bolha do chat.
+// O idioma é decidido pelo texto fixo, com os marcadores no lugar dos nomes; os nomes entram
+// depois, para um nome com emoji ou outra escrita não devolver o rótulo inteiro ao português
+// (o nome passa pelo sanitizeForPdf, como o resto do texto).
+function transferPdfT(key: string, values: Record<string, string> | undefined, fallback: string): string {
+  if (!values) return pdfT(`messageBubble.${key}`, fallback);
+  const marks: Record<string, string> = {};
+  for (const name of Object.keys(values)) marks[name] = `{${name}}`;
+  return pdfT(`messageBubble.${key}`, fallback, marks).replace(/\{(\w+)\}/g, (m, name: string) => {
+    const value = values[name];
+    return value === undefined ? m : value;
+  });
+}
+
+// Texto da divisória no PDF, uma informação por linha. A seta é "->": o "→" não existe na
+// fonte padrão do PDF e viraria "?" (inclusive dentro de um nome).
+function transferPdfLines(notice: TicketTransferNotice): string[] {
+  const text = formatTicketTransferNotice(notice, transferPdfT, { arrow: "->" });
+  const lines: string[] = [text.title];
+  if (text.path) lines.push(text.path);
+  if (text.channel) lines.push(text.channel);
+  return lines.map((line) => transferBodyWithAsciiArrow(line));
+}
+
+// Montado a cada exportação (sanitizeForPdf roda para cada texto do PDF).
+let pdfEmojiMap: Record<string, string> | null = null;
+function buildPdfEmojiMap(): Record<string, string> {
+  return {
+    "🖼": pdfT("exportChatPdf.mediaImage", "[Imagem]"), "🎵": pdfT("exportChatPdf.mediaAudio", "[Audio]"),
+    "🎬": pdfT("exportChatPdf.mediaVideo", "[Video]"), "🎨": pdfT("exportChatPdf.mediaSticker", "[Sticker]"),
+    "📄": pdfT("exportChatPdf.mediaDocument", "[Documento]"), "👤": pdfT("exportChatPdf.mediaContact", "[Contato]"),
+    "📍": pdfT("exportChatPdf.mediaLocation", "[Localizacao]"), "📎": pdfT("exportChatPdf.mediaGeneric", "[Midia]"),
+    "📝": pdfT("exportChatPdf.internalNote", "[Nota interna]"), "⏳": pdfT("exportChatPdf.mediaWaiting", "[Aguardando]"),
+  };
+}
 
 // ─── sanitize ─────────────────────────────────────────────────────────────────
 function sanitizeForPdf(text: string): string {
-  const emojiMap: Record<string, string> = {
-    "🖼": "[Imagem]", "🎵": "[Audio]", "🎬": "[Video]", "🎨": "[Sticker]",
-    "📄": "[Documento]", "👤": "[Contato]", "📍": "[Localizacao]",
-    "📎": "[Midia]", "📝": "[Nota interna]", "⏳": "[Aguardando]",
-  };
+  const emojiMap = pdfEmojiMap ?? (pdfEmojiMap = buildPdfEmojiMap());
   let s = text;
   for (const [emoji, label] of Object.entries(emojiMap)) s = s.replaceAll(emoji, label);
   s = s.replace(/[\u{1F000}-\u{1FFFF}]/gu, "");
   s = s.replace(/[\u{2600}-\u{27BF}]/gu, "");
   s = s.replace(/[\u{1F900}-\u{1F9FF}]/gu, "");
   s = s.normalize("NFC");
-  s = s.replace(/[^\x00-\xFF]/g, "?");
+  // Com a Noto carregada fica tudo o que ela desenha (cirílico, kana, kanji…); o resto
+  // vira "?", como sempre.
+  s = pdfUnicodeFont ? fitTextToPdfFont(pdfUnicodeFont, s) : s.replace(PDF_UNSAFE_CHAR, "?");
   return s;
 }
 
@@ -102,10 +192,16 @@ async function fetchImageAsDataUrl(
         try { return new URL(url).origin === window.location.origin; }
         catch { return false; }
       })();
-      res = await fetch(url, {
-        signal: ctrl.signal,
-        credentials: isSameOrigin ? "include" : "omit",
-      });
+      try {
+        res = await fetch(url, {
+          signal: ctrl.signal,
+          credentials: isSameOrigin ? "include" : "omit",
+        });
+      } catch (err) {
+        // Bucket S3/R2 sem CORS: a imagem ficava fora do PDF. Repete pela rota do front.
+        if (ctrl.signal.aborted || isSameOrigin || !/^https?:\/\//i.test(url)) throw err;
+        res = await fetch(buildMediaDownloadProxyUrl(url), { signal: ctrl.signal, credentials: "same-origin" });
+      }
     } finally {
       clearTimeout(tid);
     }
@@ -319,7 +415,6 @@ function drawStickerFallback(
   w: number,
   h: number,
   color: [number, number, number],
-  fontName: string,
 ): void {
   const bg = lighten(color, 0.9);
   doc.setFillColor(...bg);
@@ -342,9 +437,9 @@ function drawStickerFallback(
   doc.circle(cx - r * 3.5, cy, r, "F");
 
   doc.setFontSize(5.5);
-  doc.setFont(fontName, "normal");
+  setPdfFont(doc, "normal");
   doc.setTextColor(...color);
-  doc.text("Figurinha animada", cx, y + h - 2.5, { align: "center" });
+  doc.text(pdfT("exportChatPdf.animatedSticker", "Figurinha animada"), cx, y + h - 2.5, { align: "center" });
 }
 
 /** Draws a placeholder for media that couldn't be fetched (expired or unavailable on server). */
@@ -354,7 +449,6 @@ function drawMediaUnavailable(
   y: number,
   w: number,
   h: number,
-  fontName: string,
 ): void {
   const BG:     [number, number, number] = [245, 245, 247];
   const BORDER: [number, number, number] = [200, 205, 215];
@@ -382,9 +476,9 @@ function drawMediaUnavailable(
   doc.circle(ix + 2.8, iy + 2.5, 1.2, "S");
 
   doc.setFontSize(5.5);
-  doc.setFont(fontName, "normal");
+  setPdfFont(doc, "normal");
   doc.setTextColor(...ICON);
-  doc.text("Midia nao disponivel", cx, y + h - 2.5, { align: "center" });
+  doc.text(pdfT("exportChatPdf.mediaUnavailable", "Midia nao disponivel"), cx, y + h - 2.5, { align: "center" });
 }
 
 /** Draws a visual audio waveform: play-button circle + bar pattern. */
@@ -477,19 +571,32 @@ async function getLogoDataUrl(): Promise<LogoData | null> {
 // widths crash. Helvetica is the cleanest built-in sans-serif available in jsPDF.
 const PDF_FONT = "helvetica";
 
+// Todo setFont do PDF passa por aqui: com a Noto carregada, TODO texto usa a família
+// dela ("bold" sem arquivo negrito e "italic" usam a regular — o jsPDF cairia na Times);
+// sem ela, a helvetica no estilo pedido, como antes.
+function setPdfFont(doc: jsPDF, style: "normal" | "bold" | "italic"): void {
+  const font = pdfUnicodeFont;
+  if (!font) {
+    doc.setFont(PDF_FONT, style);
+    return;
+  }
+  doc.setFont(font.family, style === "bold" && font.hasBold ? "bold" : "normal");
+}
+
 // ─── auth helper ──────────────────────────────────────────────────────────────
 /** Reads the logged-in username from localStorage (written by auth store). */
 function getExportingUser(): string {
-  if (typeof window === "undefined") return "Sistema";
+  const system = pdfT("common.system", "Sistema");
+  if (typeof window === "undefined") return system;
   try {
     const raw = localStorage.getItem("usuario");
     if (raw) {
       const u = JSON.parse(raw) as Record<string, unknown>;
       if (u.username) return String(u.username);
     }
-    return localStorage.getItem("username") ?? "Sistema";
+    return localStorage.getItem("username") ?? system;
   } catch {
-    return "Sistema";
+    return system;
   }
 }
 
@@ -511,6 +618,9 @@ const NOTE_TEXT:    [number, number, number] = [120, 53,  15 ];
 // atendente: verde para separar visualmente da caixa amarela de nota.
 const SCHED_BG:     [number, number, number] = [236, 253, 245];
 const SCHED_TEXT:   [number, number, number] = [6,   95,  70 ];
+// Divisória de transferência — linha de sistema, no azul do cartão do chat.
+const TRANSFER_BG:   [number, number, number] = [239, 246, 255];
+const TRANSFER_TEXT: [number, number, number] = [29,  78,  216];
 const GRAY_MUTED:   [number, number, number] = [107, 114, 128];
 const GRAY_BORDER:  [number, number, number] = [218, 220, 224];
 const CHAT_BG:      [number, number, number] = [236, 239, 241];
@@ -538,6 +648,8 @@ export interface ExportMessage {
   ack?: number;
   contact?: { name?: string; number?: string };
   user?: { id: number; name: string };
+  // Dado estruturado de mensagens de sistema (divisória de transferência: kind "ticket_transfer").
+  dataJson?: string;
 }
 
 // ─── helpers ──────────────────────────────────────────────────────────────────
@@ -563,7 +675,8 @@ function mediaLabel(type: string): string {
     image: "Imagem", audio: "Audio", video: "Video", sticker: "Figurinha",
     document: "Documento", contact: "Contato", location: "Localizacao", generic: "Midia",
   };
-  return labels[getMediaKind(type)] ?? "Midia";
+  const kind = getMediaKind(type);
+  return pdfT(`exportChatPdf.media.${kind}`, labels[kind] ?? "Midia");
 }
 
 function isTextMessage(type?: string): boolean {
@@ -576,7 +689,7 @@ function isTextMessage(type?: string): boolean {
 // agendada e efetivamente disparada. Chega com mediaType "notes" (e o que faz o
 // chat centralizar a linha), mas NAO e nota do atendente: nao entra no contador
 // de notas internas e ganha rotulo proprio no lugar da caixa "[Nota interna]".
-const SCHEDULE_NOTICE_LABEL = "Mensagem agendada enviada";
+const scheduleNoticeLabel = (): string => pdfT("exportChatPdf.scheduleNotice", "Mensagem agendada enviada");
 function isScheduleNoticeMessage(m: ExportMessage): boolean {
   return !!m.messageId?.startsWith("sched_notice");
 }
@@ -590,18 +703,24 @@ const FILE_MEDIA_KINDS: ReadonlySet<MediaKind> = new Set<MediaKind>([
 ]);
 
 function statusLabel(status: string): string {
-  const map: Record<string, string> = { open: "Em aberto", pending: "Pendente", closed: "Encerrado" };
+  const map: Record<string, string> = {
+    open: pdfT("exportChatPdf.statusOpen", "Em aberto"),
+    pending: pdfT("exportChatPdf.statusPending", "Pendente"),
+    closed: pdfT("exportChatPdf.statusClosed", "Encerrado"),
+  };
   return map[status] ?? status.toUpperCase();
 }
 
 function formatDate(iso: string): string {
-  return new Date(iso).toLocaleDateString("pt-BR", {
-    weekday: "long", year: "numeric", month: "long", day: "numeric",
-  });
+  return pdfDates.longDate(iso);
 }
 
 function formatTime(iso: string): string {
-  return new Date(iso).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" });
+  return pdfDates.shortTime(iso);
+}
+
+function formatDateTime(value: string | Date): string {
+  return pdfDates.dateTime(value);
 }
 
 function formatDuration(ms: number): string {
@@ -616,9 +735,9 @@ function formatDuration(ms: number): string {
 
 function resolveAckLabel(ack?: number): string {
   if (ack === undefined || ack === null) return "";
-  if (ack >= 3) return "Lido";
-  if (ack === 2) return "Entregue";
-  if (ack === 1) return "Enviado";
+  if (ack >= 3) return pdfT("exportChatPdf.ackRead", "Lido");
+  if (ack === 2) return pdfT("exportChatPdf.ackDelivered", "Entregue");
+  if (ack === 1) return pdfT("exportChatPdf.ackSent", "Enviado");
   return "";
 }
 
@@ -641,17 +760,32 @@ export async function exportChatPdf(ticket: Ticket, rawMessages: unknown[]): Pro
   const ME_TEXT:    [number, number, number] = [255, 255, 255];
   const TS_ME       = lighten(BRAND, 0.55);
 
-  const logo          = await getLogoDataUrl();
+  const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
+  // A fonte vem antes de qualquer rótulo: pdfT/sanitizeForPdf decidem por ela. Só
+  // ru/tr/ja/zh baixam (junto com o logo); falha = null = helvetica de sempre.
+  const uiLocale = typeof document !== "undefined" ? document.documentElement.lang : "";
+  const fontKind = pdfFontKindForLocale(uiLocale);
+  const [logo, unicodeFont] = await Promise.all([
+    getLogoDataUrl(),
+    fontKind ? ensurePdfUnicodeFont(doc, fontKind).catch(() => null) : Promise.resolve(null),
+  ]);
+  pdfUnicodeFont = unicodeFont;
+  pdfUiLocale = uiLocale;
+  pdfDates = createPdfDateFormatter(uiLocale, (s) =>
+    pdfUnicodeFont ? pdfUnicodeFont.canRender(s) : PDF_SAFE_TEXT.test(s),
+  );
+
+  pdfEmojiMap = buildPdfEmojiMap();
+  const ticketWord = pdfT("exportChatPdf.ticketField", "Ticket");
+
   const exportingUser = getExportingUser();
 
-  const doc      = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
-  const fontName = PDF_FONT;
   // Blindagem: tickets sem contato carregado (ou sem nome) faziam o export
   // estourar TypeError ("Cannot read properties of undefined") logo na 1a linha,
   // sem log útil. Garante um objeto mínimo e um name não-vazio para todo o restante.
   const contact = {
     ...(ticket.contact ?? {}),
-    name: (ticket.contact?.name && String(ticket.contact.name).trim()) || "Contato",
+    name: (ticket.contact?.name && String(ticket.contact.name).trim()) || pdfT("common.contact", "Contato"),
   } as NonNullable<Ticket["contact"]>;
   const contactPhotoRaw = contact.profilePicUrl
     ? await fetchImageAsDataUrl(resolveMediaUrl(contact.profilePicUrl), 200, 5000)
@@ -670,7 +804,10 @@ export async function exportChatPdf(ticket: Ticket, rawMessages: unknown[]): Pro
   );
   const nonDeleted    = messages.filter((m) => !m.isDeleted);
   const deletedCount  = messages.filter((m) =>  m.isDeleted).length;
-  const sentByAgent   = nonDeleted.filter((m) =>  m.fromMe && m.mediaType !== "notes" && m.mediaType !== "callNotes").length;
+  // A divisória de transferência é linha de sistema: não é mensagem enviada pelo agente.
+  const sentByAgent   = nonDeleted.filter(
+    (m) => m.fromMe && m.mediaType !== "notes" && m.mediaType !== "callNotes" && m.mediaType !== "transfer",
+  ).length;
   const sentByContact = nonDeleted.filter((m) => !m.fromMe).length;
   // Aviso de disparo de agendada usa mediaType "notes" mas e linha de sistema —
   // fora do contador de notas internas do atendente.
@@ -680,7 +817,7 @@ export async function exportChatPdf(ticket: Ticket, rawMessages: unknown[]): Pro
 
   const firstContactMsg = messages.find((m) => !m.fromMe && !m.isDeleted);
   const firstAgentReply = messages.find(
-    (m) => m.fromMe && !m.isDeleted && m.mediaType !== "notes" && m.mediaType !== "callNotes"
+    (m) => m.fromMe && !m.isDeleted && m.mediaType !== "notes" && m.mediaType !== "callNotes" && m.mediaType !== "transfer"
   );
   const firstResponseMs =
     firstContactMsg && firstAgentReply &&
@@ -704,14 +841,17 @@ export async function exportChatPdf(ticket: Ticket, rawMessages: unknown[]): Pro
     doc.setFillColor(...BRAND);
     doc.rect(0, 0, 2, 10, "F");
     doc.setFontSize(7.5);
-    doc.setFont(fontName, "bold");
+    setPdfFont(doc, "bold");
     doc.setTextColor(...BRAND);
-    doc.text(sanitizeForPdf(`Ticket #${ticket.id}`), MARGIN + 2, 6.5);
-    doc.setFont(fontName, "normal");
+    const ticketLabel = sanitizeForPdf(`${ticketWord} #${ticket.id}`);
+    doc.text(ticketLabel, MARGIN + 2, 6.5);
+    // Rótulo longo ("Обращение #123456") empurra o nome; o curto mantém a posição de sempre.
+    const ticketLabelWidth = doc.getTextWidth(ticketLabel);
+    setPdfFont(doc, "normal");
     doc.setTextColor(...GRAY_MUTED);
     doc.text(
       sanitizeForPdf(`${contact.name}  |  ${displayContactIdentity(contact)}`),
-      MARGIN + 22, 6.5,
+      ticketLabelWidth > 19 ? MARGIN + 2 + ticketLabelWidth + 3 : MARGIN + 22, 6.5,
     );
     y = 16;
   };
@@ -750,20 +890,20 @@ export async function exportChatPdf(ticket: Ticket, rawMessages: unknown[]): Pro
   // Title + subtitle in header band
   doc.setTextColor(255, 255, 255);
   doc.setFontSize(8);
-  doc.setFont(fontName, "normal");
+  setPdfFont(doc, "normal");
   doc.setTextColor(...lighten(BRAND, 0.55));
-  doc.text("HISTORICO DE ATENDIMENTO", MARGIN, 13);
+  doc.text(pdfT("exportChatPdf.coverTitle", "HISTORICO DE ATENDIMENTO"), MARGIN, 13);
 
   doc.setFontSize(20);
-  doc.setFont(fontName, "bold");
+  setPdfFont(doc, "bold");
   doc.setTextColor(255, 255, 255);
   doc.text(sanitizeForPdf(contact.name), MARGIN, 25);
 
   doc.setFontSize(8.5);
-  doc.setFont(fontName, "normal");
+  setPdfFont(doc, "normal");
   doc.setTextColor(...lighten(BRAND, 0.6));
   doc.text(
-    sanitizeForPdf(`Ticket #${ticket.id}  |  ${displayContactIdentity(contact)}  |  Gerado em ${new Date().toLocaleString("pt-BR")}`),
+    sanitizeForPdf(`${ticketWord} #${ticket.id}  |  ${displayContactIdentity(contact)}  |  ${pdfT("exportChatPdf.generatedAt", "Gerado em")} ${formatDateTime(new Date())}`),
     MARGIN, 34,
   );
 
@@ -771,17 +911,17 @@ export async function exportChatPdf(ticket: Ticket, rawMessages: unknown[]): Pro
   doc.setFillColor(...lighten(BRAND, 0.18));
   doc.roundedRect(MARGIN, 38, 47, 6, 1.5, 1.5, "F");
   doc.setFontSize(6.5);
-  doc.setFont(fontName, "bold");
+  setPdfFont(doc, "bold");
   doc.setTextColor(255, 255, 255);
-  doc.text("AUDITORIA DE CONVERSA", MARGIN + 3.5, 42.3);
+  doc.text(pdfT("exportChatPdf.auditBadge", "AUDITORIA DE CONVERSA"), MARGIN + 3.5, 42.3);
 
   y = 60;
 
   // ── Contact card ─────────────────────────────────────────────────────────────
   const contactItems: { label: string; value: string }[] = [];
-  if (contact.businessName) contactItems.push({ label: "Empresa",  value: contact.businessName });
-  contactItems.push({ label: "Telefone", value: displayContactIdentity(contact) });
-  if (contact.email) contactItems.push({ label: "E-mail", value: contact.email });
+  if (contact.businessName) contactItems.push({ label: pdfT("exportChatPdf.contactCompany", "Empresa"),  value: contact.businessName });
+  contactItems.push({ label: pdfT("exportChatPdf.contactPhone", "Telefone"), value: displayContactIdentity(contact) });
+  if (contact.email) contactItems.push({ label: pdfT("exportChatPdf.contactEmail", "E-mail"), value: contact.email });
   if (contact.cpf)   contactItems.push({ label: "CPF",    value: contact.cpf   });
   (contact.extraInfo ?? []).slice(0, 3).forEach((ei) =>
     contactItems.push({ label: ei.name, value: ei.value })
@@ -816,14 +956,14 @@ export async function exportChatPdf(ticket: Ticket, rawMessages: unknown[]): Pro
     doc.setFillColor(...BRAND);
     doc.circle(avatarCX, avatarCY, AV_R, "F");
     doc.setFontSize(7);
-    doc.setFont(fontName, "bold");
+    setPdfFont(doc, "bold");
     doc.setTextColor(255, 255, 255);
     doc.text(sanitizeForPdf(initials(contact.name)), avatarCX, avatarCY + 2.2, { align: "center" });
   }
 
   // Contact name — large, prominent
   doc.setFontSize(14);
-  doc.setFont(fontName, "bold");
+  setPdfFont(doc, "bold");
   doc.setTextColor(17, 24, 39);
   doc.text(sanitizeForPdf(contact.name), avatarCX + AV_R + 4, y + 12);
 
@@ -841,11 +981,11 @@ export async function exportChatPdf(ticket: Ticket, rawMessages: unknown[]): Pro
     const ix  = MARGIN + CPAD + col * cColW;
     const iy  = cdiv1 + 3 + row * 10;
     doc.setFontSize(5.5);
-    doc.setFont(fontName, "normal");
+    setPdfFont(doc, "normal");
     doc.setTextColor(...GRAY_MUTED);
-    doc.text(sanitizeForPdf(item.label.toUpperCase()), ix, iy);
+    doc.text(sanitizeForPdf(pdfUpper(item.label)), ix, iy);
     doc.setFontSize(8.5);
-    doc.setFont(fontName, "bold");
+    setPdfFont(doc, "bold");
     doc.setTextColor(17, 24, 39);
     doc.text(sanitizeForPdf(item.value), ix, iy + 6.5);
   });
@@ -859,7 +999,7 @@ export async function exportChatPdf(ticket: Ticket, rawMessages: unknown[]): Pro
     let tagX = MARGIN + CPAD;
     const tagY = cdiv2 + 2;
     doc.setFontSize(5.5);
-    doc.setFont(fontName, "bold");
+    setPdfFont(doc, "bold");
     contactTags.forEach((tag) => {
       const name = sanitizeForPdf(tag.name ?? "");
       if (!name || tagX > PAGE_W - MARGIN - 15) return;
@@ -877,14 +1017,25 @@ export async function exportChatPdf(ticket: Ticket, rawMessages: unknown[]): Pro
 
   // ── Ticket info card ─────────────────────────────────────────────────────────
   const ticketFields: { label: string; value: string; badge?: boolean }[] = [
-    { label: "TICKET",  value: `#${ticket.id}` },
-    { label: "STATUS",  value: statusLabel(ticket.status), badge: true },
-    ...(ticket.queue    ? [{ label: "FILA",         value: ticket.queue.name    }] : []),
-    ...(ticket.user     ? [{ label: "AGENTE",        value: ticket.user.name     }] : []),
-    ...(ticket.whatsapp ? [{ label: "CANAL",         value: ticket.whatsapp.name }] : []),
-    { label: "ABERTURA",    value: new Date(ticket.createdAt).toLocaleString("pt-BR") },
+    { label: pdfUpper(ticketWord),  value: `#${ticket.id}` },
+    { label: pdfUpper(pdfT("exportChatPdf.statusField", "Status")),  value: statusLabel(ticket.status), badge: true },
+    ...(ticket.queue    ? [{ label: pdfUpper(pdfT("exportChatPdf.queueField", "Fila")),     value: ticket.queue.name    }] : []),
+    ...(ticket.user     ? [{ label: pdfUpper(pdfT("exportChatPdf.agentField", "Agente")),   value: ticket.user.name     }] : []),
+    ...(ticket.whatsapp ? [{ label: pdfUpper(pdfT("exportChatPdf.channelField", "Canal")),  value: ticket.whatsapp.name }] : []),
+    { label: pdfUpper(pdfT("exportChatPdf.timelineOpening", "Abertura")),    value: formatDateTime(ticket.createdAt) },
     ...(ticket.status === "closed"
-      ? [{ label: "ENCERRAMENTO", value: new Date(ticket.updatedAt).toLocaleString("pt-BR") }]
+      ? [{ label: pdfUpper(pdfT("exportChatPdf.timelineClosing", "Encerramento")), value: formatDateTime(ticket.updatedAt) }]
+      : []),
+    // Atendimento trazido de outro servidor (migração de empresa): número, protocolo e
+    // data da migração. Sem `migrationRef` (atendimento comum) o card fica como antes.
+    ...(ticket.migrationRef?.oldId
+      ? [{ label: pdfUpper(pdfT("exportChatPdf.previousNumber", "Nº anterior")), value: `#${ticket.migrationRef.oldId}` }]
+      : []),
+    ...(ticket.migrationRef?.oldId && ticket.migrationRef.legacyProtocol
+      ? [{ label: pdfUpper(pdfT("exportChatPdf.previousProtocol", "Protocolo anterior")), value: ticket.migrationRef.legacyProtocol }]
+      : []),
+    ...(ticket.migrationRef?.oldId && ticket.migrationRef.migratedAt && !Number.isNaN(new Date(ticket.migrationRef.migratedAt).getTime())
+      ? [{ label: pdfUpper(pdfT("exportChatPdf.migratedAt", "Migrado em")), value: formatDateTime(ticket.migrationRef.migratedAt) }]
       : []),
   ];
 
@@ -902,11 +1053,11 @@ export async function exportChatPdf(ticket: Ticket, rawMessages: unknown[]): Pro
   doc.setFillColor(...BRAND);
   doc.roundedRect(MARGIN, y, 2.5, ticketCardH, 1.5, 1.5, "F");
 
-  // Status badge color map
+  // Status badge color map (pelo status do ticket: o rótulo segue o idioma da tela)
   const STATUS_COLORS: Record<string, [number, number, number]> = {
-    "Em aberto": [22, 163, 74],
-    "Pendente":  [202, 138, 4],
-    "Encerrado": [107, 114, 128],
+    open:    [22, 163, 74],
+    pending: [202, 138, 4],
+    closed:  [107, 114, 128],
   };
 
   ticketFields.forEach((f, i) => {
@@ -917,15 +1068,15 @@ export async function exportChatPdf(ticket: Ticket, rawMessages: unknown[]): Pro
 
     // Field label — small, muted
     doc.setFontSize(5.5);
-    doc.setFont(fontName, "normal");
+    setPdfFont(doc, "normal");
     doc.setTextColor(...GRAY_MUTED);
     doc.text(f.label, fx, fy);
 
     if (f.badge) {
       // Status pill
-      const badgeColor = STATUS_COLORS[f.value] ?? BRAND;
+      const badgeColor = STATUS_COLORS[ticket.status] ?? BRAND;
       doc.setFontSize(7);
-      doc.setFont(fontName, "bold");
+      setPdfFont(doc, "bold");
       const badgeW     = doc.getTextWidth(sanitizeForPdf(f.value)) + 10;
       doc.setFillColor(...badgeColor);
       doc.roundedRect(fx, fy + 2, badgeW, 6.5, 1.5, 1.5, "F");
@@ -933,7 +1084,7 @@ export async function exportChatPdf(ticket: Ticket, rawMessages: unknown[]): Pro
       doc.text(sanitizeForPdf(f.value), fx + 5, fy + 5.9);
     } else {
       doc.setFontSize(9);
-      doc.setFont(fontName, "bold");
+      setPdfFont(doc, "bold");
       doc.setTextColor(17, 24, 39);
       doc.text(sanitizeForPdf(f.value), fx, fy + 6.5);
     }
@@ -944,7 +1095,7 @@ export async function exportChatPdf(ticket: Ticket, rawMessages: unknown[]): Pro
     let tagX = MARGIN + 7;
     const tagY = y + ticketCardH - 9;
     doc.setFontSize(5.5);
-    doc.setFont(fontName, "bold");
+    setPdfFont(doc, "bold");
     ticketTags.forEach((tag) => {
       const name = sanitizeForPdf(tag.name ?? tag.tag ?? "");
       if (!name || tagX > PAGE_W - MARGIN - 10) return;
@@ -971,25 +1122,30 @@ export async function exportChatPdf(ticket: Ticket, rawMessages: unknown[]): Pro
   doc.roundedRect(MARGIN, y, 3, 24, 1.5, 1.5, "F");
 
   doc.setFontSize(6.5);
-  doc.setFont(fontName, "bold");
+  setPdfFont(doc, "bold");
   doc.setTextColor(...BRAND);
-  doc.text("CADEIA DE CUSTODIA DO DOCUMENTO", MARGIN + 7, y + 7);
+  doc.text(pdfT("exportChatPdf.custodyTitle", "CADEIA DE CUSTODIA DO DOCUMENTO"), MARGIN + 7, y + 7);
 
   const provenanceItems = [
-    { label: "Gerado por",           value: exportingUser },
-    { label: "Data/hora da geracao", value: new Date().toLocaleString("pt-BR") },
-    { label: "Total de mensagens",   value: String(nonDeleted.length) },
-    { label: "Mensagens removidas",  value: deletedCount > 0 ? `${deletedCount} (exibidas)` : "Nenhuma" },
+    { label: pdfT("exportChatPdf.generatedBy", "Gerado por"),              value: exportingUser },
+    { label: pdfT("exportChatPdf.generatedAtLabel", "Data/hora da geracao"), value: formatDateTime(new Date()) },
+    { label: pdfT("exportChatPdf.totalMessages", "Total de mensagens"),     value: String(nonDeleted.length) },
+    {
+      label: pdfT("exportChatPdf.removedMessages", "Mensagens removidas"),
+      value: deletedCount > 0
+        ? pdfT("exportChatPdf.removedShown", "{count} (exibidas)", { count: deletedCount })
+        : pdfT("exportChatPdf.removedNone", "Nenhuma"),
+    },
   ];
   const provColW = CONTENT_W / provenanceItems.length;
   provenanceItems.forEach((item, i) => {
     const px = MARGIN + 7 + i * provColW;
     doc.setFontSize(5.5);
-    doc.setFont(fontName, "normal");
+    setPdfFont(doc, "normal");
     doc.setTextColor(...GRAY_MUTED);
     doc.text(sanitizeForPdf(item.label), px, y + 13);
     doc.setFontSize(7.5);
-    doc.setFont(fontName, "bold");
+    setPdfFont(doc, "bold");
     doc.setTextColor(17, 24, 39);
     doc.text(sanitizeForPdf(item.value), px, y + 19);
   });
@@ -998,16 +1154,19 @@ export async function exportChatPdf(ticket: Ticket, rawMessages: unknown[]): Pro
 
   // ── Conversation stats card ───────────────────────────────────────────────────
   const sentimentMap: Record<string, string> = {
-    positive: "Positivo", neutral: "Neutro", negative: "Negativo", frustrated: "Frustrado",
+    positive: pdfT("exportChatPdf.sentiment.positive", "Positivo"),
+    neutral: pdfT("exportChatPdf.sentiment.neutral", "Neutro"),
+    negative: pdfT("exportChatPdf.sentiment.negative", "Negativo"),
+    frustrated: pdfT("exportChatPdf.sentiment.frustrated", "Frustrado"),
   };
   const statItems: { label: string; value: string }[] = [
-    { label: "Enviadas (agente)",    value: String(sentByAgent)   },
-    { label: "Recebidas (contato)", value: String(sentByContact) },
-    { label: "Notas internas",      value: String(internalNotes) },
-    { label: "1o. tempo de resp.",  value: firstResponseMs !== null ? formatDuration(firstResponseMs) : "N/A" },
-    { label: "Duracao total",       value: durationMs !== null ? formatDuration(durationMs) : "N/A" },
+    { label: pdfT("exportChatPdf.statSentByAgent", "Enviadas (agente)"),       value: String(sentByAgent)   },
+    { label: pdfT("exportChatPdf.statReceivedFromContact", "Recebidas (contato)"), value: String(sentByContact) },
+    { label: pdfT("exportChatPdf.statInternalNotes", "Notas internas"),        value: String(internalNotes) },
+    { label: pdfT("exportChatPdf.statFirstResponse", "1o. tempo de resp."),    value: firstResponseMs !== null ? formatDuration(firstResponseMs) : "N/A" },
+    { label: pdfT("exportChatPdf.statTotalDuration", "Duracao total"),         value: durationMs !== null ? formatDuration(durationMs) : "N/A" },
     ...(ticket.sentiment
-      ? [{ label: "Sentimento (IA)", value: sentimentMap[ticket.sentiment] ?? ticket.sentiment }]
+      ? [{ label: pdfT("exportChatPdf.statSentiment", "Sentimento (IA)"), value: sentimentMap[ticket.sentiment] ?? ticket.sentiment }]
       : []),
   ];
 
@@ -1022,9 +1181,9 @@ export async function exportChatPdf(ticket: Ticket, rawMessages: unknown[]): Pro
   doc.roundedRect(MARGIN, y, CONTENT_W, statsCardH, 3, 3, "S");
 
   doc.setFontSize(6.5);
-  doc.setFont(fontName, "bold");
+  setPdfFont(doc, "bold");
   doc.setTextColor(...BRAND);
-  doc.text("RESUMO DA CONVERSA", MARGIN + 5, y + 7);
+  doc.text(pdfT("exportChatPdf.summaryTitle", "RESUMO DA CONVERSA"), MARGIN + 5, y + 7);
 
   statItems.forEach((s, i) => {
     const col = i % statCols;
@@ -1032,11 +1191,11 @@ export async function exportChatPdf(ticket: Ticket, rawMessages: unknown[]): Pro
     const sx = MARGIN + 5 + col * statColW;
     const sy = y + 13 + row * 14;
     doc.setFontSize(5.5);
-    doc.setFont(fontName, "normal");
+    setPdfFont(doc, "normal");
     doc.setTextColor(...GRAY_MUTED);
     doc.text(sanitizeForPdf(s.label), sx, sy);
     doc.setFontSize(10);
-    doc.setFont(fontName, "bold");
+    setPdfFont(doc, "bold");
     doc.setTextColor(17, 24, 39);
     doc.text(sanitizeForPdf(s.value), sx, sy + 7);
   });
@@ -1048,16 +1207,31 @@ export async function exportChatPdf(ticket: Ticket, rawMessages: unknown[]): Pro
 
   const transferMsgs = messages.filter((m) => m.mediaType === "transfer" && !m.isDeleted);
   const timelineEvents: TimelineEvent[] = [
-    { label: "Abertura",          detail: new Date(ticket.createdAt).toLocaleString("pt-BR") },
-    ...(ticket.queue ? [{ label: sanitizeForPdf(`Fila: ${ticket.queue.name}`), detail: "" }] : []),
-    ...(ticket.user  ? [{ label: sanitizeForPdf(`Agente: ${ticket.user.name}`), detail: "" }] : []),
-    ...transferMsgs.map((m) => ({ label: "Transferencia", detail: formatTime(m.createdAt) })),
+    { label: pdfT("exportChatPdf.timelineOpening", "Abertura"), detail: formatDateTime(ticket.createdAt) },
+    ...(ticket.queue ? [{ label: sanitizeForPdf(`${pdfT("exportChatPdf.queueField", "Fila")}: ${ticket.queue.name}`), detail: "" }] : []),
+    ...(ticket.user  ? [{ label: sanitizeForPdf(`${pdfT("exportChatPdf.agentField", "Agente")}: ${ticket.user.name}`), detail: "" }] : []),
+    ...transferMsgs.map((m) => {
+      // Com o dado estruturado, a hora vem com o trajeto (origem -> destino).
+      const notice = readTicketTransferNotice(m);
+      const path = notice ? formatTicketTransferNotice(notice, transferPdfT, { arrow: "->" }).path : null;
+      const time = formatTime(m.createdAt);
+      return {
+        label: pdfT("exportChatPdf.timelineTransfer", "Transferencia"),
+        detail: path ? `${time} ${transferBodyWithAsciiArrow(path)}` : time,
+      };
+    }),
     ticket.status === "closed"
-      ? { label: "Encerramento", detail: new Date(ticket.updatedAt).toLocaleString("pt-BR") }
+      ? { label: pdfT("exportChatPdf.timelineClosing", "Encerramento"), detail: formatDateTime(ticket.updatedAt) }
       : { label: statusLabel(ticket.status), detail: "" },
   ];
 
-  const evCount = Math.min(timelineEvents.length, 6);
+  // No máximo 6 eventos: com mais, os 5 primeiros e sempre o final (encerramento ou status),
+  // para o fim nunca sumir. As transferências do meio seguem na lista de mensagens.
+  const MAX_TIMELINE_EVENTS = 6;
+  const shownEvents = timelineEvents.length > MAX_TIMELINE_EVENTS
+    ? [...timelineEvents.slice(0, MAX_TIMELINE_EVENTS - 1), timelineEvents[timelineEvents.length - 1]]
+    : timelineEvents;
+  const evCount = shownEvents.length;
   const timelineH = 28;
 
   doc.setFillColor(255, 255, 255);
@@ -1066,9 +1240,9 @@ export async function exportChatPdf(ticket: Ticket, rawMessages: unknown[]): Pro
   doc.roundedRect(MARGIN, y, CONTENT_W, timelineH, 3, 3, "S");
 
   doc.setFontSize(6.5);
-  doc.setFont(fontName, "bold");
+  setPdfFont(doc, "bold");
   doc.setTextColor(...BRAND);
-  doc.text("CICLO DE VIDA DO TICKET", MARGIN + 5, y + 7);
+  doc.text(pdfT("exportChatPdf.lifecycleTitle", "CICLO DE VIDA DO TICKET"), MARGIN + 5, y + 7);
 
   const lineY  = y + 18;
   const evColW2 = CONTENT_W / evCount;
@@ -1077,21 +1251,24 @@ export async function exportChatPdf(ticket: Ticket, rawMessages: unknown[]): Pro
   doc.setLineWidth(0.6);
   doc.line(MARGIN + evColW2 / 2, lineY, MARGIN + CONTENT_W - evColW2 / 2, lineY);
 
-  timelineEvents.slice(0, evCount).forEach((ev, i) => {
+  shownEvents.forEach((ev, i) => {
     const ex = MARGIN + evColW2 / 2 + i * evColW2;
     const isEnd = i === evCount - 1 && ticket.status === "closed";
     doc.setFillColor(...(i === 0 || isEnd ? BRAND : GRAY_BORDER));
     doc.circle(ex, lineY, 2, "F");
     doc.setFontSize(5.5);
-    doc.setFont(fontName, "bold");
+    setPdfFont(doc, "bold");
     doc.setTextColor(17, 24, 39);
     const labelLines = doc.splitTextToSize(ev.label, evColW2 - 4) as string[];
     doc.text(labelLines[0] ?? "", ex, lineY - 5, { align: "center" });
     if (ev.detail) {
       doc.setFontSize(5);
-      doc.setFont(fontName, "normal");
+      setPdfFont(doc, "normal");
       doc.setTextColor(...GRAY_MUTED);
-      doc.text(sanitizeForPdf(ev.detail), ex, lineY + 6, { align: "center" });
+      // Até 2 linhas na largura da coluna: o trajeto da transferência não invade a vizinha
+      // (data e hora curtas seguem numa linha só, como antes).
+      const detailLines = (doc.splitTextToSize(sanitizeForPdf(ev.detail), evColW2 - 2) as string[]).slice(0, 2);
+      doc.text(detailLines, ex, lineY + 6, { align: "center" });
     }
   });
 
@@ -1106,15 +1283,19 @@ export async function exportChatPdf(ticket: Ticket, rawMessages: unknown[]): Pro
   doc.setFillColor(...BRAND);
   doc.roundedRect(MARGIN, y, 28, 7, 1.5, 1.5, "F");
   doc.setFontSize(7.5);
-  doc.setFont(fontName, "bold");
+  setPdfFont(doc, "bold");
   doc.setTextColor(255, 255, 255);
-  doc.text("MENSAGENS", MARGIN + 4, y + 5);
+  doc.text(pdfT("exportChatPdf.messagesSection", "MENSAGENS"), MARGIN + 4, y + 5);
 
   doc.setFontSize(7);
-  doc.setFont(fontName, "normal");
+  setPdfFont(doc, "normal");
   doc.setTextColor(...GRAY_MUTED);
   doc.text(
-    sanitizeForPdf(`${nonDeleted.length} mensagens${deletedCount > 0 ? `  |  ${deletedCount} removidas` : ""}`),
+    sanitizeForPdf(
+      `${pdfT("exportChatPdf.messagesCount", "{count} mensagens", { count: nonDeleted.length })}${
+        deletedCount > 0 ? `  |  ${pdfT("exportChatPdf.removedCount", "{count} removidas", { count: deletedCount })}` : ""
+      }`,
+    ),
     MARGIN + 34, y + 5,
   );
   y += 14;
@@ -1160,7 +1341,10 @@ export async function exportChatPdf(ticket: Ticket, rawMessages: unknown[]): Pro
     // rótulo próprios — ver o bloco de rótulo mais abaixo.
     const isSchedNotice = !isDeleted && isScheduleNoticeMessage(msg);
     const isAgentNote   = !isDeleted && !isSchedNotice && (msg.mediaType === "notes" || msg.mediaType === "callNotes");
-    const isNote        = isAgentNote || isSchedNotice;
+    // Divisória de transferência: linha de sistema no mesmo molde do aviso de agendada (largura
+    // total, sem remetente, sem "Lido"), com cor própria.
+    const isTransferNotice = !isDeleted && msg.mediaType === "transfer";
+    const isNote        = isAgentNote || isSchedNotice || isTransferNotice;
     const isMe      = msg.fromMe;
     const timeStr   = formatTime(msg.createdAt);
 
@@ -1173,7 +1357,7 @@ export async function exportChatPdf(ticket: Ticket, rawMessages: unknown[]): Pro
 
       const sanitizedDate = sanitizeForPdf(dateLabel);
       doc.setFontSize(7.5);
-      doc.setFont(fontName, "normal");
+      setPdfFont(doc, "normal");
       const lw = doc.getTextWidth(sanitizedDate) + 12;
       const rx = (PAGE_W - lw) / 2;
       doc.setDrawColor(...GRAY_BORDER);
@@ -1205,13 +1389,13 @@ export async function exportChatPdf(ticket: Ticket, rawMessages: unknown[]): Pro
       doc.setLineDashPattern([], 0);
 
       doc.setFontSize(5.5);
-      doc.setFont(fontName, "normal");
+      setPdfFont(doc, "normal");
       doc.setTextColor(...DELETED_TEXT);
       doc.text(`#${msgIndex}`, delBx + 4, y + 3.5);
 
       doc.setFontSize(7.5);
       doc.text(
-        sanitizeForPdf("[Mensagem removida pelo remetente]"),
+        sanitizeForPdf(pdfT("exportChatPdf.deletedPlaceholder", "[Mensagem removida pelo remetente]")),
         delBx + delW / 2, y + 5.8,
         { align: "center" },
       );
@@ -1224,13 +1408,13 @@ export async function exportChatPdf(ticket: Ticket, rawMessages: unknown[]): Pro
 
     // ── sender grouping ─────────────────────────────────────────────────────────
     const senderName  = isMe
-      ? (msg.user?.name ?? ticket.user?.name ?? "Atendente")
+      ? (msg.user?.name ?? ticket.user?.name ?? pdfT("exportChatPdf.defaultAgent", "Atendente"))
       : (msg.contact?.name ?? contact.name);
     const senderId    = isMe ? "__me__" : (msg.contact?.name ?? contact.name);
     const isNewSender = senderId !== prevSenderId;
     // Aviso de disparo nasce com ack 4 no banco, mas nunca foi entregue a
     // ninguém — imprimir "Lido" numa linha de sistema enganaria quem lê o PDF.
-    const ackStr      = isMe && !isSchedNotice ? resolveAckLabel(msg.ack) : "";
+    const ackStr      = isMe && !isSchedNotice && !isTransferNotice ? resolveAckLabel(msg.ack) : "";
 
     // ── build message body ──────────────────────────────────────────────────────
     const rawKind    = msg.mediaType ? getMediaKind(msg.mediaType) : "generic";
@@ -1259,13 +1443,26 @@ export async function exportChatPdf(ticket: Ticket, rawMessages: unknown[]): Pro
             ? `${label}: ${bodyText}`
             : label;
     }
+    // Divisória de transferência: com o dado estruturado, quem fez + trajeto + canal, uma
+    // linha cada, no idioma da tela; sem ele (divisória antiga), o body com a seta trocada e
+    // o rótulo "[Transferência]" embaixo, para a linha não ficar sem explicação.
+    let transferLabel = "";
+    if (isTransferNotice) {
+      const notice = readTicketTransferNotice(msg);
+      if (notice) {
+        bodyText = transferPdfLines(notice).map((line) => sanitizeForPdf(line)).join("\n");
+      } else {
+        bodyText = sanitizeForPdf(transferBodyWithAsciiArrow(msg.body));
+        transferLabel = `[${pdfT("exportChatPdf.timelineTransfer", "Transferencia")}]`;
+      }
+    }
     // Aviso de disparo de agendada sem trecho (agendada de mídia sem legenda):
     // fica só o rótulo — "(sem conteudo)" não faria sentido nessa linha.
-    if (!bodyText.trim()) bodyText = isSchedNotice ? "" : "(sem conteudo)";
+    if (!bodyText.trim()) bodyText = isSchedNotice || isTransferNotice ? "" : pdfT("exportChatPdf.noContent", "(sem conteudo)");
 
     // ── layout metrics ──────────────────────────────────────────────────────────
     doc.setFontSize(8.5);
-    doc.setFont(fontName, "normal");
+    setPdfFont(doc, "normal");
 
     const imgData        = mediaCache.get(msg.id);
     const isSticker      = kind === "sticker";
@@ -1312,7 +1509,7 @@ export async function exportChatPdf(ticket: Ticket, rawMessages: unknown[]): Pro
 
     let textLines: string[];
     if (useMediaBox) {
-      textLines = [`[  ${mediaLabel(msg.mediaType ?? "").toUpperCase()}  ]`];
+      textLines = [`[  ${pdfUpper(mediaLabel(msg.mediaType ?? ""))}  ]`];
     } else if (!bodyText || hasEmbeddedImg || kind === "audio" || isLottieSticker || isUnavailableMedia) {
       textLines = [];
     } else {
@@ -1342,7 +1539,7 @@ export async function exportChatPdf(ticket: Ticket, rawMessages: unknown[]): Pro
     // ── sender label (every bubble, both sides) ────────────────────────────────
     if (!isNote) {
       doc.setFontSize(7.5);
-      doc.setFont(fontName, "bold");
+      setPdfFont(doc, "bold");
       doc.setTextColor(...BRAND);
       if (isMe) {
         doc.text(sanitizeForPdf(senderName), PAGE_W - MARGIN, y + 4.5, { align: "right" });
@@ -1361,6 +1558,8 @@ export async function exportChatPdf(ticket: Ticket, rawMessages: unknown[]): Pro
 
     if (isSchedNotice) {
       bx = MARGIN;              bgColor = SCHED_BG; textColor = SCHED_TEXT; tsColor = SCHED_TEXT;
+    } else if (isTransferNotice) {
+      bx = MARGIN;              bgColor = TRANSFER_BG; textColor = TRANSFER_TEXT; tsColor = TRANSFER_TEXT;
     } else if (isNote) {
       bx = MARGIN;              bgColor = NOTE_BG;  textColor = NOTE_TEXT; tsColor = NOTE_TEXT;
     } else if (isMe) {
@@ -1401,12 +1600,12 @@ export async function exportChatPdf(ticket: Ticket, rawMessages: unknown[]): Pro
 
     // ── sticker fallback (animated / Lottie stickers that can't be embedded) ────
     if (isLottieSticker) {
-      drawStickerFallback(doc, bx + 5, y + 4 + NUM_PAD, bubbleW - 10, STICKER_FALLBACK_H, tsColor, fontName);
+      drawStickerFallback(doc, bx + 5, y + 4 + NUM_PAD, bubbleW - 10, STICKER_FALLBACK_H, tsColor);
     }
 
     // ── media unavailable (image/generic whose URL is missing or fetch failed) ───
     if (isUnavailableMedia) {
-      drawMediaUnavailable(doc, bx + 5, y + 4 + NUM_PAD, bubbleW - 10, MEDIA_UNAVAIL_H, fontName);
+      drawMediaUnavailable(doc, bx + 5, y + 4 + NUM_PAD, bubbleW - 10, MEDIA_UNAVAIL_H);
     }
 
     // ── audio waveform ───────────────────────────────────────────────────────────
@@ -1417,7 +1616,7 @@ export async function exportChatPdf(ticket: Ticket, rawMessages: unknown[]): Pro
     // ── message text ─────────────────────────────────────────────────────────────
     if (textLines.length > 0) {
       doc.setFontSize(8.5);
-      doc.setFont(fontName, useMediaBox ? "bold" : "normal");
+      setPdfFont(doc, useMediaBox ? "bold" : "normal");
       doc.setTextColor(...textColor);
       doc.text(textLines, bx + 5, y + 5.5 + NUM_PAD + (useMediaBox ? 0.5 : 0));
     }
@@ -1425,18 +1624,30 @@ export async function exportChatPdf(ticket: Ticket, rawMessages: unknown[]): Pro
     // ── edited indicator ─────────────────────────────────────────────────────────
     if (msg.isEdited) {
       doc.setFontSize(6.5);
-      doc.setFont(fontName, "italic");
+      setPdfFont(doc, "italic");
       doc.setTextColor(...tsColor);
-      doc.text("(editada)", bx + 5, y + NUM_PAD + 5.5 + actualContentH + 1.5);
+      doc.text(pdfT("exportChatPdf.editedMark", "(editada)"), bx + 5, y + NUM_PAD + 5.5 + actualContentH + 1.5);
     }
 
     // ── internal note / schedule notice label ─────────────────────────────────────
-    if (isNote) {
+    if (isNote && !isTransferNotice) {
       doc.setFontSize(7);
-      doc.setFont(fontName, "bold");
+      setPdfFont(doc, "bold");
       doc.setTextColor(...(isSchedNotice ? SCHED_TEXT : NOTE_TEXT));
       doc.text(
-        sanitizeForPdf(isSchedNotice ? `[${SCHEDULE_NOTICE_LABEL}]` : `[Nota interna] ${senderName}`),
+        sanitizeForPdf(isSchedNotice ? `[${scheduleNoticeLabel()}]` : `${pdfT("exportChatPdf.internalNote", "[Nota interna]")} ${senderName}`),
+        bx + 5,
+        y + NUM_PAD + 5.5 + actualContentH + editedH + 0.5,
+      );
+    }
+    // Divisória antiga (sem dado estruturado): rótulo no lugar do remetente. Com o dado, quem
+    // fez já está na 1ª linha do texto.
+    if (isTransferNotice && transferLabel) {
+      doc.setFontSize(7);
+      setPdfFont(doc, "bold");
+      doc.setTextColor(TRANSFER_TEXT[0], TRANSFER_TEXT[1], TRANSFER_TEXT[2]);
+      doc.text(
+        sanitizeForPdf(transferLabel),
         bx + 5,
         y + NUM_PAD + 5.5 + actualContentH + editedH + 0.5,
       );
@@ -1444,13 +1655,13 @@ export async function exportChatPdf(ticket: Ticket, rawMessages: unknown[]): Pro
 
     // ── message number (#N, top-left of bubble, tiny) ────────────────────────────
     doc.setFontSize(5.5);
-    doc.setFont(fontName, "normal");
+    setPdfFont(doc, "normal");
     doc.setTextColor(...tsColor);
     doc.text(`#${msgIndex}`, bx + 4, y + 3.5);
 
     // ── timestamp + ack status (bottom-right) ───────────────────────────────────
     doc.setFontSize(6.5);
-    doc.setFont(fontName, "normal");
+    setPdfFont(doc, "normal");
     doc.setTextColor(...tsColor);
     const tsLine = sanitizeForPdf(ackStr ? `${ackStr}  ${timeStr}` : timeStr);
     doc.text(tsLine, bx + bubbleW - 4, y + bubbleH - 2.5, { align: "right" });
@@ -1478,22 +1689,30 @@ export async function exportChatPdf(ticket: Ticket, rawMessages: unknown[]): Pro
   doc.roundedRect(MARGIN, y, 3, 48, 1.5, 1.5, "F");
 
   doc.setFontSize(6.5);
-  doc.setFont(fontName, "bold");
+  setPdfFont(doc, "bold");
   doc.setTextColor(...BRAND);
-  doc.text("ASSINATURAS E VALIDA\xC7\xC3O", MARGIN + 7, y + 7);
+  doc.text(pdfT("exportChatPdf.signaturesTitle", "ASSINATURAS E VALIDA\xC7\xC3O"), MARGIN + 7, y + 7);
 
   doc.setFontSize(6);
-  doc.setFont(fontName, "normal");
+  setPdfFont(doc, "normal");
   doc.setTextColor(...GRAY_MUTED);
   doc.text(
     sanitizeForPdf(
-      "Este documento e um registro fiel da conversa exportado pelo sistema. Assine abaixo para atestar veracidade."
+      pdfT(
+        "exportChatPdf.signaturesNote",
+        "Este documento e um registro fiel da conversa exportado pelo sistema. Assine abaixo para atestar veracidade.",
+      )
     ),
     MARGIN + 7, y + 13,
   );
 
   const sigColW = CONTENT_W / 3;
-  const sigLabels = ["Responsavel pelo Atendimento", "Supervisor / Gestor", "Cliente / Contato"];
+  const sigLabels = [
+    pdfT("exportChatPdf.signatureAgent", "Responsavel pelo Atendimento"),
+    pdfT("exportChatPdf.signatureSupervisor", "Supervisor / Gestor"),
+    pdfT("exportChatPdf.signatureClient", "Cliente / Contato"),
+  ];
+  const sigDate = pdfT("exportChatPdf.signatureDate", "Data: ___/___/______");
   sigLabels.forEach((label, i) => {
     const sx     = MARGIN + 7 + i * sigColW;
     const lineY2 = y + 33;
@@ -1501,10 +1720,10 @@ export async function exportChatPdf(ticket: Ticket, rawMessages: unknown[]): Pro
     doc.setLineWidth(0.25);
     doc.line(sx, lineY2, sx + sigColW - 8, lineY2);
     doc.setFontSize(6);
-    doc.setFont(fontName, "normal");
+    setPdfFont(doc, "normal");
     doc.setTextColor(...GRAY_MUTED);
     doc.text(sanitizeForPdf(label), sx, lineY2 + 4);
-    doc.text("Data: ___/___/______", sx, lineY2 + 9);
+    doc.text(sigDate, sx, lineY2 + 9);
   });
 
   // ════════════════════════════════════════════════════════════════════════════
@@ -1519,10 +1738,12 @@ export async function exportChatPdf(ticket: Ticket, rawMessages: unknown[]): Pro
     doc.setFillColor(...BRAND);
     doc.rect(0, PAGE_H - 10, PAGE_W, 0.6, "F");
     doc.setFontSize(7);
-    doc.setFont(fontName, "normal");
+    setPdfFont(doc, "normal");
     doc.setTextColor(...GRAY_MUTED);
     doc.text(
-      sanitizeForPdf(`Pagina ${p} de ${totalPages}  |  Ticket #${ticket.id}  |  ${contact.name}`),
+      sanitizeForPdf(
+        `${pdfT("exportChatPdf.pageFooter", "Pagina {page} de {total}", { page: p, total: totalPages })}  |  ${ticketWord} #${ticket.id}  |  ${contact.name}`,
+      ),
       PAGE_W / 2, PAGE_H - 3.5, { align: "center" },
     );
   }

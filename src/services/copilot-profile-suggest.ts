@@ -26,7 +26,8 @@ const MENU_KEYS = [
   "facebookComentarios", "instagramComentarios", "instagramMencoes",
   "tiktokComentarios", "youtubeComentarios", "api-service",
   "instagramAutomacao", "google-calendar", "chat-interno-rc", "motivos-pausa",
-  "catalogo", "agendamento-publico", "configuracoes", "integracoes-meta",
+  "catalogo", "agendamento-publico", "configuracoes", "integracoes-meta", "aplicativos",
+  "formularios",
 ];
 
 function buildSystemPrompt(): string {
@@ -61,6 +62,11 @@ Regras de seguranca (OBRIGATORIAS):
   "transfere" -> tickets_assign.
 - "kanban" -> menuPermissions.kanban + kanban_manage se "gerenciar".
 - "funil" -> menuPermissions.funil + funnel_manage se "gerenciar".
+- "aplicativos" (sistemas externos no menu, no contato e no atendimento) -> menuPermissions.aplicativos + custom_apps_manage
+  (a tela so serve para cadastrar os aplicativos; sem custom_apps_manage ela nao aparece; quem tem
+  custom_apps_manage decide quais dados do cliente, como nome e telefone, vao no endereco do sistema externo).
+- "formularios" (formularios publicos que abrem atendimento) -> menuPermissions.formularios + forms_manage
+  (sem forms_manage a tela abre mas nao carrega nem salva nada).
 - "relatorios" -> reports_view; "exportar relatorios" -> reports_export.
 - "configuracoes" explicitas -> settings_general.
 - contacts_view_full: default TRUE (sem blur) exceto se pedir "dados mascarados".

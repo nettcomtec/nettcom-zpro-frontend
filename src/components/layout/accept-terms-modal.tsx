@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Check, ExternalLink } from "lucide-react";
 import { toast } from "sonner";
+import { useTranslations } from "next-intl";
 import { acceptTermsForTenant } from "@/services/tenants";
 
 interface AcceptTermsModalProps {
@@ -17,15 +18,17 @@ interface AcceptTermsModalProps {
 const POLICY_BASE = "https://ajuda.zdg.com.br/diretrizes-e-politicas";
 
 const TABS = [
-  { value: "termos",      label: "Termos de Uso", url: `${POLICY_BASE}/termos-e-condicoes-gerais-de-uso-e-licenciamento` },
-  { value: "privacidade", label: "Privacidade",   url: `${POLICY_BASE}/aviso-de-privacidade` },
-  { value: "suporte",     label: "Suporte",       url: `${POLICY_BASE}/politica-de-suporte-tecnico` },
-  { value: "manutencao",  label: "Manutenção",    url: `${POLICY_BASE}/manutencao-e-seguranca` },
+  { value: "termos",      labelKey: "tabs.termos",      url: `${POLICY_BASE}/termos-e-condicoes-gerais-de-uso-e-licenciamento` },
+  { value: "privacidade", labelKey: "tabs.privacidade", url: `${POLICY_BASE}/aviso-de-privacidade` },
+  { value: "suporte",     labelKey: "tabs.suporte",     url: `${POLICY_BASE}/politica-de-suporte-tecnico` },
+  { value: "manutencao",  labelKey: "tabs.manutencao",  url: `${POLICY_BASE}/manutencao-e-seguranca` },
 ] as const;
 
 type TabValue = typeof TABS[number]["value"];
 
 export function AcceptTermsModal({ open, tenantId, onAccepted }: AcceptTermsModalProps) {
+  const tr = useTranslations("acceptTermsModal");
+  const tc = useTranslations("common");
   const [loading, setLoading] = useState(false);
   const [activeTab, setActiveTab] = useState<TabValue>("termos");
   // Lazy-mount: so carrega o iframe da aba apos ela ser visitada (evita N requests no open).
@@ -46,10 +49,10 @@ export function AcceptTermsModal({ open, tenantId, onAccepted }: AcceptTermsModa
     setLoading(true);
     try {
       await acceptTermsForTenant(tenantId);
-      toast.success("Termos aceitos com sucesso.");
+      toast.success(tr("acceptSuccess"));
       onAccepted();
     } catch {
-      toast.error("Erro ao aceitar os termos. Tente novamente.");
+      toast.error(tr("acceptError"));
     } finally {
       setLoading(false);
     }
@@ -72,7 +75,7 @@ export function AcceptTermsModal({ open, tenantId, onAccepted }: AcceptTermsModa
         onInteractOutside={(e) => e.preventDefault()}
       >
         <DialogHeader className="shrink-0">
-          <DialogTitle>Termos e Condições de Uso | Política de Privacidade</DialogTitle>
+          <DialogTitle>{tr("title")}</DialogTitle>
         </DialogHeader>
 
         <Tabs
@@ -87,7 +90,7 @@ export function AcceptTermsModal({ open, tenantId, onAccepted }: AcceptTermsModa
                 value={t.value}
                 className="text-[11px] sm:text-xs whitespace-normal leading-tight h-auto py-1.5 px-2 gap-1"
               >
-                <span>{t.label}</span>
+                <span>{tr(t.labelKey)}</span>
                 {visited.has(t.value) && (
                   <Check className="h-3 w-3 text-green-600 dark:text-green-500 shrink-0" />
                 )}
@@ -109,18 +112,18 @@ export function AcceptTermsModal({ open, tenantId, onAccepted }: AcceptTermsModa
                   rel="noopener noreferrer"
                   className="text-xs text-primary hover:underline inline-flex items-center gap-1"
                 >
-                  Abrir em nova aba <ExternalLink className="h-3 w-3" />
+                  {tr("openNewTab")} <ExternalLink className="h-3 w-3" />
                 </a>
               </div>
               <div className="flex-1 border rounded-md overflow-hidden bg-background min-h-0">
                 {!visited.has(t.value) ? (
                   <div className="w-full h-full flex items-center justify-center text-sm text-muted-foreground">
-                    Carregando...
+                    {tc("loading")}
                   </div>
                 ) : canEmbed ? (
                   <iframe
                     src={t.url}
-                    title={t.label}
+                    title={tr(t.labelKey)}
                     className="w-full h-full border-0"
                     sandbox="allow-scripts allow-same-origin allow-popups allow-popups-to-escape-sandbox allow-forms"
                   />
@@ -128,9 +131,7 @@ export function AcceptTermsModal({ open, tenantId, onAccepted }: AcceptTermsModa
                   <div className="w-full h-full flex flex-col items-center justify-center gap-3 p-6 text-center">
                     <ExternalLink className="h-8 w-8 text-muted-foreground" />
                     <p className="text-sm text-muted-foreground max-w-md">
-                      A pré-visualização só aparece quando o painel roda sob HTTPS. Em
-                      ambiente local (http) o site de termos bloqueia a incorporação —
-                      abra a página em uma nova aba para ler o conteúdo desta seção.
+                      {tr("embedBlocked")}
                     </p>
                     <a
                       href={t.url}
@@ -138,7 +139,7 @@ export function AcceptTermsModal({ open, tenantId, onAccepted }: AcceptTermsModa
                       rel="noopener noreferrer"
                       className="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-2 text-sm font-medium text-primary-foreground hover:opacity-90"
                     >
-                      Abrir "{t.label}" em nova aba <ExternalLink className="h-4 w-4" />
+                      {tr("openTabNamed", { label: tr(t.labelKey) })} <ExternalLink className="h-4 w-4" />
                     </a>
                   </div>
                 )}
@@ -150,16 +151,16 @@ export function AcceptTermsModal({ open, tenantId, onAccepted }: AcceptTermsModa
         <DialogFooter className="shrink-0 pt-2 border-t sm:flex-row sm:items-center sm:justify-between gap-2">
           <p className="text-xs text-muted-foreground order-2 sm:order-1">
             {allVisited
-              ? "Todas as seções foram visitadas."
-              : `Visite todas as seções para habilitar o aceite (${visited.size}/${TABS.length}).`}
+              ? tr("allVisited")
+              : tr("visitAllProgress", { visited: visited.size, total: TABS.length })}
           </p>
           <Button
             onClick={handleAccept}
             disabled={loading || !allVisited}
             className="order-1 sm:order-2"
-            title={allVisited ? undefined : "Visite todas as seções antes de aceitar"}
+            title={allVisited ? undefined : tr("visitAllTitle")}
           >
-            {loading ? "Aceitando..." : "Li e aceito os Termos e a Política de Privacidade"}
+            {loading ? tr("accepting") : tr("acceptButton")}
           </Button>
         </DialogFooter>
       </DialogContent>

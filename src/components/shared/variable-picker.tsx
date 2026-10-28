@@ -24,14 +24,39 @@ export const FLOW_VARIABLES = [
   { labelKey: "varBusinessName", value: "{{businessName}}" },
 ] as const;
 
+// Link de avaliação do Google (configurado em Avaliações). Fica FORA da lista fixa e
+// entra só por opção (`withGoogleReviewLink`), nos campos em que o backend resolve a
+// variável (funil e fluxo). Nos seletores de template do agendamento, da automação do
+// Instagram e da despedida ela não é resolvida — o parâmetro sairia vazio e a Meta
+// recusaria o template.
+export const GOOGLE_REVIEW_LINK_VARIABLE = {
+  labelKey: "varGoogleReviewLink",
+  hintKey: "varGoogleReviewLinkHint",
+  value: "{{linkAvaliacaoGoogle}}",
+} as const;
+
+// Link de convite do WebChat (PLANO_WEBCHAT_LINK_CONVITE D9). Também fica FORA da lista fixa:
+// entra só por opção (`withWebchatInviteLink`), no fluxo, e só quando o servidor entende a
+// variável (availability) — senão o texto sairia com `{{linkWebchat}}` cru ou vazio.
+export const WEBCHAT_INVITE_LINK_VARIABLE = {
+  labelKey: "varWebchatInviteLink",
+  value: "{{linkWebchat}}",
+} as const;
+
 export function VariablePickerButton({
   onInsert,
   className,
+  withGoogleReviewLink,
+  withWebchatInviteLink,
 }: {
   onInsert: (v: string) => void;
   className?: string;
+  withGoogleReviewLink?: boolean;
+  withWebchatInviteLink?: boolean;
 }) {
   const t = useTranslations("flowBuilderNodeForm");
+  // Aviso curto do convite: o texto do alerta da tela do WebChat (mesma regra, D6).
+  const tWebchat = useTranslations("webchatPage");
   return (
     <Popover>
       <PopoverTrigger asChild>
@@ -56,6 +81,34 @@ export function VariablePickerButton({
             <code className="text-[10px] text-muted-foreground font-mono">{v.value}</code>
           </button>
         ))}
+        {withGoogleReviewLink && (
+          <>
+            <div className="my-1 border-t" />
+            <button
+              type="button"
+              className="w-full flex flex-col items-start gap-0.5 px-2 py-1.5 rounded text-xs text-left hover:bg-muted transition-colors"
+              onClick={() => onInsert(GOOGLE_REVIEW_LINK_VARIABLE.value)}
+            >
+              <span>{t(GOOGLE_REVIEW_LINK_VARIABLE.labelKey)}</span>
+              <code className="text-[10px] text-muted-foreground font-mono break-all">{GOOGLE_REVIEW_LINK_VARIABLE.value}</code>
+              <span className="text-[10px] text-muted-foreground leading-snug">{t(GOOGLE_REVIEW_LINK_VARIABLE.hintKey)}</span>
+            </button>
+          </>
+        )}
+        {withWebchatInviteLink && (
+          <>
+            <div className="my-1 border-t" />
+            <button
+              type="button"
+              className="w-full flex flex-col items-start gap-0.5 px-2 py-1.5 rounded text-xs text-left hover:bg-muted transition-colors"
+              onClick={() => onInsert(WEBCHAT_INVITE_LINK_VARIABLE.value)}
+            >
+              <span>{t(WEBCHAT_INVITE_LINK_VARIABLE.labelKey)}</span>
+              <code className="text-[10px] text-muted-foreground font-mono break-all">{WEBCHAT_INVITE_LINK_VARIABLE.value}</code>
+              <span className="text-[10px] text-muted-foreground leading-snug">{tWebchat("inviteLinkAlertCloseFlow")}</span>
+            </button>
+          </>
+        )}
       </PopoverContent>
     </Popover>
   );
@@ -67,12 +120,18 @@ export function TextareaWithVars({
   rows,
   placeholder,
   maxLength,
+  withGoogleReviewLink,
+  withWebchatInviteLink,
 }: {
   value: string;
   onChange: (val: string) => void;
   rows?: number;
   placeholder?: string;
   maxLength?: number;
+  /** Oferece também {{linkAvaliacaoGoogle}} (só onde o backend resolve: funil e fluxo). */
+  withGoogleReviewLink?: boolean;
+  /** Oferece também {{linkWebchat}} (só no fluxo e com o recurso disponível no servidor). */
+  withWebchatInviteLink?: boolean;
 }) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const cursorRef = useRef<number>(0);
@@ -108,7 +167,12 @@ export function TextareaWithVars({
         onKeyUp={saveCursor}
         onClick={saveCursor}
       />
-      <VariablePickerButton onInsert={handleInsert} className="absolute right-1 top-1" />
+      <VariablePickerButton
+        onInsert={handleInsert}
+        className="absolute right-1 top-1"
+        withGoogleReviewLink={withGoogleReviewLink}
+        withWebchatInviteLink={withWebchatInviteLink}
+      />
     </div>
   );
 }
@@ -118,11 +182,17 @@ export function InputWithVars({
   onChange,
   placeholder,
   maxLength,
+  withGoogleReviewLink,
+  withWebchatInviteLink,
 }: {
   value: string;
   onChange: (val: string) => void;
   placeholder?: string;
   maxLength?: number;
+  /** Oferece também {{linkAvaliacaoGoogle}} (só onde o backend resolve: funil e fluxo). */
+  withGoogleReviewLink?: boolean;
+  /** Oferece também {{linkWebchat}} (só no fluxo e com o recurso disponível no servidor). */
+  withWebchatInviteLink?: boolean;
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
   const cursorRef = useRef<number>(0);
@@ -157,7 +227,11 @@ export function InputWithVars({
         onKeyUp={saveCursor}
         onClick={saveCursor}
       />
-      <VariablePickerButton onInsert={handleInsert} />
+      <VariablePickerButton
+        onInsert={handleInsert}
+        withGoogleReviewLink={withGoogleReviewLink}
+        withWebchatInviteLink={withWebchatInviteLink}
+      />
     </div>
   );
 }

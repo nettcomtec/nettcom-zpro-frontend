@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useState, useRef, useEffect, useCallback } from "react";
-import { useTranslations } from "next-intl";
+import { useLocale, useTranslations } from "next-intl";
 import { PageHeader } from "@/components/layout/page-header";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -20,7 +20,7 @@ import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter,
 } from "@/components/ui/dialog";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Palette, Image, LogOut, Key, Lock, BookOpen, Plus, Pencil, Trash2, Copy, CheckCircle, XCircle, Zap, Monitor, Eye, Smartphone, Moon, Sun, GripVertical, Volume2, Upload, AlertTriangle, Type, Square, Circle as CircleIcon, Code2, RotateCcw, UserPlus, ScrollText } from "lucide-react";
+import { Palette, Image, LogOut, Key, Lock, BookOpen, Plus, Pencil, Trash2, Copy, CheckCircle, XCircle, Zap, Monitor, Eye, Smartphone, Moon, Sun, GripVertical, Volume2, Upload, AlertTriangle, Type, Square, Circle as CircleIcon, Code2, RotateCcw, UserPlus, ScrollText, Globe } from "lucide-react";
 import { useTheme } from "next-themes";
 import { toast } from "sonner";
 import api from "@/lib/api";
@@ -69,6 +69,8 @@ import { NotificationSoundPlayer } from "@/components/customizar/notification-so
 import { TypographyPanel } from "@/components/customizar/typography-panel";
 import { ResellerTermsPanel } from "@/components/customizar/reseller-terms-panel";
 import { AvatarShapePanel } from "@/components/customizar/avatar-shape-panel";
+import { RegionDefaultsTab } from "@/components/customizar/region-defaults-tab";
+import { countryName, examplePhone, isCountryIso } from "@/lib/region";
 import { getLogoUrl, getLogoDarkUrl, getFaviconUrl, getLoginSideBgUrl, getPwaIconUrl, getNotificationSoundUrl } from "@/lib/branding-urls";
 
 type TFunc = (key: string) => string;
@@ -230,6 +232,9 @@ function ColorPreviewCarousel({ colors, isDark, slide, setSlide, t }: {
   t: TFunc;
 }) {
   const TOTAL = 4;
+  const tp = useTranslations("customizarPage.preview");
+  const tCommon = useTranslations("common");
+  const initialsOf = (name: string) => name.split(" ").map(n => n[0]).join("").slice(0, 2);
   const bg = isDark ? "#0f0f1a" : "#ffffff";
   const bgAlt = isDark ? "#12122a" : "#f9fafb";
   const textMain = isDark ? "#e2e8f0" : "#1e293b";
@@ -239,24 +244,24 @@ function ColorPreviewCarousel({ colors, isDark, slide, setSlide, t }: {
   const inputBg = isDark ? "#1a1a2e" : "#f8fafc";
 
   const mockSessions = [
-    { name: "Carlos Silva",    msg: "Olá, preciso de ajuda!",   time: "09:12", unread: 3, color: colors.primary },
-    { name: "Ana Paula",       msg: "Quando posso receber?",     time: "09:05", unread: 1, color: colors.secondary },
-    { name: "João Ferreira",   msg: "Ok, obrigado!",             time: "08:55", unread: 0, color: colors.accent },
-    { name: "Maria Costa",     msg: "Aguardando retorno",        time: "08:40", unread: 2, color: colors.warning },
-    { name: "Pedro Alves",     msg: "Problema resolvido?",       time: "08:22", unread: 0, color: colors.positive },
-    { name: "Lucia Mendes",    msg: "Boa tarde!",                time: "08:10", unread: 5, color: colors.negative },
-    { name: "Roberto Lima",    msg: "Vou verificar isso",        time: "Ontem",  unread: 0, color: colors.neutral },
-    { name: "Fernanda Santos", msg: "Perfeito, obrigada!",       time: "Ontem",  unread: 0, color: colors.secondary },
-    { name: "Grupo Vendas",    msg: "Reunião amanhã às 10h",     time: "Seg",    unread: 7, color: colors.accent },
-    { name: "Suporte Bot",     msg: "Fluxo iniciado...",         time: "Seg",    unread: 0, color: colors.neutral },
+    { name: tp("session1Name"),  msg: tp("session1Msg"),  time: "09:12", unread: 3, color: colors.primary },
+    { name: tp("session2Name"),  msg: tp("session2Msg"),  time: "09:05", unread: 1, color: colors.secondary },
+    { name: tp("session3Name"),  msg: tp("session3Msg"),  time: "08:55", unread: 0, color: colors.accent },
+    { name: tp("session4Name"),  msg: tp("session4Msg"),  time: "08:40", unread: 2, color: colors.warning },
+    { name: tp("session5Name"),  msg: tp("session5Msg"),  time: "08:22", unread: 0, color: colors.positive },
+    { name: tp("session6Name"),  msg: tp("session6Msg"),  time: "08:10", unread: 5, color: colors.negative },
+    { name: tp("session7Name"),  msg: tp("session7Msg"),  time: tp("yesterday"), unread: 0, color: colors.neutral },
+    { name: tp("session8Name"),  msg: tp("session8Msg"),  time: tp("yesterday"), unread: 0, color: colors.secondary },
+    { name: tp("session9Name"),  msg: tp("session9Msg"),  time: tp("mondayShort"), unread: 7, color: colors.accent },
+    { name: tp("session10Name"), msg: tp("session10Msg"), time: tp("mondayShort"), unread: 0, color: colors.neutral },
   ];
 
   const mockContacts = [
-    { name: "Ana Paula Souza",   phone: "+55 11 91234-5678", tag: "Cliente",   tagColor: colors.primary },
-    { name: "Carlos Roberto",    phone: "+55 21 99876-5432", tag: "Parceiro",  tagColor: colors.secondary },
-    { name: "Fernanda Lima",     phone: "+55 31 98765-4321", tag: "Prospect",  tagColor: colors.accent },
-    { name: "João Pedro Alves",  phone: "+55 41 97654-3210", tag: "Inativo",   tagColor: colors.neutral },
-    { name: "Maria das Graças",  phone: "+55 85 96543-2109", tag: "Cliente",   tagColor: colors.primary },
+    { name: tp("contact1Name"), phone: "+55 11 91234-5678", tag: tp("tagCustomer"), tagColor: colors.primary },
+    { name: tp("contact2Name"), phone: "+55 21 99876-5432", tag: tp("tagPartner"),  tagColor: colors.secondary },
+    { name: tp("contact3Name"), phone: "+55 31 98765-4321", tag: tp("tagProspect"), tagColor: colors.accent },
+    { name: tp("contact4Name"), phone: "+55 41 97654-3210", tag: tp("tagInactive"), tagColor: colors.neutral },
+    { name: tp("contact5Name"), phone: "+55 85 96543-2109", tag: tp("tagCustomer"), tagColor: colors.primary },
   ];
 
   const slides: React.ReactNode[] = [
@@ -292,10 +297,10 @@ function ColorPreviewCarousel({ colors, isDark, slide, setSlide, t }: {
             ))}
           </div>
           <div className="flex flex-wrap gap-2">
-            <div className="px-3 py-1.5 rounded-md text-white text-xs font-medium" style={{ backgroundColor: colors.primary }}>Salvar</div>
-            <div className="px-3 py-1.5 rounded-md text-xs font-medium border" style={{ borderColor: colors.primary, color: colors.primary }}>Cancelar</div>
-            <div className="px-3 py-1.5 rounded-md text-white text-xs font-medium" style={{ backgroundColor: colors.positive }}>Aprovar</div>
-            <div className="px-3 py-1.5 rounded-md text-white text-xs font-medium" style={{ backgroundColor: colors.negative }}>Rejeitar</div>
+            <div className="px-3 py-1.5 rounded-md text-white text-xs font-medium" style={{ backgroundColor: colors.primary }}>{t("save")}</div>
+            <div className="px-3 py-1.5 rounded-md text-xs font-medium border" style={{ borderColor: colors.primary, color: colors.primary }}>{t("cancel")}</div>
+            <div className="px-3 py-1.5 rounded-md text-white text-xs font-medium" style={{ backgroundColor: colors.positive }}>{tp("approve")}</div>
+            <div className="px-3 py-1.5 rounded-md text-white text-xs font-medium" style={{ backgroundColor: colors.negative }}>{tp("reject")}</div>
           </div>
           <div className="flex gap-2 flex-wrap">
             {(["primary", "secondary", "accent", "warning", "positive", "negative"] as string[]).map(k => (
@@ -310,7 +315,7 @@ function ColorPreviewCarousel({ colors, isDark, slide, setSlide, t }: {
     <div key="attendance" className="rounded-xl overflow-hidden border shadow-sm" style={{ borderColor: border }}>
       <div className="px-3 py-2 flex items-center justify-between border-b" style={{ backgroundColor: bgAlt, borderColor: border }}>
         <div className="flex gap-1">
-          {["Abertos", "Pendentes", "Fechados"].map((tab, i) => (
+          {[tp("tabOpen"), tp("tabPending"), tp("tabClosed")].map((tab, i) => (
             <div key={tab} className="px-2.5 py-1 rounded-md text-[10px] font-medium flex items-center gap-1"
               style={{ backgroundColor: i === 0 ? colors.primary : "transparent", color: i === 0 ? "white" : textMuted }}>
               {tab}
@@ -321,7 +326,7 @@ function ColorPreviewCarousel({ colors, isDark, slide, setSlide, t }: {
         </div>
         <div className="flex items-center gap-1.5 px-2 py-1 rounded-md border text-[10px]" style={{ borderColor: border, color: textMuted, backgroundColor: inputBg }}>
           <div className="w-2 h-2 rounded-sm border" style={{ borderColor: textMuted }} />
-          <span>Buscar...</span>
+          <span>{tp("search")}</span>
         </div>
       </div>
       <div className="flex" style={{ minHeight: 220 }}>
@@ -358,10 +363,10 @@ function ColorPreviewCarousel({ colors, isDark, slide, setSlide, t }: {
         <div className="flex-1 flex flex-col" style={{ backgroundColor: bg }}>
           <div className="px-3 py-2 border-b flex items-center gap-2" style={{ borderColor: border, backgroundColor: bgAlt }}>
             <div className="w-6 h-6 rounded-full shrink-0 flex items-center justify-center text-[8px] text-white font-bold"
-              style={{ backgroundColor: colors.primary }}>CS</div>
+              style={{ backgroundColor: colors.primary }}>{initialsOf(tp("session1Name"))}</div>
             <div className="flex-1 min-w-0">
-              <div className="text-[10px] font-semibold truncate" style={{ color: textMain }}>Carlos Silva</div>
-              <div className="text-[8px]" style={{ color: colors.positive }}>● online</div>
+              <div className="text-[10px] font-semibold truncate" style={{ color: textMain }}>{tp("session1Name")}</div>
+              <div className="text-[8px]" style={{ color: colors.positive }}>● {tp("online")}</div>
             </div>
             <div className="flex gap-1">
               {[colors.primary, colors.secondary, colors.neutral].map((c, i) => (
@@ -371,22 +376,22 @@ function ColorPreviewCarousel({ colors, isDark, slide, setSlide, t }: {
           </div>
           <div className="flex-1 p-2 space-y-1.5 flex flex-col justify-end overflow-hidden" style={{ backgroundColor: bg }}>
             <div className="self-start max-w-[75%] px-2 py-1.5 rounded-lg text-[9px]" style={{ backgroundColor: msgBg, color: textMain }}>
-              Olá, preciso de ajuda com meu pedido!
+              {tp("chat1Msg1")}
             </div>
             <div className="self-end max-w-[75%] px-2 py-1.5 rounded-lg text-[9px] text-white" style={{ backgroundColor: colors.primary }}>
-              Pois não! Qual o número do pedido?
+              {tp("chat1Msg2")}
             </div>
             <div className="self-start max-w-[75%] px-2 py-1.5 rounded-lg text-[9px]" style={{ backgroundColor: msgBg, color: textMain }}>
-              Pedido #12345, fiz ontem à tarde.
+              {tp("chat1Msg3")}
             </div>
             <div className="self-end max-w-[75%] px-2 py-1.5 rounded-lg text-[9px] text-white" style={{ backgroundColor: colors.primary }}>
-              Encontrei aqui! Está em separação 📦
+              {tp("chat1Msg4")}
             </div>
           </div>
           <div className="px-2 py-1.5 border-t flex items-center gap-1.5" style={{ borderColor: border, backgroundColor: bgAlt }}>
             <div className="flex-1 h-6 rounded-full border px-2 flex items-center text-[9px]"
               style={{ borderColor: colors.primary + "44", color: textMuted, backgroundColor: inputBg }}>
-              Mensagem...
+              {tp("messageShort")}
             </div>
             <div className="w-5 h-5 rounded-full flex items-center justify-center text-white shrink-0"
               style={{ backgroundColor: colors.primary }}>
@@ -401,47 +406,47 @@ function ColorPreviewCarousel({ colors, isDark, slide, setSlide, t }: {
     <div key="conversation" className="rounded-xl overflow-hidden border shadow-sm" style={{ borderColor: border }}>
       <div className="px-3 py-2 flex items-center gap-2 border-b" style={{ borderColor: border, backgroundColor: bgAlt }}>
         <div className="w-8 h-8 rounded-full shrink-0 flex items-center justify-center text-[10px] text-white font-bold"
-          style={{ backgroundColor: colors.secondary }}>FL</div>
+          style={{ backgroundColor: colors.secondary }}>{initialsOf(tp("contact3Name"))}</div>
         <div className="flex-1 min-w-0">
-          <div className="text-[11px] font-semibold" style={{ color: textMain }}>Fernanda Lima</div>
+          <div className="text-[11px] font-semibold" style={{ color: textMain }}>{tp("contact3Name")}</div>
           <div className="text-[9px]" style={{ color: textMuted }}>+55 31 98765-4321 · WhatsApp</div>
         </div>
         <div className="flex gap-1.5">
-          <div className="px-2 py-0.5 rounded-full text-[8px] font-medium text-white" style={{ backgroundColor: colors.positive }}>Aberto</div>
-          <div className="px-2 py-0.5 rounded-full text-[8px] font-medium text-white" style={{ backgroundColor: colors.accent }}>Suporte</div>
+          <div className="px-2 py-0.5 rounded-full text-[8px] font-medium text-white" style={{ backgroundColor: colors.positive }}>{tp("statusOpen")}</div>
+          <div className="px-2 py-0.5 rounded-full text-[8px] font-medium text-white" style={{ backgroundColor: colors.accent }}>{tp("queueSupport")}</div>
         </div>
       </div>
       <div className="p-3 space-y-2 flex flex-col" style={{ backgroundColor: bg, minHeight: 160 }}>
         <div className="self-start flex gap-1.5 items-end max-w-[80%]">
-          <div className="w-5 h-5 rounded-full shrink-0 flex items-center justify-center text-[7px] text-white font-bold mb-0.5" style={{ backgroundColor: colors.secondary }}>FL</div>
+          <div className="w-5 h-5 rounded-full shrink-0 flex items-center justify-center text-[7px] text-white font-bold mb-0.5" style={{ backgroundColor: colors.secondary }}>{initialsOf(tp("contact3Name"))}</div>
           <div className="px-2.5 py-1.5 rounded-lg rounded-bl-none text-[9px]" style={{ backgroundColor: msgBg, color: textMain }}>
-            Boa tarde! Tenho uma dúvida sobre o plano Pro.
+            {tp("chat2Msg1")}
             <div className="text-[7px] mt-0.5 text-right" style={{ color: textMuted }}>14:22</div>
           </div>
         </div>
         <div className="self-end flex gap-1.5 items-end max-w-[80%]">
           <div className="px-2.5 py-1.5 rounded-lg rounded-br-none text-[9px] text-white" style={{ backgroundColor: colors.primary }}>
-            Olá! Claro, pode perguntar! 😊
+            {tp("chat2Msg2")}
             <div className="text-[7px] mt-0.5 text-right opacity-75">14:23 ✓✓</div>
           </div>
         </div>
         <div className="self-start flex gap-1.5 items-end max-w-[80%]">
-          <div className="w-5 h-5 rounded-full shrink-0 flex items-center justify-center text-[7px] text-white font-bold mb-0.5" style={{ backgroundColor: colors.secondary }}>FL</div>
+          <div className="w-5 h-5 rounded-full shrink-0 flex items-center justify-center text-[7px] text-white font-bold mb-0.5" style={{ backgroundColor: colors.secondary }}>{initialsOf(tp("contact3Name"))}</div>
           <div className="px-2.5 py-1.5 rounded-lg rounded-bl-none text-[9px]" style={{ backgroundColor: msgBg, color: textMain }}>
-            Quantos usuários posso ter no plano Pro?
+            {tp("chat2Msg3")}
             <div className="text-[7px] mt-0.5 text-right" style={{ color: textMuted }}>14:24</div>
           </div>
         </div>
         <div className="self-end flex gap-1.5 items-end max-w-[80%]">
           <div className="px-2.5 py-1.5 rounded-lg rounded-br-none text-[9px] text-white" style={{ backgroundColor: colors.primary }}>
-            No plano Pro você pode ter até <span className="font-bold">25 usuários</span> simultâneos!
+            {tp.rich("chat2Msg4", { b: (chunks) => <span className="font-bold">{chunks}</span> })}
             <div className="text-[7px] mt-0.5 text-right opacity-75">14:25 ✓✓</div>
           </div>
         </div>
         <div className="self-start flex gap-1.5 items-end max-w-[80%]">
-          <div className="w-5 h-5 rounded-full shrink-0 flex items-center justify-center text-[7px] text-white font-bold mb-0.5" style={{ backgroundColor: colors.secondary }}>FL</div>
+          <div className="w-5 h-5 rounded-full shrink-0 flex items-center justify-center text-[7px] text-white font-bold mb-0.5" style={{ backgroundColor: colors.secondary }}>{initialsOf(tp("contact3Name"))}</div>
           <div className="px-2.5 py-1.5 rounded-lg rounded-bl-none text-[9px]" style={{ backgroundColor: msgBg, color: textMain }}>
-            Ótimo! Vou contratar então 🎉
+            {tp("chat2Msg5")}
             <div className="text-[7px] mt-0.5 text-right" style={{ color: textMuted }}>14:26</div>
           </div>
         </div>
@@ -450,7 +455,7 @@ function ColorPreviewCarousel({ colors, isDark, slide, setSlide, t }: {
         <div className="w-5 h-5 rounded" style={{ backgroundColor: colors.neutral + "44" }} />
         <div className="flex-1 h-6 rounded-full border px-2.5 flex items-center text-[9px]"
           style={{ borderColor: colors.primary + "55", color: textMuted, backgroundColor: inputBg }}>
-          Digite uma mensagem...
+          {tp("typeMessage")}
         </div>
         <div className="w-5 h-5 rounded" style={{ backgroundColor: colors.neutral + "44" }} />
         <div className="w-6 h-6 rounded-full flex items-center justify-center text-white shrink-0"
@@ -463,20 +468,20 @@ function ColorPreviewCarousel({ colors, isDark, slide, setSlide, t }: {
     // Slide 3: Contatos
     <div key="contacts" className="rounded-xl overflow-hidden border shadow-sm" style={{ borderColor: border }}>
       <div className="px-3 py-2 flex items-center justify-between border-b" style={{ borderColor: border, backgroundColor: bgAlt }}>
-        <div className="text-[10px] font-semibold" style={{ color: textMain }}>Contatos <span className="font-normal" style={{ color: textMuted }}>(5)</span></div>
+        <div className="text-[10px] font-semibold" style={{ color: textMain }}>{t("mockSlide3")} <span className="font-normal" style={{ color: textMuted }}>(5)</span></div>
         <div className="flex gap-1.5">
-          <div className="px-2 py-0.5 rounded text-[9px] text-white font-medium" style={{ backgroundColor: colors.primary }}>+ Novo</div>
-          <div className="px-2 py-0.5 rounded text-[9px] font-medium border" style={{ borderColor: border, color: textMuted }}>Importar</div>
-          <div className="px-2 py-0.5 rounded text-[9px] font-medium border" style={{ borderColor: border, color: textMuted }}>Exportar</div>
+          <div className="px-2 py-0.5 rounded text-[9px] text-white font-medium" style={{ backgroundColor: colors.primary }}>{tp("newButton")}</div>
+          <div className="px-2 py-0.5 rounded text-[9px] font-medium border" style={{ borderColor: border, color: textMuted }}>{tCommon("import")}</div>
+          <div className="px-2 py-0.5 rounded text-[9px] font-medium border" style={{ borderColor: border, color: textMuted }}>{tp("export")}</div>
         </div>
       </div>
       <div className="px-3 py-1.5 border-b" style={{ borderColor: border, backgroundColor: inputBg }}>
         <div className="flex items-center gap-1.5 text-[9px]" style={{ color: textMuted }}>
           <div className="w-3 h-3 rounded-sm border" style={{ borderColor: textMuted + "66" }} />
-          <span className="flex-1">Nome do Contato</span>
-          <span className="w-28 shrink-0">Telefone</span>
-          <span className="w-16 shrink-0">Tag</span>
-          <span className="w-12 shrink-0 text-right">Ações</span>
+          <span className="flex-1">{tp("colContactName")}</span>
+          <span className="w-28 shrink-0">{t("signupPhoneTitle")}</span>
+          <span className="w-16 shrink-0">{tp("colTag")}</span>
+          <span className="w-12 shrink-0 text-right">{t("colActions")}</span>
         </div>
       </div>
       {mockContacts.map((c, i) => (
@@ -501,7 +506,7 @@ function ColorPreviewCarousel({ colors, isDark, slide, setSlide, t }: {
         </div>
       ))}
       <div className="px-3 py-2 flex items-center justify-between" style={{ backgroundColor: bgAlt, borderTop: `1px solid ${border}` }}>
-        <span className="text-[9px]" style={{ color: textMuted }}>Mostrando 1–5 de 142</span>
+        <span className="text-[9px]" style={{ color: textMuted }}>{tp("showingRange", { from: 1, to: 5, total: 142 })}</span>
         <div className="flex gap-1">
           {[1, 2, 3].map(p => (
             <div key={p} className="w-5 h-5 rounded flex items-center justify-center text-[9px]"
@@ -565,7 +570,11 @@ export default function CustomizarPage() {
   const { resolvedTheme } = useTheme();
   const t = useTranslations("customizarPage");
   const tErrors = useTranslations("errors");
+  const uiLocale = useLocale();
   const setBrandingSocketModel = useBrandingStore((s) => s.setSocketModelOptimized);
+
+  // Aba ativa controlada: o aviso do Cadastro abre a aba Região.
+  const [activeTab, setActiveTab] = useState("cores");
 
   const COLOR_FIELDS = getColorFields(t as TFunc);
   const PRESETS = getPresets(t as TFunc);
@@ -781,6 +790,15 @@ export default function CustomizarPage() {
       setSavingSignup(null);
     }
   }
+
+  // País do cadastro = país da Região padrão (D7): o GET do signup já o devolve em
+  // `defaultCountry`, e a aba Região o atualiza ao carregar/salvar. Não é mais editado aqui.
+  const signupCountryIso = isCountryIso(signupConfig.defaultCountry) ? signupConfig.defaultCountry.toUpperCase() : "BR";
+  const handleRegionDefaultsChange = useCallback((d: { country: string }) => {
+    if (!isCountryIso(d.country)) return;
+    const iso = d.country.toUpperCase();
+    setSignupConfig((p) => (p.defaultCountry === iso ? p : { ...p, defaultCountry: iso }));
+  }, []);
 
   useEffect(() => {
     const url = getLoginSideBgUrl(sideBgTimestamp);
@@ -1209,7 +1227,7 @@ export default function CustomizarPage() {
           sections: [
             { title: t("helpS0T"), items: [t("helpS0I0"), t("helpS0I1"), t("helpS0I2")] },
             { title: t("helpS1T"), items: [t("helpS1I0"), t("helpS1I1"), t("helpS1I2")] },
-            { title: t("helpS2T"), items: [t("helpS2I0"), t("helpS2I1"), t("helpS2I2")] },
+            { title: t("helpS2T"), items: [t("helpS2I0"), t("helpS2I1"), t("helpS2I2"), t("helpS2I3")] },
             // Só onde a aba Termos existe (fora da licença de empresa única).
             ...(singleTenantLicense === false
               ? [{ title: t("helpS3T"), items: [t("helpS3I0"), t("helpS3I1"), t("helpS3I2")] }]
@@ -1218,7 +1236,7 @@ export default function CustomizarPage() {
         }}
       />
 
-      <Tabs defaultValue="cores">
+      <Tabs value={activeTab} onValueChange={setActiveTab}>
         <div className="mb-4">
           <TabsList className="grid w-full grid-cols-3 md:grid-cols-5 xl:grid-cols-7 h-auto gap-1">
             <TabsTrigger value="cores" className="min-w-0 h-full whitespace-normal text-center leading-tight px-2 md:px-3 text-xs md:text-sm"><Palette className="mr-1.5 h-3.5 w-3.5 shrink-0 md:mr-2 md:h-4 md:w-4" />{t("tabColors")}</TabsTrigger>
@@ -1227,6 +1245,7 @@ export default function CustomizarPage() {
             <TabsTrigger value="tipografia" className="min-w-0 h-full whitespace-normal text-center leading-tight px-2 md:px-3 text-xs md:text-sm"><Type className="mr-1.5 h-3.5 w-3.5 shrink-0 md:mr-2 md:h-4 md:w-4" />{t("tabTypography")}</TabsTrigger>
             <TabsTrigger value="login" className="min-w-0 h-full whitespace-normal text-center leading-tight px-2 md:px-3 text-xs md:text-sm"><Monitor className="mr-1.5 h-3.5 w-3.5 shrink-0 md:mr-2 md:h-4 md:w-4" />{t("tabLogin")}</TabsTrigger>
             <TabsTrigger value="signup" className="min-w-0 h-full whitespace-normal text-center leading-tight px-2 md:px-3 text-xs md:text-sm"><UserPlus className="mr-1.5 h-3.5 w-3.5 shrink-0 md:mr-2 md:h-4 md:w-4" />{t("tabSignup")}</TabsTrigger>
+            <TabsTrigger value="regiao" className="min-w-0 h-full whitespace-normal text-center leading-tight px-2 md:px-3 text-xs md:text-sm"><Globe className="mr-1.5 h-3.5 w-3.5 shrink-0 md:mr-2 md:h-4 md:w-4" />{t("regionTab")}</TabsTrigger>
             <TabsTrigger value="api" className="min-w-0 h-full whitespace-normal text-center leading-tight px-2 md:px-3 text-xs md:text-sm"><Code2 className="mr-1.5 h-3.5 w-3.5 shrink-0 md:mr-2 md:h-4 md:w-4" />{t("tabApi")}</TabsTrigger>
             <TabsTrigger value="tutoriais" onClick={() => loadTutorials(1)} className="min-w-0 h-full whitespace-normal text-center leading-tight px-2 md:px-3 text-xs md:text-sm"><BookOpen className="mr-1.5 h-3.5 w-3.5 shrink-0 md:mr-2 md:h-4 md:w-4" />{t("tabTutorials")}</TabsTrigger>
             <TabsTrigger value="logout" className="min-w-0 h-full whitespace-normal text-center leading-tight px-2 md:px-3 text-xs md:text-sm"><LogOut className="mr-1.5 h-3.5 w-3.5 shrink-0 md:mr-2 md:h-4 md:w-4" />{t("tabForceLogout")}</TabsTrigger>
@@ -1421,7 +1440,7 @@ export default function CustomizarPage() {
                 <img
                   key={logoTimestamp}
                   src={getLogoUrl(logoTimestamp)}
-                  alt="Logo atual"
+                  alt={t("altLogoCurrent")}
                   className="h-12 max-w-[160px] rounded border object-contain p-1"
                   onError={(e) => { (e.target as HTMLImageElement).style.display = "none"; }}
                 />
@@ -1454,7 +1473,7 @@ export default function CustomizarPage() {
                 <img
                   key={logoDarkTimestamp}
                   src={getLogoDarkUrl(logoDarkTimestamp)}
-                  alt="Logo escuro atual"
+                  alt={t("altLogoDarkCurrent")}
                   className="h-12 max-w-[160px] rounded border bg-gray-800 object-contain p-1"
                   onError={(e) => { (e.target as HTMLImageElement).style.display = "none"; }}
                 />
@@ -1487,7 +1506,7 @@ export default function CustomizarPage() {
                 <img
                   key={faviconTimestamp}
                   src={getFaviconUrl(faviconTimestamp)}
-                  alt="Favicon atual"
+                  alt={t("altFaviconCurrent")}
                   className="h-10 w-10 rounded border object-contain p-0.5"
                   onError={(e) => { (e.target as HTMLImageElement).style.display = "none"; }}
                 />
@@ -1522,7 +1541,7 @@ export default function CustomizarPage() {
                 <div className="flex flex-wrap items-end gap-6">
                   <div className="flex flex-col items-center gap-1.5">
                     {pwaIconErrors.s192 ? (
-                      <div className="flex h-16 w-16 items-center justify-center rounded-xl border border-dashed text-[10px] text-muted-foreground">sem ícone</div>
+                      <div className="flex h-16 w-16 items-center justify-center rounded-xl border border-dashed text-[10px] text-muted-foreground">{t("pwaIconEmpty")}</div>
                     ) : (
                       // eslint-disable-next-line @next/next/no-img-element
                       <img
@@ -1536,7 +1555,7 @@ export default function CustomizarPage() {
                   </div>
                   <div className="flex flex-col items-center gap-1.5">
                     {pwaIconErrors.s512 ? (
-                      <div className="flex h-16 w-16 items-center justify-center rounded-xl border border-dashed text-[10px] text-muted-foreground">sem ícone</div>
+                      <div className="flex h-16 w-16 items-center justify-center rounded-xl border border-dashed text-[10px] text-muted-foreground">{t("pwaIconEmpty")}</div>
                     ) : (
                       // eslint-disable-next-line @next/next/no-img-element
                       <img
@@ -1663,11 +1682,11 @@ export default function CustomizarPage() {
                           <div className="min-w-0">
                             <p className="text-xs font-semibold text-gray-800 truncate">{appName || "App"}</p>
                             <p className="text-[10px] text-gray-500">localhost:3000</p>
-                            <p className="text-[10px] text-gray-400">Verificado pelo Google</p>
+                            <p className="text-[10px] text-gray-400">{t("preview.androidVerified")}</p>
                           </div>
                         </div>
                         <button className="w-full text-white text-xs py-2 rounded-full font-medium" style={{ backgroundColor: colors.primary }}>
-                          Instalar
+                          {t("preview.androidInstall")}
                         </button>
                       </div>
                     </div>
@@ -2498,22 +2517,18 @@ export default function CustomizarPage() {
                       disabled={savingSignup === "phoneRequired"}
                     />
                   </div>
+                  {/* País padrão: segue a Região padrão (D7); o campo livre saiu daqui. */}
                   <div className="space-y-2">
-                    <Label>{t("signupDefaultCountryLabel")}</Label>
-                    <Input
-                      placeholder="BR"
-                      maxLength={2}
-                      value={signupConfig.defaultCountry}
-                      onChange={(e) => setSignupConfig((p) => ({ ...p, defaultCountry: e.target.value.toUpperCase() }))}
-                      onBlur={(e) => {
-                        const v = e.target.value.toUpperCase().slice(0, 2);
-                        if (v !== signupConfig.defaultCountry) {
-                          patchSignupConfig({ defaultCountry: v }, "defaultCountry");
-                        }
-                      }}
-                      disabled={savingSignup === "defaultCountry"}
-                    />
-                    <p className="text-xs text-muted-foreground">{t("signupDefaultCountryHint")}</p>
+                    <Label>{t("regionTabSignupCountryLabel")}</Label>
+                    <div className="rounded-md border bg-muted/30 px-3 py-2.5 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                      <p className="flex items-start gap-2 text-xs text-muted-foreground">
+                        <Globe className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                        <span>{t("regionTabSignupCountryMovedNotice", { country: countryName(signupCountryIso, uiLocale) })}</span>
+                      </p>
+                      <Button type="button" variant="outline" size="sm" className="shrink-0 self-start sm:self-auto" onClick={() => setActiveTab("regiao")}>
+                        {t("regionTabOpenButton")}
+                      </Button>
+                    </div>
                   </div>
                 </CardContent>
               </Card>
@@ -2559,7 +2574,7 @@ export default function CustomizarPage() {
                         {t("signupPreviewPhone")}{signupConfig.phoneRequired ? " *" : ""}
                       </Label>
                       <div className="h-8 rounded-md border bg-muted/40 flex items-center px-2 text-[10px] text-muted-foreground">
-                        {signupConfig.phoneFormat === "br" ? "(11) 99999-9999" : `+${signupConfig.defaultCountry === "BR" ? "55" : "1"} ${t("signupPreviewPhoneIntlHint")}`}
+                        {signupConfig.phoneFormat === "br" ? "(11) 99999-9999" : examplePhone(signupCountryIso)}
                       </div>
                     </div>
                     <div className="space-y-2">
@@ -2580,6 +2595,11 @@ export default function CustomizarPage() {
               </Card>
             </div>
           </div>
+        </TabsContent>
+
+        {/* Região padrão (país, moeda e idioma herdados pelas empresas) */}
+        <TabsContent value="regiao">
+          <RegionDefaultsTab onDefaultsChange={handleRegionDefaultsChange} />
         </TabsContent>
 
         {/* Sons de Notificação */}

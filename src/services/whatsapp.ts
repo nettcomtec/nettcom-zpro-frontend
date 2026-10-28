@@ -52,6 +52,12 @@ export interface Whatsapp {
   // Instagram: comentario em post/reels abre atendimento. Default backend = true;
   // false = canal so com DM (automacoes de comentario seguem rodando).
   igCommentsCreateTickets?: boolean;
+  // WABA: juntar mensagens seguidas (docs/PLANO_WABA_JUNTAR_MENSAGENS.md). Vem so
+  // nos canais waba de GET /whatsapp e /whatsapp/:id; chave AUSENTE = backend sem
+  // suporte (a tela esconde o bloco e o atendente nao espera).
+  wabaGroupBotMessages?: boolean;
+  // Segundos que a tela segura o texto do atendente para juntar (0 = desligado, 2 a 15).
+  wabaGroupAgentSeconds?: number;
 
   tokenAPI?: string;
   wabaId?: string;
@@ -363,6 +369,12 @@ export async function updateBaileysAuthStore(whatsappId: number, baileysAuthStor
   return api.patch<Whatsapp>(`/whatsapp/${whatsappId}/baileys-auth-store`, { baileysAuthStore });
 }
 
+// Armazenamento SQLite disponível no servidor (o componente é opcional na
+// instalação). Backend antigo responde 404: quem chama trata como "não sabe".
+export async function fetchBaileysAuthStoreAvailability() {
+  return api.get<{ sqliteAvailable: boolean }>("/whatsapp/baileys-auth-store/availability");
+}
+
 /**
  * PLANO_ZAPO §13 (F12) — migra um canal baileys para zapo SEM novo QR
  * (conversao do auth state via wa-store-migrate; mesma sessao/aparelho).
@@ -570,6 +582,40 @@ export async function confirmWebhookRevalidation(whatsappId: number) {
   return api.post<{ success: boolean; whatsappId: number }>(
     `/whatsapp/${whatsappId}/confirm-webhook-revalidation`
   );
+}
+
+/** Textos que o bot do Telegram responde ao link de convite (null = texto padrão). */
+export interface TelegramInviteTexts {
+  /** false quando o banco ainda não tem as colunas (migration pendente): a tela esconde a seção. */
+  available: boolean;
+  confirmText: string | null;
+  expiredText: string | null;
+  conflictText: string | null;
+  /** Textos padrão que o bot envia quando o campo está vazio (placeholder da tela). */
+  defaults: { confirmText: string; expiredText: string; conflictText: string };
+}
+
+/** Campo ausente = não muda; "" ou null = volta ao texto padrão. */
+export interface TelegramInviteTextsUpdate {
+  confirmText?: string | null;
+  expiredText?: string | null;
+  conflictText?: string | null;
+}
+
+/**
+ * GET /whatsapp/:id/telegram-invite-texts — só canal Telegram; perfil user → 403;
+ * backend antigo → 404 sem código (a tela esconde a seção).
+ */
+export async function getTelegramInviteTexts(whatsappId: number) {
+  return api.get<TelegramInviteTexts>(`/whatsapp/${whatsappId}/telegram-invite-texts`);
+}
+
+/**
+ * PUT /whatsapp/:id/telegram-invite-texts — devolve o mesmo formato do GET; banco sem
+ * as colunas → 409 ERR_TELEGRAM_INVITE_UNAVAILABLE.
+ */
+export async function updateTelegramInviteTexts(whatsappId: number, body: TelegramInviteTextsUpdate) {
+  return api.put<TelegramInviteTexts>(`/whatsapp/${whatsappId}/telegram-invite-texts`, body);
 }
 
 export interface WABATemplate {

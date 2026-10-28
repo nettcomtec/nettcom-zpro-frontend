@@ -18,10 +18,13 @@ import {
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
-import { Plus, Pencil, Trash2, RefreshCw, Zap, Loader2, GitBranch, ArrowUp, ArrowDown, Images, FileText, Video, History, ChevronLeft, ChevronRight, AlertTriangle } from "lucide-react";
+import { Plus, Pencil, Trash2, RefreshCw, Zap, Loader2, GitBranch, ArrowUp, ArrowDown, Images, FileText, Video, History, ChevronLeft, ChevronRight, AlertTriangle, Info, Trophy } from "lucide-react";
 import { toast } from "sonner";
 import { useTranslations } from "next-intl";
+import { uiT } from "@/lib/ui-t";
 import { isValidHttpUrl, formatDateTime } from "@/lib/utils";
+import { isMetaTokenUnauthorized, getBackendErrorCode, metaRateLimitedMessage } from "@/lib/backend-error-code";
+import { Tooltip, TooltipContent, TooltipTrigger, TooltipProvider } from "@/components/ui/tooltip";
 import {
   isOrderDetailsTemplate,
   emptyOrderDetails,
@@ -44,6 +47,8 @@ import {
   togglePipelineAction,
   createPipelineActionsSequential,
   fetchPipelineActionLogs,
+  fetchPipelineActionStageAudience,
+  fetchPipelineActionCapabilities,
 } from "@/services/funnel";
 import { fetchWhatsapps } from "@/services/whatsapp";
 import { fetchTags } from "@/services/tags";
@@ -70,7 +75,9 @@ interface PipelineAction {
   name: string;
   description?: string;
   pipelineId?: number;
-  stageId?: number;
+  stageId?: number | null;
+  /** "won" = dispara ao marcar como Ganha; ausente/null = por dias (como sempre). */
+  triggerOn?: string | null;
   actionType: string;
   actionContent?: string;
   daysToTrigger?: number;
@@ -148,12 +155,22 @@ const blankTplFlowCfg = (): TemplateFlowConfig => ({ name: "", whatsappId: NONE,
 
 const ACTION_TYPE_VALUES = ["message", "media", "template", "stage_change", "status_change", "add_tag", "add_wallet", "flow"] as const;
 const STATUS_OPTION_VALUES = ["open", "win", "lose"] as const;
+// Tipos que enviam ao contato (os mesmos do job): só eles levam o aviso de alcance.
+const SEND_ACTION_TYPE_VALUES = new Set<string>(["message", "media", "template"]);
+// Gatilho "ao marcar como Ganha" (espelho do backend, helpers/PipelineWonTriggerZPRO.ts):
+// só estes tipos, sem etapa e com a sentinela de dias — backend antigo (ou volta de
+// versão) trata a ação como "por dias" e, com 100 anos, ela nunca dispara.
+const WON_TRIGGER_ACTION_TYPES = new Set<string>(["message", "template", "media", "add_tag", "add_wallet"]);
+const WON_TRIGGER_DAYS_SENTINEL = 36500;
+
+type TriggerMode = "days" | "won";
 
 interface FormState {
   name: string;
   description: string;
   pipelineId: string;
   stageId: string;
+  triggerOn: TriggerMode;
   actionType: string;
   actionContent: string;
   daysToTrigger: number;
@@ -172,6 +189,7 @@ interface FormState {
 const blankForm = (): FormState => ({
   name: "", description: "",
   pipelineId: NONE, stageId: NONE,
+  triggerOn: "days",
   actionType: "message", actionContent: "",
   daysToTrigger: 0,
   tagId: NONE, walletId: NONE, whatsappId: NONE,
@@ -200,7 +218,7 @@ function getTemplateVariableLabels(t: WabaTemplate): string[] {
       body.example.body_text_named_params.forEach((p: any) => labels.push(p.param_name || ""));
     } else {
       const matches: string[] = body.text?.match(/{{\d+}}/g) || [];
-      matches.forEach((_, i) => labels.push(`Variável ${i + 1}`));
+      matches.forEach((_, i) => labels.push(uiT("funilAcaoPage.templateVarLabel", { n: i + 1 }, "Variável {n}")));
     }
   }
   const buttons = t.components.find(c => c.type === "BUTTONS");
@@ -213,7 +231,7 @@ function getTemplateVariableLabels(t: WabaTemplate): string[] {
       const needsInput =
         b?.type === "COPY_CODE" ||
         (b?.type === "URL" && !!btnUrl && /\{\{1\}\}/.test(btnUrl) && !/otp_type=|\/otp\//i.test(btnUrl));
-      if (needsInput) labels.push(`Botão ${idx + 1}`);
+      if (needsInput) labels.push(uiT("funilAcaoPage.templateButtonLabel", { n: idx + 1 }, "Botão {n}"));
     });
   }
   return labels;
@@ -356,6 +374,7 @@ export default function FunilAcaoPage() {
 function FunilAcaoPageContent() {
   const t = useTranslations("funilAcaoPage");
   const tErrors = useTranslations("errors");
+  const tCommon = useTranslations("common");
   const tOrder = useTranslations("orderDetails");
   const { user } = useAuthStore();
 
@@ -405,6 +424,32 @@ function FunilAcaoPageContent() {
   const [deleting,   setDeleting]   = useState<PipelineAction | null>(null);
   const [form, setForm] = useState<FormState>(blankForm());
   const f = useCallback((patch: Partial<FormState>) => setForm(p => ({ ...p, ...patch })), []);
+
+  // Gatilho "ao marcar como Ganha": a opção só aparece com `wonTrigger === true`
+  // (backend antigo, sem as colunas ou com o recurso desligado = sem a opção). Ação
+  // que já é "Ganha" continua editável mesmo assim, para poder voltar a "por dias".
+  const [wonTriggerAvailable, setWonTriggerAvailable] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    fetchPipelineActionCapabilities().then(caps => {
+      if (!cancelled) setWonTriggerAvailable(caps.wonTrigger);
+    });
+    return () => { cancelled = true; };
+  }, []);
+  const isWonMode = form.triggerOn === "won";
+  const showTriggerSelector = wonTriggerAvailable || editing?.triggerOn === "won";
+  const formActionTypes = isWonMode ? ACTION_TYPES.filter(at => WON_TRIGGER_ACTION_TYPES.has(at.value)) : ACTION_TYPES;
+  const changeTriggerMode = (mode: TriggerMode) => {
+    if (mode === form.triggerOn) return;
+    if (mode === "won" && !WON_TRIGGER_ACTION_TYPES.has(form.actionType)) {
+      // Tipo que não pode disparar ao ganhar (fluxo, mudança de etapa/status): volta para
+      // mensagem, como na troca de tipo.
+      f({ triggerOn: mode, actionType: "message", whatsappId: NONE });
+      resetTemplateState();
+      return;
+    }
+    f({ triggerOn: mode });
+  };
 
   // Flow state
   const [flowOpen,           setFlowOpen]           = useState(false);
@@ -525,8 +570,46 @@ function FunilAcaoPageContent() {
     } catch { /* silencioso */ }
   }, []);
 
+  // Vindo da recusa de exclusão do funil (`?pipelineId=<id>&active=false`): abre já no
+  // funil e nas inativas, onde estão as ações "ao marcar como Ganha" que travam.
+  useEffect(() => {
+    try {
+      const params = new URLSearchParams(window.location.search);
+      const pid = Number(params.get("pipelineId"));
+      if (Number.isInteger(pid) && pid > 0) setFPipeline(String(pid));
+      if (params.get("active") === "false") setFActive(false);
+    } catch { /* sem parâmetros */ }
+  }, []);
   useEffect(() => { loadOptions(); }, [loadOptions]);
   useEffect(() => { loadActions(); }, [loadActions]);
+
+  // Alcance de uma ação de envio: oportunidades ABERTAS na etapa escolhida. O job envia
+  // para todas (as que já passaram do prazo recebem na próxima rodada), então o aviso
+  // aparece ao criar/editar ação de envio ativa ou fluxo com etapa de envio. Sem número
+  // (carregando, erro, backend antigo sem a rota) ou com zero, o aviso não aparece.
+  // Ação "ao marcar como Ganha" não tem etapa nem alcance prévio: sem aviso.
+  const audienceStageId: string | null =
+    dialogOpen && form.active && !isWonMode && SEND_ACTION_TYPE_VALUES.has(form.actionType) && form.stageId !== NONE
+      ? form.stageId
+      : flowOpen && flowForm.stageId !== NONE && flowForm.actions.some(a => SEND_ACTION_TYPE_VALUES.has(a.actionType))
+        ? flowForm.stageId
+        : null;
+  const [audience, setAudience] = useState<{ stageId: string; open: number } | null>(null);
+  useEffect(() => {
+    if (!audienceStageId) return;
+    let cancelled = false;
+    fetchPipelineActionStageAudience(Number(audienceStageId)).then(open => {
+      if (!cancelled) setAudience(open === null ? null : { stageId: audienceStageId, open });
+    });
+    return () => { cancelled = true; };
+  }, [audienceStageId]);
+  const audienceOpenCount = audienceStageId && audience && audience.stageId === audienceStageId ? audience.open : 0;
+  const audienceWarning = audienceOpenCount > 0 ? (
+    <div className="shrink-0 flex items-start gap-2 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-900 dark:text-amber-200">
+      <AlertTriangle className="h-3.5 w-3.5 mt-0.5 shrink-0" />
+      <span>{t("audienceWarning", { count: audienceOpenCount })}</span>
+    </div>
+  ) : null;
 
   // ── Template handlers ──────────────────────────────────────────────────────
   const onWabaChange = async (wabaId: string) => {
@@ -541,7 +624,7 @@ function FunilAcaoPageContent() {
       // Cast — services retornam shapes equivalentes mas tipos diferentes.
       const list = (await getTemplatesForChannel({ id: conn.id, type: conn.type, tokenAPI: conn.tokenAPI })) as any;
       setTemplates([...list].sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase())));
-    } catch { toast.error(t("errorFetchTemplates")); }
+    } catch (err) { toast.error(metaRateLimitedMessage(err, tCommon) ?? (isMetaTokenUnauthorized(err) ? tCommon("metaTokenInvalidReconnect") : t("errorFetchTemplates"))); }
     finally { setLoadingTemplates(false); }
   };
 
@@ -589,9 +672,11 @@ function FunilAcaoPageContent() {
       name: a.name ?? "", description: a.description ?? "",
       pipelineId:    a.pipelineId    != null ? String(a.pipelineId)    : NONE,
       stageId:       a.stageId       != null ? String(a.stageId)       : NONE,
+      triggerOn:     a.triggerOn === "won" ? "won" : "days",
       actionType:    a.actionType ?? "message",
       actionContent: a.actionContent ?? "",
-      daysToTrigger: a.daysToTrigger ?? 0,
+      // A sentinela de 100 anos da ação "Ganha" nunca aparece no campo de dias.
+      daysToTrigger: a.triggerOn === "won" ? 0 : (a.daysToTrigger ?? 0),
       tagId:         a.tagId         != null ? String(a.tagId)         : NONE,
       walletId:      a.walletId      != null ? String(a.walletId)      : NONE,
       whatsappId:    a.whatsappId    != null ? String(a.whatsappId)    : NONE,
@@ -656,8 +741,12 @@ function FunilAcaoPageContent() {
   const handleSubmit = async () => {
     if (!form.name.trim())           { toast.error(t("validationNameRequired"));     return; }
     if (form.pipelineId === NONE)    { toast.error(t("validationPipelineRequired")); return; }
-    if (form.stageId === NONE)       { toast.error(t("validationStageRequired"));    return; }
+    // "Ao marcar como Ganha" vale para qualquer etapa do funil: sem etapa.
+    if (!isWonMode && form.stageId === NONE) { toast.error(t("validationStageRequired")); return; }
     if (!form.actionType)            { toast.error(t("validationActionTypeRequired")); return; }
+    if (isWonMode && !WON_TRIGGER_ACTION_TYPES.has(form.actionType)) {
+      toast.error(t("errorWonTriggerInvalidType")); return;
+    }
 
     if (form.actionType === "message" && (!form.actionContent.trim() || form.whatsappId === NONE)) {
       toast.error(t("validationMessageAndWhatsapp")); return;
@@ -696,6 +785,18 @@ function FunilAcaoPageContent() {
       actionType: form.actionType, daysToTrigger: Number(form.daysToTrigger) || 0,
       active: form.active,
     };
+    if (isWonMode) {
+      // Corpo explícito: etapa nula e a sentinela de dias (backend antigo nunca dispara).
+      // Recurso desligado e ação que já era "Ganha": sem `triggerOn` no corpo, o backend
+      // mantém o gatilho (pedir "won" com o recurso desligado seria recusado).
+      if (wonTriggerAvailable || editing?.triggerOn !== "won") payload.triggerOn = "won";
+      payload.stageId       = null;
+      payload.daysToTrigger = WON_TRIGGER_DAYS_SENTINEL;
+    } else if (showTriggerSelector) {
+      // Backend com o recurso (ou ação que era "Ganha"): "por dias" dito explicitamente,
+      // para a ação que era "Ganha" voltar a ser por dias. Sem o recurso, corpo de sempre.
+      payload.triggerOn = "days";
+    }
 
     switch (form.actionType) {
       case "message":
@@ -743,7 +844,13 @@ function FunilAcaoPageContent() {
       }
       setDialogOpen(false);
       loadActions();
-    } catch { toast.error(editing ? t("errorUpdate") : t("errorCreate")); }
+    } catch (err) {
+      const code = getBackendErrorCode(err);
+      if (code === "ERR_PIPELINE_WON_TRIGGER_INVALID_TYPE") { toast.error(t("errorWonTriggerInvalidType")); return; }
+      if (code === "ERR_PIPELINE_WON_TRIGGER_UNAVAILABLE") { toast.error(t("errorWonTriggerUnavailable")); return; }
+      if (code === "ERR_PIPELINE_WON_TRIGGER_PIPELINE_REQUIRED") { toast.error(t("errorWonTriggerPipelineRequired")); return; }
+      toast.error(editing ? t("errorUpdate") : t("errorCreate"));
+    }
   };
 
   const handleDelete = async () => {
@@ -787,8 +894,10 @@ function FunilAcaoPageContent() {
     if (a.actionContent) {
       try {
         const parsed = JSON.parse(a.actionContent);
-        const rawActions: FlowSubAction[] = (parsed.actions || []).map((act: any) => ({
-          id:            act.id ?? `sub_${Date.now()}_${Math.random()}`,
+        // Etapa salva sem id fica com o id que o job ja usa para ela (posicao + nome):
+        // um id novo aqui fazia a etapa ja feita sair de novo depois de salvar.
+        const rawActions: FlowSubAction[] = (parsed.actions || []).map((act: any, idx: number) => ({
+          id:            act.id || `flow_${a.id}_action_${idx}_${act.name || act.actionType}`,
           actionType:    act.actionType || act.type || "message",
           name:          act.name ?? "",
           actionContent: act.actionContent ?? act.message ?? "",
@@ -898,8 +1007,10 @@ function FunilAcaoPageContent() {
 
   const commitSubAction = (updated: FlowSubAction) => {
     setFlowForm(prev => {
+      // Etapa editada mantem o id: o log de cada etapa e casado por ele, e um id novo
+      // faria a etapa ja feita sair de novo.
       const actions = editingSubIdx !== null
-        ? prev.actions.map((a, i) => i === editingSubIdx ? updated : a)
+        ? prev.actions.map((a, i) => i === editingSubIdx ? { ...updated, id: a.id || updated.id } : a)
         : [...prev.actions, updated];
       return { ...prev, actions: updateRelativeDays(actions) };
     });
@@ -983,7 +1094,7 @@ function FunilAcaoPageContent() {
       // Cast — services retornam shapes equivalentes mas tipos diferentes.
       const list = (await getTemplatesForChannel({ id: conn.id, type: conn.type, tokenAPI: conn.tokenAPI })) as any;
       setFlowTemplates([...list].sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase())));
-    } catch { toast.error(t("errorFetchTemplates")); }
+    } catch (err) { toast.error(metaRateLimitedMessage(err, tCommon) ?? (isMetaTokenUnauthorized(err) ? tCommon("metaTokenInvalidReconnect") : t("errorFetchTemplates"))); }
     finally { setLoadingFlowTpls(false); }
   };
 
@@ -1100,8 +1211,9 @@ function FunilAcaoPageContent() {
   const actionLabel = (v: string) => ACTION_TYPES.find(t => t.value === v)?.label ?? v;
   // "Dias para Disparar": para um flow o registro pai tem daysToTrigger=0 (o flow inicia
   // junto com a entrada no estagio) e os dias reais vivem nas sub-acoes do actionContent.
-  // O executor dispara a ultima sub-acao em createdAt + soma(daysToTrigger), entao o total
-  // do fluxo = soma dos dias das sub-acoes.
+  // O executor dispara a ultima sub-acao em createdAt + soma(daysToTrigger) (com as travas
+  // do job, nunca antes disso: cada etapa tambem espera os dias dela contados do fim da
+  // anterior), entao o total do fluxo = soma dos dias das sub-acoes.
   const getActionDays = (a: PipelineAction): number => {
     if (a.actionType !== "flow") return a.daysToTrigger ?? 0;
     if (!a.actionContent) return a.daysToTrigger ?? 0;
@@ -1172,6 +1284,11 @@ function FunilAcaoPageContent() {
       default:            return { label: status,                   variant: "secondary" };
     }
   };
+
+  // Erro gravado no log como código cru (etiqueta apagada depois de configurar a ação):
+  // mostra o texto traduzido; os demais seguem como foram gravados.
+  const logErrorText = (message?: string | null): string =>
+    message?.trim() === "ERR_TAG_NOT_FOUND" ? tCommon("tagNotFoundReload") : (message || "");
   // ─────────────────────────────────────────────────────────────────────────────
 
   if (loading) return (
@@ -1190,7 +1307,7 @@ function FunilAcaoPageContent() {
           sections: [
             { title: t("helpS0T"), items: [t("helpS0I0"), t("helpS0I1"), t("helpS0I2")] },
             { title: t("helpS1T"), items: [t("helpS1I0"), t("helpS1I1"), t("helpS1I2")] },
-            { title: t("helpS2T"), items: [t("helpS2I0"), t("helpS2I1")] },
+            { title: t("helpS2T"), items: [t("helpS2I0"), t("helpS2I1"), t("helpS2I2")] },
           ],
         }}
       >
@@ -1311,9 +1428,19 @@ function FunilAcaoPageContent() {
                       </span>
                     </TableCell>
                     <TableCell className="text-muted-foreground text-sm">{getPipelineName(a)}</TableCell>
-                    <TableCell className="text-muted-foreground text-sm">{getStageName(a)}</TableCell>
+                    <TableCell className="text-muted-foreground text-sm">
+                      {a.triggerOn === "won" ? t("wonTriggerAnyStage") : getStageName(a)}
+                    </TableCell>
                     <TableCell><Badge variant="secondary">{actionLabel(a.actionType)}</Badge></TableCell>
-                    <TableCell>{getActionDays(a)}d</TableCell>
+                    <TableCell>
+                      {a.triggerOn === "won" ? (
+                        <Badge variant="outline" className="gap-1 whitespace-nowrap">
+                          <Trophy className="h-3 w-3" />{t("triggerOnWon")}
+                        </Badge>
+                      ) : (
+                        <>{getActionDays(a)}d</>
+                      )}
+                    </TableCell>
                     <TableCell><Switch checked={a.active} onCheckedChange={() => handleToggle(a)} /></TableCell>
                     <TableCell>
                       <div className="flex gap-1">
@@ -1360,16 +1487,49 @@ function FunilAcaoPageContent() {
               </Select>
             </div>
 
-            {/* Stage */}
-            <div className="grid gap-2">
-              <Label>{t("labelStage")}</Label>
-              <Select value={form.stageId} onValueChange={v => f({ stageId: v })} disabled={form.pipelineId === NONE}>
-                <SelectTrigger><SelectValue placeholder={t("selectPlaceholder")} /></SelectTrigger>
-                <SelectContent>
-                  {formStages.map(s => <SelectItem key={s.id} value={String(s.id)}>{s.name}</SelectItem>)}
-                </SelectContent>
-              </Select>
-            </div>
+            {/* Quando disparar (só com o recurso no backend, ou ação que já é "Ganha") */}
+            {showTriggerSelector && (
+              <div className="grid gap-2">
+                <div className="flex items-center gap-1.5">
+                  <Label>{t("triggerOnLabel")}</Label>
+                  <TooltipProvider delayDuration={200}>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <button type="button" aria-label={t("triggerOnTooltip")} className="text-muted-foreground hover:text-foreground">
+                          <Info className="h-3.5 w-3.5" />
+                        </button>
+                      </TooltipTrigger>
+                      <TooltipContent className="max-w-xs text-xs font-normal">
+                        {t("triggerOnTooltip")}
+                      </TooltipContent>
+                    </Tooltip>
+                  </TooltipProvider>
+                </div>
+                <Select value={form.triggerOn} onValueChange={v => changeTriggerMode(v as TriggerMode)}>
+                  <SelectTrigger><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="days">{t("triggerOnDays")}</SelectItem>
+                    <SelectItem value="won">{t("triggerOnWon")}</SelectItem>
+                  </SelectContent>
+                </Select>
+                {isWonMode && (
+                  <p className="text-xs text-muted-foreground bg-muted rounded px-2 py-1">{t("wonTriggerNote")}</p>
+                )}
+              </div>
+            )}
+
+            {/* Stage (o modo "Ganha" vale para qualquer etapa do funil) */}
+            {!isWonMode && (
+              <div className="grid gap-2">
+                <Label>{t("labelStage")}</Label>
+                <Select value={form.stageId} onValueChange={v => f({ stageId: v })} disabled={form.pipelineId === NONE}>
+                  <SelectTrigger><SelectValue placeholder={t("selectPlaceholder")} /></SelectTrigger>
+                  <SelectContent>
+                    {formStages.map(s => <SelectItem key={s.id} value={String(s.id)}>{s.name}</SelectItem>)}
+                  </SelectContent>
+                </Select>
+              </div>
+            )}
 
             {/* Action type */}
             <div className="grid gap-2">
@@ -1383,7 +1543,7 @@ function FunilAcaoPageContent() {
               >
                 <SelectTrigger><SelectValue /></SelectTrigger>
                 <SelectContent>
-                  {ACTION_TYPES.map(at => <SelectItem key={at.value} value={at.value}>{at.label}</SelectItem>)}
+                  {formActionTypes.map(at => <SelectItem key={at.value} value={at.value}>{at.label}</SelectItem>)}
                 </SelectContent>
               </Select>
             </div>
@@ -1393,7 +1553,7 @@ function FunilAcaoPageContent() {
               <>
                 <div className="grid gap-2">
                   <Label>{t("labelMessage")}</Label>
-                  <TextareaWithVars value={form.actionContent} onChange={val => f({ actionContent: val })} placeholder={t("placeholderMessage")} rows={3} />
+                  <TextareaWithVars value={form.actionContent} onChange={val => f({ actionContent: val })} placeholder={t("placeholderMessage")} rows={3} withGoogleReviewLink />
                 </div>
                 <div className="grid gap-2">
                   <Label>{t("labelWhatsapp")}</Label>
@@ -1426,7 +1586,7 @@ function FunilAcaoPageContent() {
                 </div>
                 <div className="grid gap-2">
                   <Label>{t("labelCaption")}</Label>
-                  <TextareaWithVars value={form.mediaCaption} onChange={val => f({ mediaCaption: val })} placeholder={t("placeholderCaption")} rows={2} />
+                  <TextareaWithVars value={form.mediaCaption} onChange={val => f({ mediaCaption: val })} placeholder={t("placeholderCaption")} rows={2} withGoogleReviewLink />
                 </div>
                 {isAudioMedia(form.mediaType, form.mediaUrl) && (
                   <div className="flex items-center gap-2">
@@ -1516,7 +1676,7 @@ function FunilAcaoPageContent() {
                     {varFields.map((vf, i) => (
                       <div key={i} className="grid gap-1">
                         <Label className="text-xs">{vf.label}</Label>
-                        <InputWithVars value={vf.value} onChange={val => updateVarField(i, val)} placeholder={vf.label} />
+                        <InputWithVars value={vf.value} onChange={val => updateVarField(i, val)} placeholder={vf.label} withGoogleReviewLink />
                       </div>
                     ))}
                   </div>
@@ -1576,12 +1736,14 @@ function FunilAcaoPageContent() {
               </div>
             )}
 
-            {/* Days to trigger */}
-            <div className="grid gap-2">
-              <Label>{t("labelDaysToTrigger")}</Label>
-              <Input type="number" min={0} value={form.daysToTrigger} onChange={e => f({ daysToTrigger: Number(e.target.value) || 0 })} />
-              <p className="text-xs text-muted-foreground">{t("daysToTriggerSimpleHint")}</p>
-            </div>
+            {/* Days to trigger (sem dias no modo "Ganha") */}
+            {!isWonMode && (
+              <div className="grid gap-2">
+                <Label>{t("labelDaysToTrigger")}</Label>
+                <Input type="number" min={0} value={form.daysToTrigger} onChange={e => f({ daysToTrigger: Number(e.target.value) || 0 })} />
+                <p className="text-xs text-muted-foreground">{t("daysToTriggerSimpleHint")}</p>
+              </div>
+            )}
 
             {/* Description */}
             <div className="grid gap-2">
@@ -1595,6 +1757,9 @@ function FunilAcaoPageContent() {
               <Label htmlFor="form-active">{t("active")}</Label>
             </div>
           </div>
+
+          {/* Alcance da ação de envio (fora da rolagem: sempre visível antes de salvar) */}
+          {audienceWarning}
 
           <DialogFooter className="shrink-0 pt-2">
             <Button variant="outline" onClick={() => setDialogOpen(false)}>{t("cancel")}</Button>
@@ -1660,7 +1825,9 @@ function FunilAcaoPageContent() {
                   // Dia real de disparo (apos o inicio do fluxo) = soma cumulativa INCLUSIVA dos
                   // daysToTrigger ate esta acao, espelhando o ExecutePipelineActionsJob.executeFlow:
                   // triggerDate = createdAt + (daysToTrigger + accumulatedDays); accumulatedDays += daysToTrigger.
-                  // Ou seja, cada acao dispara no dia = soma dos delays dela e de todas as anteriores.
+                  // Ou seja, cada acao dispara no dia = soma dos delays dela e de todas as anteriores
+                  // (com as travas do job, no minimo nesse dia: a partir da 2a etapa ela tambem
+                  // espera os dias dela contados do fim da anterior).
                   const triggerDay = flowForm.actions
                     .slice(0, idx + 1)
                     .reduce((s, x) => s + (Number(x.daysToTrigger) || 0), 0);
@@ -1687,6 +1854,8 @@ function FunilAcaoPageContent() {
               </Button>
             </div>
           </div>
+          {/* Alcance do fluxo com etapa de envio (fora da rolagem: sempre visível antes de salvar) */}
+          {audienceWarning}
           <DialogFooter className="shrink-0 pt-2">
             <Button variant="outline" onClick={() => setFlowOpen(false)}>{t("cancel")}</Button>
             <Button onClick={handleSaveFlow}>{editingFlowAction ? t("save") : t("create")}</Button>
@@ -1714,7 +1883,7 @@ function FunilAcaoPageContent() {
           <DialogHeader><DialogTitle>{t("configMessage")}</DialogTitle></DialogHeader>
           <div className="grid gap-4 py-2">
             <div className="grid gap-2"><Label>{t("labelName")}</Label><Input value={msgCfg.name} onChange={e => setMsgCfg(p => ({ ...p, name: e.target.value }))} /></div>
-            <div className="grid gap-2"><Label>{t("labelMessage")}</Label><TextareaWithVars value={msgCfg.message} onChange={val => setMsgCfg(p => ({ ...p, message: val }))} rows={3} /></div>
+            <div className="grid gap-2"><Label>{t("labelMessage")}</Label><TextareaWithVars value={msgCfg.message} onChange={val => setMsgCfg(p => ({ ...p, message: val }))} rows={3} withGoogleReviewLink /></div>
             <div className="grid gap-2">
               <Label>{t("labelWhatsapp")}</Label>
               <Select value={msgCfg.whatsappId} onValueChange={v => setMsgCfg(p => ({ ...p, whatsappId: v }))}>
@@ -1751,7 +1920,7 @@ function FunilAcaoPageContent() {
                 )}
               </div>
             </div>
-            <div className="grid gap-2"><Label>{t("labelCaption")}</Label><TextareaWithVars value={mediaCfg.mediaCaption} onChange={val => setMediaCfg(p => ({ ...p, mediaCaption: val }))} rows={2} /></div>
+            <div className="grid gap-2"><Label>{t("labelCaption")}</Label><TextareaWithVars value={mediaCfg.mediaCaption} onChange={val => setMediaCfg(p => ({ ...p, mediaCaption: val }))} rows={2} withGoogleReviewLink /></div>
             {isAudioMedia(mediaCfg.mediaType, mediaCfg.mediaUrl) && (
               <div className="flex items-center gap-2">
                 <Switch id="media-cfg-ptt" checked={mediaCfg.mediaPtt} onCheckedChange={v => setMediaCfg(p => ({ ...p, mediaPtt: v }))} />
@@ -1914,7 +2083,7 @@ function FunilAcaoPageContent() {
                 {tplFlowCfg.varFields.map((vf, i) => (
                   <div key={i} className="grid gap-1">
                     <Label className="text-xs">{vf.label}</Label>
-                    <InputWithVars value={vf.value} onChange={val => updateFlowVarField(i, val)} placeholder={vf.label} />
+                    <InputWithVars value={vf.value} onChange={val => updateFlowVarField(i, val)} placeholder={vf.label} withGoogleReviewLink />
                   </div>
                 ))}
               </div>
@@ -1965,6 +2134,7 @@ function FunilAcaoPageContent() {
                 <TableBody>
                   {logs.map(log => {
                     const meta = logStatusMeta(log.status);
+                    const errorText = logErrorText(log.errorMessage);
                     return (
                       <TableRow key={log.id}>
                         <TableCell className="whitespace-nowrap text-xs">{formatDateTime(log.createdAt)}</TableCell>
@@ -1974,7 +2144,7 @@ function FunilAcaoPageContent() {
                         <TableCell className="text-sm">{log.opportunity?.contact?.email || "—"}</TableCell>
                         <TableCell className="text-sm">{log.pipelineAction?.name || "—"}</TableCell>
                         <TableCell><Badge variant={meta.variant}>{meta.label}</Badge></TableCell>
-                        <TableCell className="text-xs text-muted-foreground max-w-[220px] truncate" title={log.errorMessage || ""}>{log.errorMessage || "—"}</TableCell>
+                        <TableCell className="text-xs text-muted-foreground max-w-[220px] truncate" title={errorText}>{errorText || "—"}</TableCell>
                       </TableRow>
                     );
                   })}

@@ -24,6 +24,7 @@ import { cn } from "@/lib/utils";
 import { fetchAllUsers, type User } from "@/services/users";
 import api from "@/lib/api";
 import { useAuthStore } from "@/stores/auth-store";
+import { uiT } from "@/lib/ui-t";
 
 // ── Emoji shortcuts ───────────────────────────────────────
 const QUICK_EMOJIS = [
@@ -44,7 +45,7 @@ function buildPreviewSrcDoc(html: string, isDark: boolean): string {
   const bodyBg = isDark ? "#1c1c1e" : "#ffffff";
   const bodyColor = isDark ? "#e5e7eb" : "#111827";
   const css = `${PREVIEW_CSS_BASE}body{background:${bodyBg};color:${bodyColor};}`;
-  const placeholder = `<p style='color:#6b7280;font-size:13px'>Pré-visualização aparecerá aqui...</p>`;
+  const placeholder = `<p style='color:#6b7280;font-size:13px'>${uiT("notificacaoPage.previewPlaceholder", undefined, "Pré-visualização aparecerá aqui...")}</p>`;
   return `<!DOCTYPE html><html><head><meta charset="utf-8"><style>${css}</style></head><body>${html || placeholder}</body></html>`;
 }
 
@@ -89,6 +90,8 @@ function UserSelector({
   onChange: (ids: number[]) => void;
   isSuperadmin: boolean;
 }) {
+  const tr = useTranslations("notificacaoPage");
+  const tc = useTranslations("common");
   const [users, setUsers] = useState<UserWithTenant[]>([]);
   const [search, setSearch] = useState("");
   const [loading, setLoading] = useState(false);
@@ -113,11 +116,11 @@ function UserSelector({
     const map = new Map<number, { id: number; name: string }>();
     for (const u of users) {
       if (u.tenantId && !map.has(u.tenantId)) {
-        map.set(u.tenantId, { id: u.tenantId, name: u.tenant?.name ?? `Tenant ${u.tenantId}` });
+        map.set(u.tenantId, { id: u.tenantId, name: u.tenant?.name ?? tr("userTenantFallback", { id: u.tenantId }) });
       }
     }
     return Array.from(map.values()).sort((a, b) => a.id - b.id);
-  }, [users]);
+  }, [users, tr]);
 
   const filtered = useMemo(() => {
     return users.filter((u) => {
@@ -179,13 +182,13 @@ function UserSelector({
           <Search className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
           <Input
             className="h-6 border-0 bg-transparent p-0 text-sm focus-visible:ring-0 w-full"
-            placeholder="Buscar usuários..."
+            placeholder={tr("userSearchPlaceholder")}
             value={search}
             onChange={(e) => setSearch(e.target.value)}
           />
         </div>
         <Button variant="ghost" size="sm" className="text-xs h-6 px-2 shrink-0" onClick={toggleAll}>
-          {visibleAllSelected ? "Desmarcar" : "Todos"}
+          {visibleAllSelected ? tr("userDeselect") : tr("userAll")}
         </Button>
         {isSuperadmin && (
           <Button
@@ -193,10 +196,10 @@ function UserSelector({
             size="sm"
             className="text-xs h-6 px-2 shrink-0 gap-1"
             onClick={toggleAllTenants}
-            title="Selecionar todos os usuários de todos os tenants"
+            title={tr("userSelectAllTenantsTitle")}
           >
             <Building2 className="h-3 w-3" />
-            {selected.length === users.length && users.length > 0 ? "Desmarcar tudo" : "Todos os tenants"}
+            {selected.length === users.length && users.length > 0 ? tr("userDeselectEverything") : tr("userAllTenants")}
           </Button>
         )}
       </div>
@@ -212,7 +215,7 @@ function UserSelector({
               tenantFilter === null ? "bg-primary text-primary-foreground" : "hover:bg-accent"
             )}
           >
-            Todos ({users.length})
+            {tr("userAllCount", { count: users.length })}
           </button>
           {tenants.map((t) => {
             const count = users.filter((u) => u.tenantId === t.id).length;
@@ -236,7 +239,7 @@ function UserSelector({
                   type="button"
                   onClick={() => toggleTenant(t.id)}
                   className="text-[9px] text-muted-foreground hover:text-foreground px-1 transition-colors"
-                  title={`Selecionar todos do ${t.name}`}
+                  title={tr("userSelectTenantTitle", { name: t.name })}
                 >
                   ✓
                 </button>
@@ -249,9 +252,9 @@ function UserSelector({
       {/* User list */}
       <ScrollArea className="h-40">
         {loading ? (
-          <p className="text-xs text-center py-4 text-muted-foreground">Carregando...</p>
+          <p className="text-xs text-center py-4 text-muted-foreground">{tc("loading")}</p>
         ) : filtered.length === 0 ? (
-          <p className="text-xs text-center py-4 text-muted-foreground">Nenhum usuário encontrado</p>
+          <p className="text-xs text-center py-4 text-muted-foreground">{tr("userNoneFound")}</p>
         ) : (
           <div className="p-1">
             {/* Select all visible — destacado pra ficar fácil de descobrir */}
@@ -262,7 +265,7 @@ function UserSelector({
                 "w-full flex items-center gap-2 px-2 py-1.5 rounded text-sm hover:bg-accent text-left transition-colors border-b mb-1",
                 visibleAllSelected && "bg-primary/5"
               )}
-              title={visibleAllSelected ? "Desmarcar todos os visíveis" : "Selecionar todos os visíveis"}
+              title={visibleAllSelected ? tr("userDeselectVisibleTitle") : tr("userSelectVisibleTitle")}
             >
               <div
                 className={cn(
@@ -279,7 +282,7 @@ function UserSelector({
                 )}
               </div>
               <span className="font-medium">
-                {visibleAllSelected ? "Desmarcar todos" : "Selecionar todos"}
+                {visibleAllSelected ? tr("userDeselectAll") : tr("userSelectAll")}
               </span>
               <span className="text-xs text-muted-foreground ml-auto">
                 {visibleSelectedCount}/{filtered.length}
@@ -321,8 +324,8 @@ function UserSelector({
         <span className="flex items-center gap-1">
           <Users className="h-3 w-3" />
           {selected.length > 0
-            ? `${selected.length} selecionado${selected.length > 1 ? "s" : ""}`
-            : "Nenhum selecionado"}
+            ? tr("userSelectedCount", { count: selected.length })
+            : tr("userNoneSelected")}
         </span>
         {selected.length > 0 && (
           <button
@@ -330,7 +333,7 @@ function UserSelector({
             className="text-destructive hover:underline"
             onClick={() => onChange([])}
           >
-            Limpar
+            {tr("userClear")}
           </button>
         )}
       </div>
@@ -526,11 +529,11 @@ export function NotificationModal({
                   { icon: Italic, cmd: "italic", title: t("italicBtn") },
                   { icon: Underline, cmd: "underline", title: t("underlineBtn") },
                   { icon: Strikethrough, cmd: "strikeThrough", title: t("strikBtn") },
-                  { icon: List, cmd: "insertUnorderedList", title: "Lista" },
-                  { icon: ListOrdered, cmd: "insertOrderedList", title: "Lista numerada" },
-                  { icon: AlignLeft, cmd: "justifyLeft", title: "Esquerda" },
-                  { icon: AlignCenter, cmd: "justifyCenter", title: "Centro" },
-                  { icon: AlignRight, cmd: "justifyRight", title: "Direita" },
+                  { icon: List, cmd: "insertUnorderedList", title: t("listBtn") },
+                  { icon: ListOrdered, cmd: "insertOrderedList", title: t("orderedListBtn") },
+                  { icon: AlignLeft, cmd: "justifyLeft", title: t("alignLeftBtn") },
+                  { icon: AlignCenter, cmd: "justifyCenter", title: t("alignCenterBtn") },
+                  { icon: AlignRight, cmd: "justifyRight", title: t("alignRightBtn") },
                 ].map(({ icon: Icon, cmd, title }) => (
                   <button
                     key={cmd}

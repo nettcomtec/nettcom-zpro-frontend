@@ -1,9 +1,8 @@
 "use client";
 
-import { formatDate as formatDateIntl } from "@/lib/format";
-
 import React, { useState, useEffect, useCallback, useRef } from "react";
 import Link from "next/link";
+import { useRouter, useSearchParams } from "next/navigation";
 import { useTranslations } from "next-intl";
 import { PageHeader } from "@/components/layout/page-header";
 import { Card, CardContent } from "@/components/ui/card";
@@ -31,12 +30,12 @@ import {
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import {
   CheckSquare, Plus, Search, Pencil, Trash2,
-  LayoutList, Kanban as KanbanIcon, GripVertical, ContactRound,
+  LayoutList, Kanban as KanbanIcon, GripVertical, ContactRound, Info, MessageSquare,
 } from "lucide-react";
 import { toast } from "sonner";
 import {
   fetchTodoLists, createTodoList, updateTodoList, deleteTodoList,
-  type TodoItem,
+  type TodoItem, type TodoPayload,
 } from "@/services/tasks";
 import { fetchAllUsers, type User } from "@/services/users";
 import { usePageAccess } from "@/hooks/use-page-access";
@@ -44,6 +43,20 @@ import { AccessDenied } from "@/components/layout/access-denied";
 import { useAuthStore } from "@/stores/auth-store";
 import { useLiveMode } from "@/hooks/use-live-mode";
 import { cn } from "@/lib/utils";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
+import { TaskDeadlineFields, type TaskDeadlineValue } from "@/components/tasks/task-deadline-fields";
+import { ContactPicker, type ContactPickerValue } from "@/components/contatos/contact-picker";
+import { markTimeSupportedFromTasks, useTaskSummaryStore } from "@/stores/task-summary-store";
+import { OPEN_TASK_DETAIL_STORAGE_KEY, OPEN_TASK_LIST_STORAGE_KEY } from "@/hooks/use-task-summary";
+import { getBackendErrorCode } from "@/lib/backend-error-code";
+import {
+  buildTaskDeadlinePayload,
+  formatTaskDeadline,
+  isTimedTask,
+  sortTasksByDeadline,
+  taskDeadlineInputs,
+  taskDeadlineState,
+} from "@/lib/task-deadline";
 
 const STATUS_VARIANT_MAP: Record<string, "secondary" | "default" | "destructive" | "outline" | "warning"> = {
   pending: "secondary",
@@ -65,16 +78,49 @@ const PRIORITY_DOT: Record<string, string> = {
   none: "bg-muted-foreground/30",
 };
 
-function formatDate(dateStr?: string): string {
-  if (!dateStr) return "—";
-  const s = dateStr.slice(0, 10);
-  const [year, month, day] = s.split("-").map(Number);
-  return formatDateIntl(new Date(year, month - 1, day));
+// ─── Prazo (PLANO_TAREFAS_ATENDIMENTO_LEMBRETES §5.0) ─────────────────────────
+// "Atrasada" é calculada pelo prazo (D18) para exibir, agrupar e ordenar — nunca trocada
+// em memória (era o que gravava `delayed` de volta ao salvar e prendia o atraso). O
+// formulário mostra o status GRAVADO.
+
+type KanbanColumnId = "pending" | "delayed" | "finished";
+
+function displayStatusOf(task: TodoItem, now?: Date): KanbanColumnId {
+  if (task.status === "finished") return "finished";
+  return taskDeadlineState(task, now) === "overdue" ? "delayed" : "pending";
 }
 
-function isOverdue(dateStr?: string): boolean {
-  if (!dateStr) return false;
-  return new Date(dateStr) < new Date();
+function deadlineTextClass(task: TodoItem): string {
+  const state = taskDeadlineState(task);
+  if (state === "overdue") return "text-destructive font-semibold";
+  if (state === "today") return "text-amber-600 dark:text-amber-400 font-medium";
+  return "text-muted-foreground";
+}
+
+const EMPTY_DEADLINE: TaskDeadlineValue = { date: "", time: "", reminderMinutes: null };
+
+function deadlineValueOf(task: TodoItem): TaskDeadlineValue {
+  const { date, time } = taskDeadlineInputs(task);
+  return { date, time, reminderMinutes: isTimedTask(task) ? task.reminderMinutes ?? null : null };
+}
+
+function sameDeadlineValue(a: TaskDeadlineValue, b: TaskDeadlineValue): boolean {
+  return a.date === b.date && (a.time || "") === (b.time || "") && (a.reminderMinutes ?? null) === (b.reminderMinutes ?? null);
+}
+
+/** Recusas do backend novo (ERR_TODO_*) → chave em `taskShared`. */
+const TODO_ERROR_KEYS: Record<string, string> = {
+  ERR_TODO_INVALID_OWNER: "errInvalidOwner",
+  ERR_TODO_INVALID_DEADLINE: "errInvalidDeadline",
+  ERR_TODO_INVALID_REMINDER: "errInvalidReminder",
+  ERR_TODO_TIME_NOT_READY: "errTimeNotReady",
+  ERR_TODO_INVALID_LINK: "errInvalidLink",
+};
+
+function parseTaskIdParam(value: string | null): number | null {
+  if (!value || !/^\d+$/.test(value)) return null;
+  const id = Number(value);
+  return Number.isSafeInteger(id) && id > 0 ? id : null;
 }
 
 // ─── Contato vinculado (PLANO_CRM_CONTATO D19) ───────────────────────────────
@@ -121,13 +167,10 @@ interface TaskCardProps {
   isAdmin: boolean;
   t: (key: string) => string;
   onTouchStart: (e: React.TouchEvent<HTMLElement>, item: TodoItem) => void;
-  onTouchMove: (e: React.TouchEvent) => void;
-  onTouchEnd: (e: React.TouchEvent) => void;
 }
 
-function TaskCard({ task, priorityMap, onDragStart, onDragEnd, onEdit, onDelete, onToggleFinished, isAdmin, t, onTouchStart, onTouchMove, onTouchEnd }: TaskCardProps) {
-  const dateField = task.limitDate || task.dueDate;
-  const overdue = task.status !== "finished" && isOverdue(dateField);
+function TaskCard({ task, priorityMap, onDragStart, onDragEnd, onEdit, onDelete, onToggleFinished, isAdmin, t, onTouchStart }: TaskCardProps) {
+  const deadline = formatTaskDeadline(task);
   const pr = priorityMap[task.priority || "none"] || priorityMap.none;
   const ownerName = task.owner || task.user?.name;
   const dotColor = PRIORITY_DOT[task.priority || "none"] ?? PRIORITY_DOT.none;
@@ -138,9 +181,7 @@ function TaskCard({ task, priorityMap, onDragStart, onDragEnd, onEdit, onDelete,
       onDragStart={() => onDragStart(task)}
       onDragEnd={onDragEnd}
       onTouchStart={(e) => onTouchStart(e, task)}
-      onTouchMove={onTouchMove}
-      onTouchEnd={onTouchEnd}
-      className="bg-card border rounded-lg shadow-sm p-3 cursor-grab active:cursor-grabbing hover:shadow-md transition-all select-none touch-none group"
+      className="bg-card border rounded-lg shadow-sm p-3 cursor-grab active:cursor-grabbing hover:shadow-md transition-all select-none [-webkit-touch-callout:none] group"
     >
       {/* Priority bar */}
       <div className={cn("h-1 w-full rounded-full mb-2.5", dotColor)} />
@@ -172,9 +213,9 @@ function TaskCard({ task, priorityMap, onDragStart, onDragEnd, onEdit, onDelete,
       <div className="mt-2.5 pl-6 flex flex-col gap-1.5">
         <div className="flex items-center justify-between gap-2">
           <Badge variant={pr.variant as "secondary"} className="text-xs px-1.5 py-0">{pr.label}</Badge>
-          {dateField && (
-            <span className={cn("text-xs tabular-nums", overdue ? "text-destructive font-semibold" : "text-muted-foreground")}>
-              {formatDate(dateField)}
+          {deadline && (
+            <span className={cn("text-xs tabular-nums", deadlineTextClass(task))}>
+              {deadline}
             </span>
           )}
         </div>
@@ -225,15 +266,13 @@ interface KanbanColumnProps {
   isAdmin: boolean;
   t: (key: string) => string;
   onTouchStart: (e: React.TouchEvent<HTMLElement>, item: TodoItem) => void;
-  onTouchMove: (e: React.TouchEvent) => void;
-  onTouchEnd: (e: React.TouchEvent) => void;
 }
 
 function KanbanColumn({
   col, tasks, isOver,
   onDragEnter, onDragOver, onDragLeave, onDrop,
   priorityMap, onDragStart, onDragEnd, onEdit, onDelete, onToggleFinished,
-  isAdmin, t, onTouchStart, onTouchMove, onTouchEnd,
+  isAdmin, t, onTouchStart,
 }: KanbanColumnProps) {
   return (
     <div className="flex-shrink-0 w-72 flex flex-col max-h-full">
@@ -277,8 +316,6 @@ function KanbanColumn({
               isAdmin={isAdmin}
               t={t}
               onTouchStart={onTouchStart}
-              onTouchMove={onTouchMove}
-              onTouchEnd={onTouchEnd}
             />
           ))
         )}
@@ -289,11 +326,50 @@ function KanbanColumn({
 
 // ─── Main Page ────────────────────────────────────────────────────────────────
 
+// Casca do acesso: o acesso muda no meio da sessão (refresh de 30 s do usuário) e hook
+// depois de `return` antecipado quebra a tela — por isso o conteúdo vive em componente próprio.
 export default function TarefasPage() {
-  const t = useTranslations("tarefasPage");
-  const tErrors = useTranslations("errors");
   const allowed = usePageAccess("tarefas");
-  if (!allowed) return <AccessDenied />;
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const requestedTaskId = parseTaskIdParam(searchParams.get("taskId"));
+  const hasUser = useAuthStore((s) => !!s.user);
+  const tenantConfigsLoaded = useAuthStore((s) => s.tenantConfigsLoaded);
+  const tasksFeature = useAuthStore((s) => s.hasFeature("tasks"));
+  // D23: sem acesso à página, o link de uma tarefa (push/aviso) vira o detalhe no sino —
+  // guarda o id e vai para a página inicial (o mesmo destino do acesso negado no guard).
+  // Só decide com o acesso já carregado: redirecionar num acesso ainda incompleto tiraria
+  // da página quem tem permissão.
+  // Push agrupado (várias tarefas) chega como `?from=reminder`: sem acesso, abre a lista do sino.
+  const fromReminder = searchParams.get("from") === "reminder";
+  const sendToBellDetail =
+    !allowed && hasUser && tenantConfigsLoaded && tasksFeature && (requestedTaskId !== null || fromReminder);
+  const redirectedRef = useRef(false);
+
+  useEffect(() => {
+    if (!sendToBellDetail || redirectedRef.current) return;
+    redirectedRef.current = true;
+    try {
+      if (requestedTaskId !== null) sessionStorage.setItem(OPEN_TASK_DETAIL_STORAGE_KEY, String(requestedTaskId));
+      else sessionStorage.setItem(OPEN_TASK_LIST_STORAGE_KEY, "1");
+    } catch { /* sem sessionStorage: só sai da página */ }
+    router.replace("/");
+  }, [sendToBellDetail, requestedTaskId, router]);
+
+  if (!allowed) return sendToBellDetail ? null : <AccessDenied />;
+  return <TarefasPageContent />;
+}
+
+function TarefasPageContent() {
+  const t = useTranslations("tarefasPage");
+  const tTask = useTranslations("taskShared");
+  const tErrors = useTranslations("errors");
+  const tCommon = useTranslations("common");
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const taskIdParam = searchParams.get("taskId");
+  const isRestricted = useAuthStore((s) => s.isRestrictedUser());
+  const timeSupported = useTaskSummaryStore((s) => s.timeSupported === true);
 
   const { user, hasPermission } = useAuthStore();
   // Excluir tarefa: admin como sempre, e perfil custom quando tem tasks_delete
@@ -301,6 +377,13 @@ export default function TarefasPage() {
   const isAdmin =
     user?.profile === "admin" ||
     (user?.profile === "custom" && hasPermission("tasks_delete"));
+  // Mesmo critério do backend (isAdminLike com tasks_view_all) para o aviso da D32.
+  const currentUserId = user?.userId;
+  const seesAllTasks =
+    user?.profile === "admin" ||
+    user?.profile === "superadmin" ||
+    user?.profile === "super" ||
+    (user?.profile === "custom" && hasPermission("tasks_view_all"));
 
   const statusMap: Record<string, { label: string; variant: "secondary" | "default" | "destructive" | "outline" | "warning" }> = {
     pending: { label: t("statusPending"), variant: STATUS_VARIANT_MAP.pending },
@@ -328,7 +411,13 @@ export default function TarefasPage() {
   const [formComments, setFormComments] = useState("");
   const [formStatus, setFormStatus] = useState("pending");
   const [formPriority, setFormPriority] = useState("medium");
-  const [formLimitDate, setFormLimitDate] = useState("");
+  const [formDeadline, setFormDeadline] = useState<TaskDeadlineValue>(EMPTY_DEADLINE);
+  const [deadlineError, setDeadlineError] = useState(false);
+  // Prazo como abriu na edição: sem mudança, o PUT (parcial) não reenvia o prazo.
+  const initialDeadlineRef = useRef<TaskDeadlineValue>(EMPTY_DEADLINE);
+  // Contato (D13): opcional; "Nenhum" = tarefa solta. Usuário restrito não vê o campo.
+  const [formContact, setFormContact] = useState<ContactPickerValue | null>(null);
+  const initialContactIdRef = useRef<number | null>(null);
   const [formOwnerId, setFormOwnerId] = useState("");
   const [formRecurrence, setFormRecurrence] = useState("1");
   const [formRecurrenceTimes, setFormRecurrenceTimes] = useState("");;
@@ -366,20 +455,16 @@ export default function TarefasPage() {
     },
   ];
 
-  const loadTasks = useCallback(async () => {
+  const loadTasks = useCallback(async (): Promise<TodoItem[]> => {
     try {
       const { data: res } = await fetchTodoLists();
       const list: TodoItem[] = Array.isArray(res) ? res : res.todoLists || res.data || [];
-      const now = new Date();
-      setData(list.map((task) => {
-        const dateField = task.limitDate || task.dueDate;
-        if (task.status === "pending" && dateField && new Date(dateField) < now) {
-          return { ...task, status: "delayed" };
-        }
-        return task;
-      }));
+      markTimeSupportedFromTasks(list);
+      setData(list);
+      return list;
     } catch {
       toast.error(t("errorLoading"));
+      return [];
     } finally {
       setLoading(false);
     }
@@ -400,7 +485,11 @@ export default function TarefasPage() {
     setFormComments("");
     setFormStatus("pending");
     setFormPriority("medium");
-    setFormLimitDate("");
+    setFormDeadline(EMPTY_DEADLINE);
+    initialDeadlineRef.current = EMPTY_DEADLINE;
+    setDeadlineError(false);
+    setFormContact(null);
+    initialContactIdRef.current = null;
     setFormOwnerId("");
     setFormRecurrence("1");
     setFormRecurrenceTimes("");
@@ -415,8 +504,13 @@ export default function TarefasPage() {
     setFormComments(task.comments || "");
     setFormStatus(task.status || "pending");
     setFormPriority(task.priority || "medium");
-    const dateField = task.limitDate || task.dueDate;
-    setFormLimitDate(dateField ? dateField.slice(0, 10) : "");
+    const deadline = deadlineValueOf(task);
+    setFormDeadline(deadline);
+    initialDeadlineRef.current = deadline;
+    setDeadlineError(false);
+    const contactId = task.contact?.id ?? task.contactId ?? null;
+    setFormContact(contactId ? { id: contactId, name: task.contact?.name || `#${contactId}` } : null);
+    initialContactIdRef.current = contactId;
     setFormOwnerId(task.ownerId ? String(task.ownerId) : (task.userId ? String(task.userId) : ""));
     setFormRecurrence(String(task.recurrence || 1));
     setFormRecurrenceTimes(task.recurrenceTimes ? String(task.recurrenceTimes) : "");
@@ -424,6 +518,8 @@ export default function TarefasPage() {
     setDialogOpen(true);
   };
 
+  // Recorrência: as datas são DIAS (AAAA-MM-DD); cada cópia recebe a mesma hora local e o
+  // mesmo lembrete pelo buildTaskDeadlinePayload — só o dia muda (horário de verão incluso).
   function addDays(dateStr: string, days: number): string {
     const [year, month, day] = dateStr.slice(0, 10).split("-").map(Number);
     const d = new Date(year, month - 1, day);
@@ -454,11 +550,21 @@ export default function TarefasPage() {
 
   const handleSave = async () => {
     if (!formName.trim()) { toast.error(t("errorNameRequired")); return; }
-    if (!formLimitDate) { toast.error(t("errorDeadlineRequired")); return; }
+    if (!formDeadline.date) { setDeadlineError(true); toast.error(t("errorDeadlineRequired")); return; }
     if (!formOwnerId) { toast.error(t("errorOwnerRequired")); return; }
     if (!formStatus) { toast.error(t("errorStatusRequired")); return; }
     if (!formPriority) { toast.error(t("errorPriorityRequired")); return; }
     if (formRecurrence === "weekdays" && formWeekDays.length === 0) { toast.error(t("errorWeekdaysRequired")); return; }
+    // Prazo com hora só quando o backend tem as colunas (sem elas vai só a data, como antes).
+    const deadlineFor = (date: string) =>
+      buildTaskDeadlinePayload({
+        date,
+        time: formDeadline.time,
+        reminderMinutes: formDeadline.reminderMinutes,
+        timeSupported,
+      });
+    const deadlinePayload = deadlineFor(formDeadline.date);
+    if (!deadlinePayload) { setDeadlineError(true); toast.error(t("errorDeadlineRequired")); return; }
     setSaving(true);
     try {
       const ownerUser = users.find((u) => String(u.id) === formOwnerId);
@@ -467,14 +573,14 @@ export default function TarefasPage() {
       const isWeekdays = formRecurrence === "weekdays";
       const recurrenceNum = isDaily ? 1 : isWeekdays ? 1 : (Number(formRecurrence) || 1);
       const recurrenceTimesNum = formRecurrenceTimes ? Number(formRecurrenceTimes) : undefined;
+      const contactId = formContact?.id ?? null;
 
-      const basePayload = {
+      const basePayload: TodoPayload = {
         name: formName,
         description: formDescription || undefined,
         comments: formComments || undefined,
         status: formStatus,
         priority: formPriority,
-        limitDate: formLimitDate,
         owner: ownerUser?.name,
         ownerId: ownerUser?.id,
         recurrence: recurrenceNum,
@@ -482,29 +588,46 @@ export default function TarefasPage() {
       };
 
       if (editingTask) {
-        await updateTodoList(editingTask.id, basePayload);
+        const payload: Partial<TodoPayload> = { ...basePayload };
+        if (!sameDeadlineValue(formDeadline, initialDeadlineRef.current)) Object.assign(payload, deadlinePayload);
+        // Trocar o contato desliga o atendimento (era do contato anterior). Restrito não vê o campo.
+        if (!isRestricted && contactId !== initialContactIdRef.current) {
+          payload.contactId = contactId;
+          payload.ticketId = null;
+        }
+        await updateTodoList(editingTask.id, payload);
         toast.success(t("taskUpdated"));
       } else {
+        const createBase: TodoPayload = { ...basePayload, ...(!isRestricted && contactId ? { contactId } : {}) };
         if (isNoRecurrence) {
-          await createTodoList(basePayload);
+          await createTodoList({ ...createBase, ...deadlinePayload });
         } else if (isWeekdays) {
           const qty = recurrenceTimesNum || 5;
-          const dates = getWeekdayOccurrences(formLimitDate, formWeekDays, qty);
+          const dates = getWeekdayOccurrences(formDeadline.date, formWeekDays, qty);
           for (const date of dates) {
-            await createTodoList({ ...basePayload, limitDate: date });
+            const copyDeadline = deadlineFor(date);
+            if (copyDeadline) await createTodoList({ ...createBase, ...copyDeadline });
           }
         } else {
           const qty = recurrenceTimesNum || 5;
           for (let i = 0; i < qty; i++) {
-            await createTodoList({ ...basePayload, limitDate: addDays(formLimitDate, i * recurrenceNum) });
+            const copyDeadline = deadlineFor(addDays(formDeadline.date, i * recurrenceNum));
+            if (copyDeadline) await createTodoList({ ...createBase, ...copyDeadline });
           }
         }
-        toast.success(t("taskCreated"));
+        // D32: quem não vê todas as tarefas não verá a criada para um colega na própria lista.
+        if (!seesAllTasks && ownerUser && String(ownerUser.id) !== String(currentUserId)) {
+          toast.success(tTask("createdForOther", { name: ownerUser.name }));
+        } else {
+          toast.success(t("taskCreated"));
+        }
       }
       setDialogOpen(false);
       await loadTasks();
-    } catch {
-      toast.error(editingTask ? t("errorUpdating") : t("errorCreating"));
+    } catch (err) {
+      const errorKey = TODO_ERROR_KEYS[getBackendErrorCode(err)];
+      if (errorKey) toast.error(tTask(errorKey));
+      else toast.error(editingTask ? t("errorUpdating") : t("errorCreating"));
     } finally {
       setSaving(false);
     }
@@ -536,22 +659,25 @@ export default function TarefasPage() {
   };
 
   // ── Kanban DnD handlers ──
-  const { touchStart: kanbanTouchStart, touchMove: kanbanTouchMove, touchEnd: kanbanTouchEnd } = useTouchDrag<TodoItem>({
+  // "Atrasada" é calculada pelo prazo: soltar em "Pendente" não tira do atraso (é preciso
+  // reagendar). Sem este aviso o card voltava para a coluna sem nenhuma explicação.
+  const hintOverdueDrop = (task: TodoItem, target: string) => {
+    if (target === "pending" && taskDeadlineState({ ...task, status: "pending" }) === "overdue") {
+      toast.info(t("dropOverdueHint"));
+    }
+  };
+
+  // Touch: segurar o card ~300 ms; antes disso o dedo rola a pagina
+  const { touchStart: kanbanTouchStart } = useTouchDrag<TodoItem>({
     dataAttr: "data-col-id",
     onDrop: (task, colId) => {
-      if (task.status === colId) return;
+      hintOverdueDrop(task, colId);
+      // Coluna = estado calculado; status gravado igual ao destino = nada muda no servidor.
+      if (displayStatusOf(task) === colId || task.status === colId) return;
       const prevData = data;
       setData((prev) => prev.map((item) => (item.id === task.id ? { ...item, status: colId } : item)));
-      updateTodoList(task.id, {
-        name: task.name,
-        priority: task.priority || "none",
-        status: colId,
-        limitDate: (task.limitDate || task.dueDate || "").slice(0, 10) || undefined,
-        owner: task.owner,
-        ownerId: task.ownerId,
-        description: task.description,
-        comments: task.comments,
-      }).catch(() => {
+      // D10d: só o status (o PUT é parcial) — reenviar o prazo apagaria a hora.
+      updateTodoList(task.id, { status: colId }).catch(() => {
         setData(prevData);
         toast.error(t("errorUpdatingStatus"));
       });
@@ -571,20 +697,13 @@ export default function TarefasPage() {
     const task = dragTask.current;
     setDragOverCol(null);
     dragTask.current = null;
-    if (!task || task.status === targetStatus) return;
+    if (task) hintOverdueDrop(task, targetStatus);
+    if (!task || displayStatusOf(task) === targetStatus || task.status === targetStatus) return;
     const prevData = data;
     setData((prev) => prev.map((t) => (t.id === task.id ? { ...t, status: targetStatus } : t)));
     try {
-      await updateTodoList(task.id, {
-        name: task.name,
-        priority: task.priority || "none",
-        status: targetStatus,
-        limitDate: (task.limitDate || task.dueDate || "").slice(0, 10) || undefined,
-        owner: task.owner,
-        ownerId: task.ownerId,
-        description: task.description,
-        comments: task.comments,
-      });
+      // D10d: só o status (o PUT é parcial) — reenviar o prazo apagaria a hora.
+      await updateTodoList(task.id, { status: targetStatus });
       toast.success(t("kanbanMovedStatus"));
     } catch {
       setData(prevData);
@@ -595,10 +714,52 @@ export default function TarefasPage() {
   const filtered = data.filter((task) =>
     (task.name || "").toLowerCase().includes(search.toLowerCase())
   );
-  const { sortKey, sortDir, handleSort, sortedData } = useSortable(filtered, "name");
+  // Ordenação das colunas Prazo e Status pelo prazo calculado (atrasadas → hoje → futuras),
+  // não pelo texto do valor gravado (dia inteiro e com hora não se comparam como texto).
+  const deadlineRank = new Map<number, number>(
+    sortTasksByDeadline(filtered).map((task, index): [number, number] => [task.id, index]),
+  );
+  const sortable = filtered.map((task) => ({
+    ...task,
+    deadlineRank: deadlineRank.get(task.id) ?? Number.MAX_SAFE_INTEGER,
+    displayStatus: displayStatusOf(task),
+  }));
+  const { sortKey, sortDir, handleSort, sortedData } = useSortable(sortable, "name");
 
   const tasksByStatus = (status: string) =>
-    data.filter((task) => task.status === status);
+    data.filter((task) => displayStatusOf(task) === status);
+
+  // D16: `?taskId=` (aviso, push, card do atendimento) abre a edição da tarefa e limpa a URL.
+  const dataRef = useRef<TodoItem[]>(data);
+  dataRef.current = data;
+  const handledTaskParamRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!taskIdParam) {
+      handledTaskParamRef.current = null;
+      return;
+    }
+    if (loading || handledTaskParamRef.current === taskIdParam) return;
+    handledTaskParamRef.current = taskIdParam;
+    const taskId = parseTaskIdParam(taskIdParam);
+    const finish = (task: TodoItem | undefined) => {
+      if (task) openEditDialog(task);
+      else toast.error(t("taskNotFound"));
+      router.replace("/tarefas", { scroll: false });
+    };
+    if (taskId === null) {
+      finish(undefined);
+      return;
+    }
+    // `TodoLists.id` é BIGINT: a API devolve o id como texto ("29").
+    const known = dataRef.current.find((task) => Number(task.id) === taskId);
+    if (known) {
+      finish(known);
+      return;
+    }
+    // Tarefa criada depois da carga da página: recarrega uma vez antes de desistir.
+    loadTasks().then((list) => finish(list.find((task) => Number(task.id) === taskId)));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [taskIdParam, loading]);
 
   return (
     <div className="space-y-6">
@@ -606,7 +767,7 @@ export default function TarefasPage() {
         description: t("helpDesc"),
         sections: [
           { title: t("helpS0T"), items: [t("helpS0I0"), t("helpS0I1"), t("helpS0I2")] },
-          { title: t("helpS1T"), items: [t("helpS1I0"), t("helpS1I1")] },
+          { title: t("helpS1T"), items: [t("helpS1I0"), tCommon("touchDragHint"), t("helpS1I1")] },
         ],
       }}>
         <Button onClick={openCreateDialog}>
@@ -661,18 +822,16 @@ export default function TarefasPage() {
                         <TableHead className="w-[50px]" />
                         <SortableTableHead sortKey="name" currentSortKey={sortKey} sortDir={sortDir} onSort={handleSort}>{t("colTask")}</SortableTableHead>
                         <SortableTableHead sortKey="priority" currentSortKey={sortKey} sortDir={sortDir} onSort={handleSort}>{t("colPriority")}</SortableTableHead>
-                        <SortableTableHead sortKey="limitDate" currentSortKey={sortKey} sortDir={sortDir} onSort={handleSort}>{t("colDeadline")}</SortableTableHead>
-                        <SortableTableHead sortKey="status" currentSortKey={sortKey} sortDir={sortDir} onSort={handleSort}>{t("colStatus")}</SortableTableHead>
+                        <SortableTableHead sortKey="deadlineRank" currentSortKey={sortKey} sortDir={sortDir} onSort={handleSort}>{t("colDeadline")}</SortableTableHead>
+                        <SortableTableHead sortKey="displayStatus" currentSortKey={sortKey} sortDir={sortDir} onSort={handleSort}>{t("colStatus")}</SortableTableHead>
                         <SortableTableHead sortKey="owner" currentSortKey={sortKey} sortDir={sortDir} onSort={handleSort}>{t("colOwner")}</SortableTableHead>
                         <TableHead className="w-[100px]">{t("colActions")}</TableHead>
                       </TableRow>
                     </TableHeader>
                     <TableBody>
                       {sortedData.map((task) => {
-                        const st = statusMap[task.status] || { label: task.status, variant: "secondary" as const };
+                        const st = statusMap[task.displayStatus] || { label: task.status, variant: "secondary" as const };
                         const pr = priorityMap[task.priority || "medium"] || { label: task.priority, variant: "secondary" as const };
-                        const dateField = task.limitDate || task.dueDate;
-                        const overdue = task.status !== "finished" && isOverdue(dateField);
                         return (
                           <TableRow key={task.id} className={task.status === "finished" ? "opacity-60" : ""}>
                             <TableCell>
@@ -695,8 +854,8 @@ export default function TarefasPage() {
                             <TableCell>
                               <Badge variant={pr.variant as "secondary"}>{pr.label}</Badge>
                             </TableCell>
-                            <TableCell className={overdue ? "text-destructive font-medium" : "text-muted-foreground"}>
-                              {formatDate(dateField)}
+                            <TableCell className={cn("whitespace-nowrap", deadlineTextClass(task))}>
+                              {formatTaskDeadline(task) ?? "—"}
                             </TableCell>
                             <TableCell>
                               <Badge variant={st.variant as "secondary"}>{st.label}</Badge>
@@ -755,8 +914,6 @@ export default function TarefasPage() {
                     isAdmin={isAdmin}
                     t={t}
                     onTouchStart={kanbanTouchStart}
-                    onTouchMove={kanbanTouchMove}
-                    onTouchEnd={kanbanTouchEnd}
                   />
                 ))}
               </div>
@@ -826,15 +983,16 @@ export default function TarefasPage() {
                 </Select>
               </div>
             </div>
-            <div className="grid grid-cols-2 gap-4">
-              <div className="space-y-2">
-                <Label>{t("labelDeadline")} *</Label>
-                <Input
-                  type="date"
-                  value={formLimitDate}
-                  onChange={(e) => setFormLimitDate(e.target.value)}
-                />
-              </div>
+            <TaskDeadlineFields
+              idPrefix="task-form-deadline"
+              value={formDeadline}
+              onChange={(next) => {
+                setFormDeadline(next);
+                if (next.date) setDeadlineError(false);
+              }}
+              showDateError={deadlineError}
+            />
+            <div className="grid grid-cols-1 gap-4">
               <div className="space-y-2">
                 <Label>{t("labelRecurrence")}</Label>
                 <Select value={formRecurrence} onValueChange={setFormRecurrence}>
@@ -896,8 +1054,39 @@ export default function TarefasPage() {
                 placeholder={t("ownerPlaceholder")}
               />
             </div>
+            {!isRestricted && (
+              <div className="space-y-2">
+                <div className="flex items-center gap-1.5">
+                  <Label htmlFor="task-form-contact">{t("labelContact")}</Label>
+                  <TooltipProvider>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <button
+                          type="button"
+                          className="text-muted-foreground hover:text-foreground"
+                          aria-label={t("labelContact")}
+                        >
+                          <Info className="h-3.5 w-3.5" />
+                        </button>
+                      </TooltipTrigger>
+                      <TooltipContent side="top" className="max-w-xs text-xs">
+                        {t("contactTooltip")}
+                      </TooltipContent>
+                    </Tooltip>
+                  </TooltipProvider>
+                </div>
+                <ContactPicker id="task-form-contact" value={formContact} onChange={setFormContact} disabled={saving} />
+              </div>
+            )}
           </div>
-          <DialogFooter>
+          <DialogFooter className="gap-2 sm:gap-0">
+            {editingTask?.ticketId ? (
+              <Button variant="outline" className="sm:mr-auto" asChild>
+                <Link href={`/atendimento?ticketId=${editingTask.ticketId}`}>
+                  <MessageSquare className="mr-2 h-4 w-4" /> {tTask("openTicket")}
+                </Link>
+              </Button>
+            ) : null}
             <Button variant="outline" onClick={() => setDialogOpen(false)} disabled={saving}>{t("cancel")}</Button>
             <Button onClick={handleSave} disabled={saving}>
               {saving ? t("saving") : t("save")}

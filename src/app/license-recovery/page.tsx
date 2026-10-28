@@ -21,6 +21,7 @@ import {
   recoverLicenseDomain,
 } from "@/services/license";
 import { loginService } from "@/services/auth";
+import { rememberCsrfToken } from "@/lib/auth-session";
 import type { AxiosError } from "axios";
 
 // F5 — os dominios da licenca passaram a ser geridos no Painel do Licenciado.
@@ -188,6 +189,8 @@ export default function LicenseRecoveryPage() {
         return;
       }
       localStorage.setItem("token", JSON.stringify(data.token));
+      // Login novo gira o código anti-CSRF; sem guardar, a próxima renovação seria recusada.
+      rememberCsrfToken((data as { csrfToken?: unknown }).csrfToken);
       localStorage.setItem(
         "user",
         JSON.stringify({

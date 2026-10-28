@@ -46,13 +46,103 @@ export interface MetaProxySuccessPayload {
   // Union of fields the popup may return depending on the channel.
   access_token?: string;
   user_id?: string;
+  userId?: string;
   wabaId?: string;
   phoneId?: string;
   phone_number_id?: string;
   waba_id?: string;
   tenantId?: number | null;
   pages?: Array<{ id: string; name: string; access_token: string }>;
+  instagram?: unknown[];
+  // WhatsApp (aditivos): número em coexistência e situação do registro automático
+  // ('pending_pin' = o popup está mostrando o PIN e registra depois do "Já anotei").
+  coex?: boolean;
+  register?: "pending_pin" | "skipped" | string;
   [k: string]: unknown;
+}
+
+/**
+ * `proxy:onboarding-update` (aditivo): resultado do registro automático do número e
+ * da sincronização da coexistência, enviado pelo popup DEPOIS do `proxy:success`.
+ * Nunca traz PIN nem token.
+ */
+export interface MetaProxyOnboardingUpdate {
+  phoneId?: string;
+  register?: "registered" | "already_registered" | "pin_required" | "rate_limited" | "failed" | "skipped" | string;
+  coexSync?: "ok" | "partial" | "failed" | "off" | "skipped" | string;
+}
+
+/**
+ * O `proxy:success` do WhatsApp só significa canal criado quando traz o número
+ * (`phoneId`). Proxy antigo manda sucesso sem número quando a Meta não devolveu o
+ * número (coexistência) — e nesse caso nenhum canal foi criado.
+ */
+export function metaProxySuccessHasPhone(data?: MetaProxySuccessPayload | null): boolean {
+  const phone = (data?.phoneId ?? data?.phone_number_id) as unknown;
+  if (typeof phone === "string") return phone.trim() !== "";
+  if (typeof phone === "number") return Number.isFinite(phone) && phone > 0;
+  return false;
+}
+
+/** Chaves (namespace `sessoesPage`) dos avisos do `proxy:onboarding-update`. */
+export type MetaProxyOnboardingNoticeKey =
+  | "waRegisterAutoOk"
+  | "waRegisterAutoPinRequired"
+  | "waRegisterAutoFailed"
+  | "coexSyncAutoOk"
+  | "coexSyncAutoFailed";
+
+/**
+ * Traduz o `proxy:onboarding-update` em avisos para a tela e no número a marcar
+ * como registrado (aviso "registro pendente" some na hora). `skipped`/`off` não
+ * geram aviso: o botão de sempre continua no card.
+ */
+export function describeMetaProxyOnboardingUpdate(update: MetaProxyOnboardingUpdate): {
+  registeredPhoneId: string | null;
+  notices: Array<{ level: "success" | "warning"; key: MetaProxyOnboardingNoticeKey }>;
+} {
+  const notices: Array<{ level: "success" | "warning"; key: MetaProxyOnboardingNoticeKey }> = [];
+  let registeredPhoneId: string | null = null;
+  switch (update.register) {
+    case "registered":
+    case "already_registered":
+      registeredPhoneId = update.phoneId || null;
+      notices.push({ level: "success", key: "waRegisterAutoOk" });
+      break;
+    case "pin_required":
+      notices.push({ level: "warning", key: "waRegisterAutoPinRequired" });
+      break;
+    case "rate_limited":
+    case "failed":
+      notices.push({ level: "warning", key: "waRegisterAutoFailed" });
+      break;
+    default:
+      break;
+  }
+  switch (update.coexSync) {
+    case "ok":
+      notices.push({ level: "success", key: "coexSyncAutoOk" });
+      break;
+    case "partial":
+    case "failed":
+      notices.push({ level: "warning", key: "coexSyncAutoFailed" });
+      break;
+    default:
+      break;
+  }
+  return { registeredPhoneId, notices };
+}
+
+/** Lê o `proxy:onboarding-update` (dados em `data` ou na raiz da mensagem). */
+export function readMetaProxyOnboardingUpdate(message: unknown): MetaProxyOnboardingUpdate {
+  const m = (message && typeof message === "object" ? message : {}) as Record<string, unknown>;
+  const inner = m.data && typeof m.data === "object" ? (m.data as Record<string, unknown>) : m;
+  const str = (v: unknown) => (typeof v === "string" && v.trim() !== "" ? v.trim() : undefined);
+  return {
+    phoneId: str(inner.phoneId) ?? (typeof inner.phoneId === "number" ? String(inner.phoneId) : undefined),
+    register: str(inner.register),
+    coexSync: str(inner.coexSync),
+  };
 }
 
 export interface MetaProxyHijackPayload extends HijackDetails {
@@ -66,6 +156,8 @@ interface OpenPopupOptions {
   onSuccess?: (data: MetaProxySuccessPayload) => void;
   onError?: (msg: string, hijack?: MetaProxyHijackPayload | null, errorCode?: string | null) => void;
   onCancelled?: () => void;
+  /** Registro automático / sincronização terminados no popup (depois do sucesso). */
+  onOnboardingUpdate?: (data: MetaProxyOnboardingUpdate) => void;
   windowFeatures?: string; // e.g. "width=600,height=700"
 }
 
@@ -97,7 +189,7 @@ export function useMetaProxyPopup() {
   }, []);
 
   const open = useCallback(
-    ({ channel, credentials, onSuccess, onError, onCancelled, windowFeatures }: OpenPopupOptions) => {
+    ({ channel, credentials, onSuccess, onError, onCancelled, onOnboardingUpdate, windowFeatures }: OpenPopupOptions) => {
       const callbackOrigin = typeof window !== "undefined" ? window.location.origin : "";
 
       // Meta channels (WABA, Instagram, Facebook Messenger) sempre rodam no
@@ -126,9 +218,16 @@ export function useMetaProxyPopup() {
         window.removeEventListener("message", messageHandlerRef.current);
       }
 
+      // Algo já foi entregue ao chamador (sucesso, erro ou cancelamento): o vigia de
+      // fechamento não dispara cancelamento depois disso.
+      let delivered = false;
+
       // Attach listener
       const handler = (event: MessageEvent) => {
         if (event.origin !== expectedOrigin) return;
+        // Só a janela aberta AQUI fala com este handler: os popups do Gupshup e do
+        // Dialog360 vêm da mesma origem e usam os mesmos tipos de mensagem.
+        if (event.source !== popup) return;
         const data = event.data as {
           type?:   string;
           error?:  string;
@@ -157,8 +256,14 @@ export function useMetaProxyPopup() {
             return;
           }
           case "proxy:success": {
+            // A escuta continua enquanto o popup estiver aberto: o resultado do
+            // registro automático chega depois, em `proxy:onboarding-update`.
+            delivered = true;
             onSuccess?.(data.data || {});
-            cleanup();
+            return;
+          }
+          case "proxy:onboarding-update": {
+            onOnboardingUpdate?.(readMetaProxyOnboardingUpdate(data));
             return;
           }
           case "proxy:error": {
@@ -172,13 +277,14 @@ export function useMetaProxyPopup() {
                   registeredAt: data.hijack.existing?.registeredAt || null,
                 }
               : null;
+            // Escuta mantida: uma nova tentativa no mesmo popup ainda pode dar certo.
+            delivered = true;
             onError?.(data.error || "UNKNOWN_ERROR", hijackPayload, data.errorCode || null);
-            cleanup();
             return;
           }
           case "proxy:cancelled": {
+            delivered = true;
             onCancelled?.();
-            cleanup();
             return;
           }
         }
@@ -186,19 +292,20 @@ export function useMetaProxyPopup() {
 
       function cleanup() {
         window.removeEventListener("message", handler);
-        messageHandlerRef.current = null;
+        if (messageHandlerRef.current === handler) messageHandlerRef.current = null;
       }
 
       window.addEventListener("message", handler);
       messageHandlerRef.current = handler;
 
-      // Watchdog: if popup is closed without posting anything, fire onCancelled
+      // Watchdog: popup fechado encerra a escuta; sem nada entregue antes, conta
+      // como cancelamento.
       const watchdog = setInterval(() => {
         if (popup.closed) {
           clearInterval(watchdog);
           if (messageHandlerRef.current === handler) {
             // popup closed before success/error — treat as cancel
-            onCancelled?.();
+            if (!delivered) onCancelled?.();
             cleanup();
           }
         }

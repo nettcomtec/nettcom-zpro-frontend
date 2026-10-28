@@ -20,7 +20,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Textarea } from "@/components/ui/textarea";
+import { Switch } from "@/components/ui/switch";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
@@ -29,12 +29,15 @@ import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
 } from "@/components/ui/dialog";
 import {
+  DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
+import {
   Plus, RefreshCw, Trash2, ChevronLeft, ChevronRight, ChevronDown,
   User, Phone, Mail, Calendar, Search, X, MessageCircle, Paperclip,
-  Images, Loader2, Download, Eye, MessagesSquare, UserRound,
+  Images, Download, Eye, UserRound, MoreHorizontal, Info,
 } from "lucide-react";
 import { ContactAvatar } from "@/components/contact-avatar";
-import { ContactConversationDialog } from "@/components/atendimento/contact-conversation-dialog";
 import { SpyContactMessagesPopover } from "@/components/atendimento/spy-contact-messages-dialog";
 import { toast } from "sonner";
 import { useTranslations } from "next-intl";
@@ -42,11 +45,10 @@ import {
   fetchPipelines,
   fetchStages,
   fetchOpportunities,
-  createOpportunity,
+  fetchOpportunity,
   updateOpportunity,
   deleteOpportunity,
 } from "@/services/funnel";
-import { fetchContacts } from "@/services/contacts";
 import { fetchAllUsers } from "@/services/users";
 import { fetchWhatsapps, type Whatsapp } from "@/services/whatsapp";
 import { fetchTags, type Tag as TagOption } from "@/services/tags";
@@ -58,6 +60,11 @@ import {
   sendEmailWebmail,
   type WabaTemplate,
 } from "@/services/messages";
+import { AVULSA_MESSAGE_CHANNEL_TYPES, AVULSA_EMAIL_CHANNEL_TYPES } from "@/services/individual-message";
+import { useQuickReplies } from "@/hooks/use-quick-replies";
+import { QuickReplyTextarea } from "@/components/quick-replies/quick-reply-textarea";
+import { QuickReplyTemplateShortcuts } from "@/components/quick-replies/quick-reply-template-shortcuts";
+import { buildSignedBody, isSignatureMandatory } from "@/lib/signature";
 import { type GalleryItem } from "@/services/gallery";
 import { GalleryPickerWithUploadDialog, wabaHeaderFormatToGalleryParams } from "@/components/gallery/gallery-picker-with-upload-dialog";
 import { usePageAccess } from "@/hooks/use-page-access";
@@ -67,86 +74,83 @@ import { AccessDenied } from "@/components/layout/access-denied";
 import { PageHelp } from "@/components/layout/page-help";
 import { KanbanStatsChips } from "@/components/funil/kanban-stats-chips";
 import { OpportunityAlerts } from "@/components/funil/opportunity-alerts";
-import { useOpportunityCalendarEvent } from "@/components/funil/opportunity-calendar-event";
+import { useOpportunityCalendarEvent, type OpportunityEventData } from "@/components/funil/opportunity-calendar-event";
+import { OpportunityFormBody } from "@/components/funil/opportunity-form-fields";
+import { PipelineSelector } from "@/components/funil/pipeline-selector";
+import { OpportunitySheet } from "@/components/funil/opportunity-sheet";
+import { useOpportunityTicketFlow, OpportunityTicketBadge } from "@/components/funil/opportunity-ticket-flow";
 import {
-  daysUntilClosing, dateInputToClosingForecastISO, closingForecastToDateInput,
-} from "@/lib/opportunity-date";
+  formatValue,
+  formatDateUTC,
+  isUrgent,
+  statusColor,
+  statusLabel,
+  normalizeOpportunity,
+  restrictedContactName,
+  isBlockedByNotViewAssigned,
+  pickDefaultPipeline,
+  type Pipeline,
+  type Stage,
+  type Responsible,
+  type Opportunity,
+  type OpportunityContact,
+  type Filters,
+  type Pagination,
+} from "@/components/funil/opportunity-shared";
+import { useRegion } from "@/hooks/use-region";
+import { countryLocale } from "@/lib/region";
 
-// ─── Types ───────────────────────────────────────────────────────────────────
+// ─── Helpers do CSV ──────────────────────────────────────────────────────────
+// Tipos e helpers do quadro moram em components/funil/opportunity-shared.ts (a ficha
+// e o formulário usam os mesmos); aqui ficam só os da exportação.
 
-interface Pipeline { id: number; name: string; }
-interface Stage { id: number; name: string; pipelineId: number; color?: string; order?: number; }
-interface Responsible { label: string; value: number; }
-interface ContactOption { id: number; name: string; number?: string; email?: string; profilePicUrl?: string; }
-
-interface Opportunity {
-  id: number;
-  name: string;
-  value?: number;
-  status: string;
-  stageId: number;
-  pipelineId: number;
-  responsibleId?: number;
-  contactId?: number;
-  contact?: {
-    id: number;
-    name: string;
-    number?: string;
-    email?: string;
-    profilePicUrl?: string;
-    kanban?: number | null;
-    tags?: { id: number; tag?: string; name?: string; color?: string }[];
-    wallets?: { id: number; name: string }[];
-    kanbanInfo?: { id: number; name: string; color?: string } | null;
-  };
-  closingForecast?: string;
-  description?: string;
-  createdAt?: string;
-  updatedAt?: string;
+// Valor no CSV: sem símbolo e sem separador de milhar, com o separador decimal do
+// país da empresa (no BR segue "1234,50", como sempre).
+function csvDecimal(val: number | string | null | undefined, country: string) {
+  const n = Number(val ?? 0);
+  const safe = Number.isFinite(n) ? n : 0;
+  try {
+    return new Intl.NumberFormat(countryLocale(country), {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+      useGrouping: false,
+    }).format(safe);
+  } catch {
+    return safe.toFixed(2).replace(".", ",");
+  }
 }
 
-interface Filters {
-  pipelineId: number | null;
-  stageId: number | null;
-  responsibleId: number | null;
-  status: string;
-  valorMin: number | null;
-  valorMax: number | null;
-  dataInicio: string | null;
-  dataFim: string | null;
-  searchTerm: string;
-  ordenacao: string;
-  tagId: number | null;
-  walletUserId: number | null;
-  kanbanId: number | null;
+// Separador do CSV: onde o decimal e virgula (BR) o Excel espera ";" e, com ",",
+// abre o arquivo inteiro na coluna A; nos demais paises segue a virgula.
+function csvDelimiter(country: string) {
+  try {
+    const decimal = new Intl.NumberFormat(countryLocale(country))
+      .formatToParts(1.5)
+      .find(p => p.type === "decimal")?.value;
+    return decimal === "," ? ";" : ",";
+  } catch {
+    return ";";
+  }
 }
 
-interface Pagination {
-  page: number;
-  limit: number;
-  total: number;
+// Texto que comeca com = + - @ o Excel le como formula ("- pendente" vira #NOME? e
+// "=HYPERLINK(...)" executa). Um espaco na frente mantem como texto; numero e o
+// telefone de csvPhoneCell (formula de proposito) passam intactos.
+function csvNeutralizeFormula(text: string) {
+  if (!/^[=+\-@]/.test(text)) return text;
+  if (/^[+-]?\d+([.,]\d+)?$/.test(text) || /^="[\d\s().+-]*"$/.test(text)) return text;
+  return ` ${text}`;
 }
 
-// ─── Helpers ─────────────────────────────────────────────────────────────────
-
-function formatValue(val?: number) {
-  if (!val) return "R$ 0,00";
-  return `R$ ${Number(val).toFixed(2).replace(".", ",")}`;
-}
-
-function formatDateUTC(dateStr?: string) {
-  if (!dateStr) return "";
-  const d = new Date(dateStr);
-  const day = String(d.getUTCDate()).padStart(2, "0");
-  const month = String(d.getUTCMonth() + 1).padStart(2, "0");
-  const year = d.getUTCFullYear();
-  return `${day}/${month}/${year}`;
-}
-
+// Um registro por linha: quebra de linha dentro da celula (descricao com varias
+// linhas) vira " | " e as linhas vazias somem.
 function csvEscape(value: unknown) {
   if (value === null || value === undefined) return '""';
   const raw = typeof value === "object" ? JSON.stringify(value) : String(value);
-  return `"${raw.replace(/"/g, '""')}"`;
+  const singleLine = /[\r\n]/.test(raw)
+    ? raw.split(/\r\n|\r|\n/).map(s => s.trim()).filter(Boolean).join(" | ")
+    : raw;
+  return `"${csvNeutralizeFormula(singleLine).replace(/"/g, '""')}"`;
 }
 
 // O Excel le uma sequencia longa de digitos como numero e mostra 5,54796E+11 no
@@ -157,487 +161,89 @@ function csvPhoneCell(value: string) {
   return /^[+\d][\d\s().+-]*$/.test(value) ? `="${value}"` : value;
 }
 
-function convertBRToISO(br: string) {
-  if (!br) return "";
-  const [d, m, y] = br.split("/");
-  if (d && m && y) return `${y}-${m.padStart(2, "0")}-${d.padStart(2, "0")}`;
-  return "";
-}
+// ─── Nova oportunidade ────────────────────────────────────────────────────────
 
-function convertISOToBR(iso: string) {
-  if (!iso) return "";
-  const short = iso.split("T")[0];
-  const [y, m, d] = short.split("-");
-  if (y && m && d) return `${d}/${m}/${y}`;
-  return "";
-}
-
-function isUrgent(dateStr?: string) {
-  const diffDays = daysUntilClosing(dateStr);
-  if (diffDays === null) return false;
-  return diffDays <= 7 && diffDays >= 0;
-}
-
-function statusColor(status: string) {
-  if (status === "open") return "bg-amber-400 text-white";
-  if (status === "win") return "bg-green-500 text-white";
-  if (status === "lose") return "bg-red-500 text-white";
-  return "bg-gray-400 text-white";
-}
-
-function statusLabel(status: string, t: (key: string) => string) {
-  if (status === "open") return t("statusOpen");
-  if (status === "win") return t("statusWin");
-  if (status === "lose") return t("statusLose");
-  return status;
-}
-
-// ─── Opportunity Form ─────────────────────────────────────────────────────────
-
-interface OpportunityFormProps {
+interface CreateOpportunityDialogProps {
   open: boolean;
   onClose: () => void;
+  /** Depois de gravar: a página fecha, recarrega as oportunidades e pergunta do Google Agenda */
   onSaved: () => void;
-  oportunidade: Opportunity | null;
+  onCreated: (data: OpportunityEventData) => void;
   pipelines: Pipeline[];
   stages: Stage[];
   responsaveis: Responsible[];
+  defaultPipelineId: number | null;
+  defaultStageId: number | null;
 }
 
-function OpportunityForm({ open, onClose, onSaved, oportunidade, pipelines, stages, responsaveis }: OpportunityFormProps) {
+// Só criação: a edição mora na ficha (D7). O hook do Google Agenda fica na página,
+// porque este diálogo fecha logo depois de criar e desmontaria a pergunta.
+function CreateOpportunityDialog({
+  open, onClose, onSaved, onCreated, pipelines, stages, responsaveis, defaultPipelineId, defaultStageId,
+}: CreateOpportunityDialogProps) {
   const t = useTranslations("funilKanbanPage");
-  const { isLiveMode } = useLiveMode();
-  const [form, setForm] = useState({
-    name: "",
-    pipelineId: "" as string | number,
-    stageId: "" as string | number,
-    responsibleId: "" as string | number,
-    contactId: "" as string | number,
-    closingForecastBR: "",
-    closingForecast: "",
-    value: 0,
-    description: "",
-    status: "open",
-  });
-  const [contatoSelecionado, setContatoSelecionado] = useState<ContactOption | null>(null);
-  const [contactSearch, setContactSearch] = useState("");
-  const [contactOptions, setContactOptions] = useState<ContactOption[]>([]);
-  const [loadingContacts, setLoadingContacts] = useState(false);
-  const [saving, setSaving] = useState(false);
-  const searchTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const gcal = useOpportunityCalendarEvent();
-
-  const isEditing = !!oportunidade?.id;
-
-  // Populate form when editing
-  useEffect(() => {
-    if (oportunidade) {
-      const cf = closingForecastToDateInput(oportunidade.closingForecast);
-      setForm({
-        name: oportunidade.name || "",
-        pipelineId: oportunidade.pipelineId || "",
-        stageId: oportunidade.stageId || "",
-        responsibleId: oportunidade.responsibleId || "",
-        contactId: oportunidade.contactId || "",
-        closingForecast: cf,
-        closingForecastBR: cf ? convertISOToBR(cf) : "",
-        value: oportunidade.value || 0,
-        description: oportunidade.description || "",
-        status: oportunidade.status || "open",
-      });
-      if (oportunidade.contact) {
-        setContatoSelecionado(oportunidade.contact);
-        setContactOptions([oportunidade.contact]);
-      }
-    } else {
-      setForm({
-        name: "", pipelineId: "", stageId: "", responsibleId: "",
-        contactId: "", closingForecast: "", closingForecastBR: "",
-        value: 0, description: "", status: "open",
-      });
-      setContatoSelecionado(null);
-      setContactOptions([]);
-      setContactSearch("");
-    }
-  }, [oportunidade, open]);
-
-  const etapasFiltradas = stages.filter(s => String(s.pipelineId) === String(form.pipelineId));
-
-  function onPipelineChange(val: string) {
-    setForm(f => ({ ...f, pipelineId: val, stageId: "" }));
-  }
-
-  function onClosingChange(br: string) {
-    setForm(f => ({ ...f, closingForecastBR: br, closingForecast: convertBRToISO(br) }));
-  }
-
-  function searchContacts(term: string) {
-    setContactSearch(term);
-    if (searchTimeout.current) clearTimeout(searchTimeout.current);
-    if (term.length < 2) return;
-    searchTimeout.current = setTimeout(async () => {
-      setLoadingContacts(true);
-      try {
-        const res = await fetchContacts({ searchParam: term });
-        const contacts = res.data?.contacts ?? res.data ?? [];
-        setContactOptions(Array.isArray(contacts) ? contacts : []);
-      } catch {
-        // ignore
-      } finally {
-        setLoadingContacts(false);
-      }
-    }, 700);
-  }
-
-  function selectContact(c: ContactOption) {
-    setContatoSelecionado(c);
-    setForm(f => ({ ...f, contactId: c.id }));
-    setContactSearch(c.name);
-    setContactOptions([]);
-  }
-
-  async function handleSave(e: React.FormEvent) {
-    e.preventDefault();
-    if (!form.name.trim()) { toast.error(t("nameRequired")); return; }
-    setSaving(true);
-    try {
-      const isoShort = form.closingForecastBR ? convertBRToISO(form.closingForecastBR) : "";
-      const payload = {
-        ...form,
-        pipelineId: form.pipelineId ? Number(form.pipelineId) : undefined,
-        stageId: form.stageId ? Number(form.stageId) : undefined,
-        responsibleId: form.responsibleId ? Number(form.responsibleId) : undefined,
-        contactId: form.contactId ? Number(form.contactId) : undefined,
-        value: Number(form.value) || 0,
-        closingForecast: dateInputToClosingForecastISO(isoShort),
-      };
-      if (isEditing && oportunidade) {
-        await updateOpportunity(oportunidade.id, payload);
-        toast.success(t("updateSuccess"));
-      } else {
-        await createOpportunity(payload);
-        toast.success(t("createSuccess"));
-        gcal.askToCreateEvent({
-          name: form.name,
-          description: form.description,
-          closingForecast: form.closingForecast,
-          contactEmail: contatoSelecionado?.email,
-        });
-      }
-      onSaved();
-      onClose();
-    } catch {
-      toast.error(t("saveError"));
-    } finally {
-      setSaving(false);
-    }
-  }
-
   return (
-    <>
     <Dialog open={open} onOpenChange={(v) => { if (!v) onClose(); }}>
       <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto">
         <DialogHeader>
-          <DialogTitle>{isEditing ? t("editOpportunity") : t("createOpportunity")}</DialogTitle>
+          <DialogTitle>{t("createOpportunity")}</DialogTitle>
         </DialogHeader>
-        <form onSubmit={handleSave} className="space-y-4">
-          {/* Nome */}
-          <div className="space-y-1">
-            <Label>{t("labelName")}</Label>
-            <Input value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))} placeholder={t("placeholderName")} required />
-          </div>
-
-          {/* Pipeline */}
-          <div className="space-y-1">
-            <Label>{t("labelPipeline")}</Label>
-            <Select value={String(form.pipelineId || "")} onValueChange={onPipelineChange}>
-              <SelectTrigger><SelectValue placeholder={t("placeholderPipeline")} /></SelectTrigger>
-              <SelectContent>
-                {pipelines.map(p => <SelectItem key={p.id} value={String(p.id)}>{p.name}</SelectItem>)}
-              </SelectContent>
-            </Select>
-          </div>
-
-          {/* Etapa */}
-          <div className="space-y-1">
-            <Label>{t("labelStage")}</Label>
-            <Select
-              value={String(form.stageId || "")}
-              onValueChange={v => setForm(f => ({ ...f, stageId: v }))}
-              disabled={!form.pipelineId}
-            >
-              <SelectTrigger><SelectValue placeholder={form.pipelineId ? t("placeholderStage") : t("placeholderStageFirst")} /></SelectTrigger>
-              <SelectContent>
-                {etapasFiltradas.map(s => <SelectItem key={s.id} value={String(s.id)}>{s.name}</SelectItem>)}
-              </SelectContent>
-            </Select>
-          </div>
-
-          {/* Responsável */}
-          <div className="space-y-1">
-            <Label>{t("labelResponsible")}</Label>
-            <Select value={String(form.responsibleId || "")} onValueChange={v => setForm(f => ({ ...f, responsibleId: v }))}>
-              <SelectTrigger><SelectValue placeholder={t("placeholderResponsible")} /></SelectTrigger>
-              <SelectContent>
-                {responsaveis.map(r => <SelectItem key={r.value} value={String(r.value)}>{r.label}</SelectItem>)}
-              </SelectContent>
-            </Select>
-          </div>
-
-          {/* Contato */}
-          <div className="space-y-1">
-            <Label>{t("labelContact")}</Label>
-            <div className="relative">
-              <Input
-                value={contactSearch}
-                onChange={e => searchContacts(e.target.value)}
-                placeholder={t("placeholderContact")}
-                disabled={isEditing}
-              />
-              {loadingContacts && (
-                <div className="absolute right-2 top-2">
-                  <RefreshCw className="h-4 w-4 animate-spin text-muted-foreground" />
-                </div>
-              )}
-              {contactOptions.length > 0 && !isEditing && (
-                <div className="absolute z-50 w-full mt-1 bg-background border rounded-md shadow-md max-h-48 overflow-y-auto">
-                  {contactOptions.map(c => (
-                    <button
-                      key={c.id}
-                      type="button"
-                      className="w-full text-left px-3 py-2 hover:bg-muted text-sm"
-                      onClick={() => selectContact(c)}
-                    >
-                      <div className={cn("font-medium", isLiveMode && "live-blur-text")}>{c.name}</div>
-                      {c.number && <div className={cn("text-xs text-muted-foreground", isLiveMode && "live-blur-text")}>{c.number}</div>}
-                    </button>
-                  ))}
-                </div>
-              )}
-              {contatoSelecionado && !isEditing && (
-                <button
-                  type="button"
-                  className="absolute right-2 top-2 text-muted-foreground hover:text-foreground"
-                  onClick={() => { setContatoSelecionado(null); setForm(f => ({ ...f, contactId: "" })); setContactSearch(""); setContactOptions([]); }}
-                >
-                  <X className="h-4 w-4" />
-                </button>
-              )}
-            </div>
-            {contatoSelecionado && (
-              <p className="text-xs text-muted-foreground">{t("contactSelected")} <strong className={cn(isLiveMode && "live-blur-text")}>{contatoSelecionado.name}</strong></p>
-            )}
-          </div>
-
-          {/* Previsão de Fechamento */}
-          <div className="space-y-1">
-            <Label>{t("labelClosingForecast")}</Label>
-            <Input
-              type="date"
-              value={form.closingForecast}
-              onChange={e => {
-                const iso = e.target.value;
-                setForm(f => ({ ...f, closingForecast: iso, closingForecastBR: iso ? convertISOToBR(iso + "T00:00:00") : "" }));
-              }}
-            />
-          </div>
-
-          {/* Valor */}
-          <div className="space-y-1">
-            <Label>{t("labelValue")}</Label>
-            <Input
-              type="number"
-              min={0}
-              step="0.01"
-              value={form.value}
-              onChange={e => setForm(f => ({ ...f, value: Number(e.target.value) }))}
-              placeholder="0,00"
-            />
-          </div>
-
-          {/* Descrição */}
-          <div className="space-y-1">
-            <Label>{t("labelDescription")}</Label>
-            <Textarea
-              value={form.description}
-              onChange={e => setForm(f => ({ ...f, description: e.target.value }))}
-              placeholder={t("placeholderDescription")}
-              rows={3}
-            />
-          </div>
-
-          {/* Status */}
-          <div className="space-y-1">
-            <Label>{t("labelStatus")}</Label>
-            <Select value={form.status} onValueChange={v => setForm(f => ({ ...f, status: v }))}>
-              <SelectTrigger><SelectValue /></SelectTrigger>
-              <SelectContent>
-                <SelectItem value="open">{t("statusOpen")}</SelectItem>
-                <SelectItem value="win">{t("statusWin")}</SelectItem>
-                <SelectItem value="lose">{t("statusLose")}</SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
-
-          <DialogFooter className="gap-2 sm:flex-wrap sm:space-x-0">
-            {isEditing && gcal.hasActiveConfigs && (
-              <Button
-                type="button"
-                variant="outline"
-                className="sm:mr-auto"
-                onClick={() => gcal.openEventDialog({
-                  name: form.name,
-                  description: form.description,
-                  closingForecast: form.closingForecast,
-                  contactEmail: contatoSelecionado?.email,
-                })}
-              >
-                <Calendar className="mr-2 h-4 w-4" />
-                {gcal.labels.createEventButton}
-              </Button>
-            )}
-            <Button type="button" variant="outline" onClick={onClose}>{t("cancel")}</Button>
-            <Button type="submit" disabled={saving}>
-              {saving && <RefreshCw className="mr-2 h-4 w-4 animate-spin" />}
-              {t("save")}
-            </Button>
-          </DialogFooter>
-        </form>
-      </DialogContent>
-    </Dialog>
-    {gcal.dialogs}
-    </>
-  );
-}
-
-// ─── Opportunity Details Modal ─────────────────────────────────────────────────
-
-interface OpportunityDetailsProps {
-  open: boolean;
-  onClose: () => void;
-  onEdit: (opp: Opportunity) => void;
-  oportunidade: Opportunity | null;
-  pipelines: Pipeline[];
-  stages: Stage[];
-  responsaveis: Responsible[];
-}
-
-function OpportunityDetails({ open, onClose, onEdit, oportunidade, pipelines, stages, responsaveis }: OpportunityDetailsProps) {
-  const t = useTranslations("funilKanbanPage");
-  const { isLiveMode } = useLiveMode();
-  if (!oportunidade) return null;
-
-  const stage = stages.find(s => String(s.id) === String(oportunidade.stageId));
-  const pipeline = pipelines.find(p => String(p.id) === String(oportunidade.pipelineId));
-  const responsavel = responsaveis.find(r => String(r.value) === String(oportunidade.responsibleId));
-
-  return (
-    <Dialog open={open} onOpenChange={v => { if (!v) onClose(); }}>
-      <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
-        <DialogHeader>
-          <DialogTitle>{t("detailsTitle")}</DialogTitle>
-        </DialogHeader>
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          {/* Informações Básicas */}
-          <div className="border rounded-lg p-4 space-y-3">
-            <h4 className="font-semibold text-sm text-muted-foreground uppercase tracking-wide">{t("sectionBasic")}</h4>
-            <div>
-              <p className="text-xs text-muted-foreground">{t("fieldName")}</p>
-              <p className="font-medium">{oportunidade.name}</p>
-            </div>
-            <div>
-              <p className="text-xs text-muted-foreground">{t("fieldPipeline")}</p>
-              <p className="font-medium">{pipeline?.name ?? "—"}</p>
-            </div>
-            <div>
-              <p className="text-xs text-muted-foreground">{t("fieldStage")}</p>
-              <p className="font-medium">{stage?.name ?? "—"}</p>
-            </div>
-            <div>
-              <p className="text-xs text-muted-foreground">{t("fieldStatus")}</p>
-              <span className={`inline-block px-2 py-0.5 rounded text-xs font-medium ${statusColor(oportunidade.status)}`}>
-                {statusLabel(oportunidade.status, t)}
-              </span>
-            </div>
-          </div>
-
-          {/* Valores e Datas */}
-          <div className="border rounded-lg p-4 space-y-3">
-            <h4 className="font-semibold text-sm text-muted-foreground uppercase tracking-wide">{t("sectionValues")}</h4>
-            <div>
-              <p className="text-xs text-muted-foreground">{t("fieldValue")}</p>
-              <p className="font-medium text-green-600">{formatValue(oportunidade.value)}</p>
-            </div>
-            <div>
-              <p className="text-xs text-muted-foreground">{t("fieldClosing")}</p>
-              <p className="font-medium">{formatDateUTC(oportunidade.closingForecast) || "—"}</p>
-            </div>
-            <div>
-              <p className="text-xs text-muted-foreground">{t("fieldCreated")}</p>
-              <p className="font-medium">{formatDateUTC(oportunidade.createdAt) || "—"}</p>
-            </div>
-            <div>
-              <p className="text-xs text-muted-foreground">{t("fieldUpdated")}</p>
-              <p className="font-medium">{formatDateUTC(oportunidade.updatedAt) || "—"}</p>
-            </div>
-          </div>
-
-          {/* Responsável */}
-          <div className="border rounded-lg p-4 space-y-3">
-            <h4 className="font-semibold text-sm text-muted-foreground uppercase tracking-wide">{t("sectionResponsible")}</h4>
-            <div className="flex items-center gap-2">
-              <User className="h-4 w-4 text-muted-foreground" />
-              <span className="font-medium">{responsavel?.label ?? t("noResponsible")}</span>
-            </div>
-          </div>
-
-          {/* Contato */}
-          {oportunidade.contact && (
-            <div className="border rounded-lg p-4 space-y-3">
-              <h4 className="font-semibold text-sm text-muted-foreground uppercase tracking-wide">{t("sectionContact")}</h4>
-              <div className="flex items-center gap-3">
-                <ContactAvatar
-                  name={oportunidade.contact.name}
-                  profilePicUrl={oportunidade.contact.profilePicUrl}
-                  sizeClassName="w-10 h-10"
-                  fallbackClassName="bg-primary text-white font-bold"
-                  blur={isLiveMode}
-                />
-                <div>
-                  <p className={cn("font-medium", isLiveMode && "live-blur-text")}>{oportunidade.contact.name}</p>
-                  {displayContactIdentity(oportunidade.contact) && (
-                    <div className={cn("flex items-center gap-1 text-xs text-muted-foreground", isLiveMode && "live-blur-text")}>
-                      <Phone className="h-3 w-3" />{displayContactIdentity(oportunidade.contact)}
-                    </div>
-                  )}
-                  {oportunidade.contact.email && (
-                    <div className={cn("flex items-center gap-1 text-xs text-muted-foreground", isLiveMode && "live-blur-text")}>
-                      <Mail className="h-3 w-3" />{oportunidade.contact.email}
-                    </div>
-                  )}
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* Descrição */}
-          {oportunidade.description && (
-            <div className="md:col-span-2 border rounded-lg p-4">
-              <h4 className="font-semibold text-sm text-muted-foreground uppercase tracking-wide mb-2">{t("sectionDescription")}</h4>
-              <p className="text-sm">{oportunidade.description}</p>
-            </div>
-          )}
-        </div>
-        <DialogFooter className="gap-2">
-          <Button variant="outline" onClick={onClose}>{t("close")}</Button>
-          <Button onClick={() => onEdit(oportunidade)}>{t("edit")}</Button>
-        </DialogFooter>
+        <OpportunityFormBody
+          oportunidade={null}
+          pipelines={pipelines}
+          stages={stages}
+          responsaveis={responsaveis}
+          defaultPipelineId={defaultPipelineId}
+          defaultStageId={defaultStageId}
+          onCreated={onCreated}
+          onSaved={() => onSaved()}
+          onCancel={onClose}
+        />
       </DialogContent>
     </Dialog>
   );
 }
 
 // ─── Send Message Modal ───────────────────────────────────────────────────────
+
+// Nome de verdade (com letra): contato que nasceu com o telefone como nome não conta
+// como "dados do cadastro" nos avisos de variável da mensagem rápida.
+function nameHasLetter(name?: string | null) {
+  return /\p{L}/u.test(name ?? "");
+}
+
+// Preferência "Assinado" do atendente: a mesma chave da Nova Conversa e do chat.
+function readSignaturePreference() {
+  if (typeof window === "undefined") return true;
+  try {
+    const saved = localStorage.getItem("signatureEnabled");
+    return saved === null ? true : saved === "true";
+  } catch {
+    return true;
+  }
+}
+
+function readSignatureName(username?: string | null) {
+  if (username) return username;
+  if (typeof window === "undefined") return "";
+  try {
+    return localStorage.getItem("username") || "";
+  } catch {
+    return "";
+  }
+}
+
+// Mesmo critério do servidor para achar o contato do e-mail: exatamente 1 destinatário
+// (para + cópia + cópia oculta, e-mails distintos sem diferença de caixa).
+function singleRecipientEmail(...fields: string[]): string | null {
+  const set = new Set(
+    fields
+      .flatMap(f => (f || "").split(/[,;]+/))
+      .map(s => s.trim().toLowerCase())
+      .filter(Boolean)
+  );
+  return set.size === 1 ? Array.from(set)[0] : null;
+}
 
 interface SendMessageModalProps {
   open: boolean;
@@ -654,6 +260,17 @@ function SendMessageModal({ open, opp, whatsapps, onClose }: SendMessageModalPro
   // existem nos 13 locales) — reusar evita duas traducoes divergindo para a mesma escolha.
   const tHeader = useTranslations("layoutHeader");
   const tChat = useTranslations("atendimentoChat");
+  const tMsgInput = useTranslations("messageInput");
+  const router = useRouter();
+  // Mensagens rápidas ("/" no campo e atalhos de template): carregadas a cada abertura
+  const { rows: quickReplies, loading: quickRepliesLoading } = useQuickReplies(open);
+  // Assinatura com a regra do chat (D9): isentos admin, superadmin e supervisor que é admin
+  const authUser = useAuthStore((s) => s.user);
+  const supervisorAdmin = useAuthStore((s) => s.supervisorAdmin);
+  const signedSetting = useAuthStore((s) => s.getConfigValue("signed"));
+  const forceSignature = isSignatureMandatory({ signedSetting, profile: authUser?.profile, supervisorAdmin });
+  const signName = readSignatureName(authUser?.username);
+  const [signatureEnabled, setSignatureEnabled] = useState(readSignaturePreference);
   const [sessionId, setSessionId] = useState("");
   const [phone, setPhone] = useState("");
   const [message, setMessage] = useState("");
@@ -675,8 +292,10 @@ function SendMessageModal({ open, opp, whatsapps, onClose }: SendMessageModalPro
   const [orderDetailsValue, setOrderDetailsValue] = useState<OrderDetailsValue>(() => emptyOrderDetails());
   const [tplGalleryOpen, setTplGalleryOpen] = useState(false);
 
+  // Só as conexões que o /individual atende (P2): Telegram, Instagram, Hub e afins começam
+  // pelo atendimento, e o e-mail tem o diálogo próprio.
   const connectedSessions = whatsapps.filter(w =>
-    w.status === "CONNECTED" && !(w.type ?? "").toLowerCase().includes("webmail")
+    w.status === "CONNECTED" && AVULSA_MESSAGE_CHANNEL_TYPES.includes((w.type ?? "").toLowerCase())
   );
   const selectedSession = whatsapps.find(w => String(w.id) === sessionId);
   const chType = (selectedSession?.type ?? "").toLowerCase();
@@ -694,26 +313,49 @@ function SendMessageModal({ open, opp, whatsapps, onClose }: SendMessageModalPro
       setTemplateSearch("");
       setWabaTemplates([]);
       setDesiredStatus("open");
+      // A preferência pode ter mudado em outra tela desde a última abertura
+      setSignatureEnabled(readSignaturePreference());
     }
   }, [open, opp]);
 
-  // Load templates (WABA/Dialog360/Gupshup) when session changes
+  // Load templates (WABA/Dialog360/Gupshup) when session changes. A troca de canal limpa
+  // lista, seleção e variáveis do anterior, e a resposta de um canal anterior é descartada:
+  // sem isso um atalho de 1 clique escolhia o modelo do canal A e enviava pelo B.
   useEffect(() => {
+    setWabaTemplates([]);
+    setSelectedTemplate(null);
+    setTemplateVars([]);
     if (!isWabaLike || (chType.includes("waba") && !selectedSession?.tokenAPI)) {
-      setWabaTemplates([]);
-      setSelectedTemplate(null);
+      setLoadingTemplates(false);
       return;
     }
+    let alive = true;
     setLoadingTemplates(true);
     import("@/services/channel-templates")
       .then(m => m.getTemplatesForChannel({ id: selectedSession!.id, type: selectedSession!.type, tokenAPI: selectedSession!.tokenAPI, appId: (selectedSession as { appId?: string })?.appId }))
       .then((res: any) => {
+        if (!alive) return;
         const list = (Array.isArray(res) ? res : res?.data || []) as any[];
         setWabaTemplates([...list].sort((a, b) => (a.name || "").toLowerCase().localeCompare((b.name || "").toLowerCase())));
       })
       .catch(() => {})
-      .finally(() => setLoadingTemplates(false));
+      .finally(() => { if (alive) setLoadingTemplates(false); });
+    return () => { alive = false; };
   }, [sessionId, isWabaLike, chType, selectedSession?.tokenAPI]);
+
+  // Avisos de variável da mensagem rápida: dados do contato só quando o número do campo é
+  // o do contato da oportunidade (com nome de verdade); atendente só em "Em atendimento";
+  // protocolo/atendimento vazios nas conexões que enviam antes de criar o atendimento.
+  const quickReplyWarnings = useMemo(() => {
+    const oppDigits = (opp?.contact?.number ?? "").replace(/\D/g, "");
+    const phoneDigits = phone.replace(/\D/g, "");
+    return {
+      contactKnown: !!oppDigits && phoneDigits === oppDigits && nameHasLetter(opp?.contact?.name),
+      ownerKnown: desiredStatus === "open",
+      ticketVarsEmpty: ["whatsapp", "baileys", "zapo"].includes(chType),
+      channel: "phone" as const,
+    };
+  }, [opp?.contact?.number, opp?.contact?.name, phone, desiredStatus, chType]);
 
   // Parse template variables when template selected
   useEffect(() => {
@@ -783,13 +425,18 @@ function SendMessageModal({ open, opp, whatsapps, onClose }: SendMessageModalPro
     }
 
     const cleanNumber = phone.replace(/\D/g, "");
+    // Assinatura como na Nova Conversa (P2): só no texto livre, nunca no template oficial
+    const useSignature = forceSignature || signatureEnabled;
+    const outgoingMessage = !isWabaLike && useSignature && signName.trim() && message.trim()
+      ? buildSignedBody(signName, message, chType)
+      : message;
     setLoading(true);
     try {
       const res = await sendIndividualMessage({
         whatsappId: Number(sessionId),
-        whatsappType: selectedSession?.type ?? "",
+        whatsappType: chType,
         number: cleanNumber,
-        message: isWabaLike ? "" : message,
+        message: isWabaLike ? "" : outgoingMessage,
         desiredStatus,
       });
 
@@ -907,7 +554,28 @@ function SendMessageModal({ open, opp, whatsapps, onClose }: SendMessageModalPro
         }
       }
 
-      toast.success(t("msgSentOk"));
+      // Atalho para a conversa só quando o atendimento é abrível por quem enviou: com
+      // "não ver atendimentos de outros", o /individual pode devolver o de um colega.
+      const sent = res?.data as { ticketId?: number | null; userId?: number | null } | undefined;
+      const sentTicketId = sent?.ticketId;
+      const { user: me, getConfigValue } = useAuthStore.getState();
+      const blocked = isBlockedByNotViewAssigned({
+        notViewOn: getConfigValue("NotViewAssignedTickets") === "enabled",
+        profile: me?.profile,
+        meId: me?.userId,
+        ticketUserId: sent?.userId ?? null,
+        viewerLinked: false,
+      });
+      if (sentTicketId && !blocked) {
+        toast.success(t("msgSentOk"), {
+          action: {
+            label: t("openTicket"),
+            onClick: () => router.push(`/atendimento?ticketId=${sentTicketId}`),
+          },
+        });
+      } else {
+        toast.success(t("msgSentOk"));
+      }
       onClose();
     } catch (err: unknown) {
       const errCode = String((err as { response?: { data?: { error?: string } } })?.response?.data?.error || "");
@@ -965,6 +633,10 @@ function SendMessageModal({ open, opp, whatsapps, onClose }: SendMessageModalPro
                 }
               </SelectContent>
             </Select>
+            <p className="mt-1 flex items-start gap-1.5 text-[11px] leading-snug text-muted-foreground">
+              <Info className="h-3 w-3 mt-0.5 shrink-0" aria-hidden="true" />
+              <span>{t("msgChannelsHint")}</span>
+            </p>
           </div>
 
           {/* Número */}
@@ -978,6 +650,16 @@ function SendMessageModal({ open, opp, whatsapps, onClose }: SendMessageModalPro
             <>
               <div>
                 <Label className="text-xs mb-1 block">{t("msgSelectTemplate")}</Label>
+                {/* Atalhos das mensagens rápidas do tipo Template (D6); somem enquanto a lista carrega */}
+                <div className="mb-2 empty:hidden">
+                  <QuickReplyTemplateShortcuts
+                    quickReplies={quickReplies}
+                    templates={wabaTemplates}
+                    loading={loadingTemplates}
+                    onSelectTemplate={(tpl) => setSelectedTemplate(tpl)}
+                    onFilterByName={(name) => setTemplateSearch(name)}
+                  />
+                </div>
                 <Input
                   value={templateSearch}
                   onChange={e => setTemplateSearch(e.target.value)}
@@ -990,17 +672,26 @@ function SendMessageModal({ open, opp, whatsapps, onClose }: SendMessageModalPro
                   <p className="text-xs text-muted-foreground py-2">{t("msgNoTemplates")}</p>
                 ) : (
                   <div className="border rounded-md overflow-y-auto max-h-40 divide-y">
-                    {filteredTemplates.map(tpl => (
-                      <button
-                        key={tpl.name}
-                        type="button"
-                        className={`w-full text-left px-3 py-2 text-xs hover:bg-muted transition-colors ${selectedTemplate?.name === tpl.name ? "bg-primary/10 font-semibold" : ""}`}
-                        onClick={() => setSelectedTemplate(tpl)}
-                      >
-                        <p className="font-medium">{tpl.name}</p>
-                        <p className="text-muted-foreground truncate">{getTemplatePreview(tpl)}</p>
-                      </button>
-                    ))}
+                    {filteredTemplates.map(tpl => {
+                      // Mesmo nome em mais de um idioma: o idioma diferencia (o atalho filtra pelo nome)
+                      const isSelected = selectedTemplate?.name === tpl.name && selectedTemplate?.language === tpl.language;
+                      return (
+                        <button
+                          key={`${tpl.name}-${tpl.language}`}
+                          type="button"
+                          className={`w-full text-left px-3 py-2 text-xs hover:bg-muted transition-colors ${isSelected ? "bg-primary/10 font-semibold" : ""}`}
+                          onClick={() => setSelectedTemplate(tpl)}
+                        >
+                          <p className="font-medium flex items-center gap-1.5 min-w-0">
+                            <span className="truncate">{tpl.name}</span>
+                            {tpl.language && (
+                              <span className="shrink-0 text-[10px] font-normal text-muted-foreground">{tpl.language}</span>
+                            )}
+                          </p>
+                          <p className="text-muted-foreground truncate">{getTemplatePreview(tpl)}</p>
+                        </button>
+                      );
+                    })}
                   </div>
                 )}
               </div>
@@ -1102,8 +793,42 @@ function SendMessageModal({ open, opp, whatsapps, onClose }: SendMessageModalPro
           {/* Não-oficial: textarea de mensagem */}
           {!isWabaLike && sessionId && (
             <div>
-              <Label className="text-xs mb-1 block">{t("msgText")}</Label>
-              <Textarea value={message} onChange={e => setMessage(e.target.value)} placeholder={t("msgTextPlaceholder")} rows={4} />
+              <div className="flex items-center justify-between gap-2 mb-1">
+                <Label htmlFor="funil-msg-text" className="text-xs">{t("msgText")}</Label>
+                {signName.trim() && (
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    <Switch
+                      id="funil-msg-sig-toggle"
+                      checked={forceSignature ? true : signatureEnabled}
+                      onCheckedChange={forceSignature ? undefined : (v) => {
+                        try { localStorage.setItem("signatureEnabled", String(v)); } catch { /* só não lembra */ }
+                        setSignatureEnabled(v);
+                      }}
+                      disabled={forceSignature}
+                      className="scale-90"
+                    />
+                    <Label htmlFor="funil-msg-sig-toggle" className="text-xs text-muted-foreground cursor-pointer whitespace-nowrap">
+                      {(forceSignature || signatureEnabled) ? tMsgInput("signatureEnabled") : tMsgInput("signatureDisabled")}
+                    </Label>
+                  </div>
+                )}
+              </div>
+              {forceSignature && signName.trim() && (
+                <p className="mb-1.5 flex items-start gap-1.5 text-[11px] leading-snug text-muted-foreground">
+                  <Info className="h-3 w-3 mt-0.5 shrink-0" aria-hidden="true" />
+                  <span>{tHeader("newConversation.signatureMandatoryHint")}</span>
+                </p>
+              )}
+              <QuickReplyTextarea
+                id="funil-msg-text"
+                value={message}
+                onChange={setMessage}
+                quickReplies={quickReplies}
+                quickRepliesLoading={quickRepliesLoading}
+                placeholder={t("msgTextPlaceholder")}
+                textareaRows={4}
+                warnings={quickReplyWarnings}
+              />
             </div>
           )}
 
@@ -1182,15 +907,31 @@ function SendEmailModal({ open, opp, whatsapps, onClose }: SendEmailModalProps) 
   const [files, setFiles] = useState<File[]>([]);
   const [loading, setLoading] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  // Mensagens rápidas ("/" no corpo do e-mail): carregadas a cada abertura
+  const { rows: quickReplies, loading: quickRepliesLoading } = useQuickReplies(open);
 
-  const webmailChannels = whatsapps.filter(w =>
-    w.status === "CONNECTED" && (w.type ?? "").toLowerCase().includes("webmail")
+  // Webmail e e-mail (D13): a mesma lista de e-mail da Nova Conversa
+  const emailChannels = whatsapps.filter(w =>
+    w.status === "CONNECTED" && AVULSA_EMAIL_CHANNEL_TYPES.includes((w.type ?? "").toLowerCase())
   );
+
+  // Avisos de variável: o servidor acha o contato pelo e-mail só com 1 destinatário;
+  // sem atendimento, {{user}} é quem envia e protocolo/atendimento saem vazios.
+  const quickReplyWarnings = useMemo(() => {
+    const recipient = singleRecipientEmail(to, cc, bcc);
+    const contactEmail = (opp?.contact?.email ?? "").trim().toLowerCase();
+    return {
+      contactKnown: !!recipient && !!contactEmail && recipient === contactEmail && nameHasLetter(opp?.contact?.name),
+      ownerKnown: true,
+      ticketVarsEmpty: true,
+      channel: "email" as const,
+    };
+  }, [to, cc, bcc, opp?.contact?.email, opp?.contact?.name]);
 
   useEffect(() => {
     if (open && opp) {
       setTo(opp.contact?.email ?? "");
-      setChannelId(webmailChannels.length === 1 ? String(webmailChannels[0].id) : "");
+      setChannelId(emailChannels.length === 1 ? String(emailChannels[0].id) : "");
       setCc("");
       setBcc("");
       setSubject("");
@@ -1234,6 +975,8 @@ function SendEmailModal({ open, opp, whatsapps, onClose }: SendEmailModalProps) 
         ...(ccList?.length && { cc: ccList }),
         ...(bccList?.length && { bcc: bccList }),
         ...(attachments?.length && { attachments }),
+        // Variáveis da mensagem rápida trocadas no servidor (backend antigo ignora)
+        applyVariables: true,
       });
       toast.success(t("emailSentOk"));
       onClose();
@@ -1256,15 +999,15 @@ function SendEmailModal({ open, opp, whatsapps, onClose }: SendEmailModalProps) 
           </DialogTitle>
         </DialogHeader>
         <div className="space-y-3 overflow-y-auto flex-1 pr-1">
-          {/* Canal webmail */}
+          {/* Canal de e-mail (webmail ou e-mail) */}
           <div>
             <Label className="text-xs mb-1 block">{t("emailChannel")}</Label>
             <Select value={channelId} onValueChange={setChannelId}>
               <SelectTrigger><SelectValue placeholder={t("emailChannelPlaceholder")} /></SelectTrigger>
               <SelectContent>
-                {webmailChannels.length === 0
+                {emailChannels.length === 0
                   ? <SelectItem value="__none" disabled>{t("noWebmailSessions")}</SelectItem>
-                  : webmailChannels.map(w => (
+                  : emailChannels.map(w => (
                     <SelectItem key={w.id} value={String(w.id)}>{w.name}</SelectItem>
                   ))
                 }
@@ -1298,8 +1041,18 @@ function SendEmailModal({ open, opp, whatsapps, onClose }: SendEmailModalProps) 
 
           {/* Mensagem */}
           <div>
-            <Label className="text-xs mb-1 block">{t("emailBody")} *</Label>
-            <Textarea value={body} onChange={e => setBody(e.target.value)} placeholder={t("emailBodyPlaceholder")} rows={5} className="resize-none" />
+            <Label htmlFor="funil-email-body" className="text-xs mb-1 block">{t("emailBody")} *</Label>
+            <QuickReplyTextarea
+              id="funil-email-body"
+              value={body}
+              onChange={setBody}
+              quickReplies={quickReplies}
+              quickRepliesLoading={quickRepliesLoading}
+              placeholder={t("emailBodyPlaceholder")}
+              textareaRows={5}
+              className="resize-none"
+              warnings={quickReplyWarnings}
+            />
           </div>
 
           {/* Anexos */}
@@ -1354,25 +1107,39 @@ function SendEmailModal({ open, opp, whatsapps, onClose }: SendEmailModalProps) 
 
 interface OpportunityCardProps {
   opp: Opportunity;
+  isRestricted: boolean;
   onClick: () => void;
   onDelete: () => void;
   onSendMessage?: () => void;
   onSendEmail?: () => void;
-  onOpenCrm?: () => void;
+  onTicketClick: () => void;
+  canStartTicket: boolean;
+  ticketLoading?: boolean;
 }
 
-function OpportunityCardComp({ opp, onClick, onDelete, onSendMessage, onSendEmail, onOpenCrm }: OpportunityCardProps) {
+// Card enxuto (D9): no topo enviar mensagem, e-mail, espiar e "⋯"; embaixo o selo do
+// atendimento. Os diálogos de atendimento vivem uma vez na página, nunca no card.
+function OpportunityCardComp({
+  opp, isRestricted, onClick, onDelete, onSendMessage, onSendEmail, onTicketClick, canStartTicket, ticketLoading,
+}: OpportunityCardProps) {
   const t = useTranslations("funilKanbanPage");
   const tCrm = useTranslations("contactCrm");
   const router = useRouter();
-  const isRestricted = useAuthStore((s) => s.isRestrictedUser());
   // PLANO_CRM_CONTATO F1 (D16): perfil do contato a partir do card; restrito nao tem acesso ao perfil
   const profileContactId = opp.contact?.id ?? opp.contactId;
   const { isLiveMode } = useLiveMode();
+  const { formatMoney } = useRegion();
+  // Restrito (D16): nome cortado em 5 letras e sem número, como no painel do atendimento
+  const contactName = restrictedContactName(opp.contact?.name, isRestricted);
+  const contactIdentity = !isRestricted && opp.contact ? displayContactIdentity(opp.contact) : "";
   return (
     <Card
       className="cursor-pointer hover:-translate-y-0.5 transition-transform border border-border/60 mb-2"
-      onClick={onClick}
+      onClick={(e) => {
+        // Clique dentro de portal (menu, espiar) sobe pela árvore do React até aqui
+        if (!(e.currentTarget as HTMLElement).contains(e.target as Node)) return;
+        onClick();
+      }}
     >
       <CardContent className="p-3 flex flex-col gap-2">
         {/* Header */}
@@ -1381,94 +1148,101 @@ function OpportunityCardComp({ opp, onClick, onDelete, onSendMessage, onSendEmai
             {statusLabel(opp.status, t)}
           </span>
           <div className="flex items-center gap-1 shrink-0">
-            {opp.contact?.number && onSendMessage && (
+            {!isRestricted && opp.contact?.number && onSendMessage && (
               <button
                 type="button"
                 className="text-muted-foreground hover:text-green-600 transition-colors"
                 onClick={e => { e.stopPropagation(); onSendMessage(); }}
                 title={t("sendMessage")}
+                aria-label={t("sendMessage")}
               >
                 <MessageCircle className="h-3.5 w-3.5" />
               </button>
             )}
-            {opp.contact?.email && onSendEmail && (
+            {!isRestricted && opp.contact?.email && onSendEmail && (
               <button
                 type="button"
                 className="text-muted-foreground hover:text-blue-600 transition-colors"
                 onClick={e => { e.stopPropagation(); onSendEmail(); }}
                 title={t("sendEmail")}
+                aria-label={t("sendEmail")}
               >
                 <Mail className="h-3.5 w-3.5" />
               </button>
             )}
             {opp.contact?.id && (
-              <SpyContactMessagesPopover contactId={opp.contact.id} contactName={opp.contact.name}>
+              <SpyContactMessagesPopover contactId={opp.contact.id} contactName={contactName}>
                 <button
                   type="button"
                   className="text-muted-foreground hover:text-cyan-600 transition-colors"
                   onClick={e => e.stopPropagation()}
                   title={t("viewTickets")}
+                  aria-label={t("viewTickets")}
                 >
                   <Eye className="h-3.5 w-3.5" />
                 </button>
               </SpyContactMessagesPopover>
             )}
-            {opp.contact?.id && onOpenCrm && (
-              <button
-                type="button"
-                className="text-muted-foreground hover:text-violet-600 transition-colors"
-                onClick={e => { e.stopPropagation(); onOpenCrm(); }}
-                title={t("openCrmDialog")}
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <button
+                  type="button"
+                  className="text-muted-foreground hover:text-foreground transition-colors"
+                  onClick={e => e.stopPropagation()}
+                  title={t("moreActions")}
+                  aria-label={t("moreActions")}
+                >
+                  <MoreHorizontal className="h-3.5 w-3.5" />
+                </button>
+              </DropdownMenuTrigger>
+              {/* Menu em portal: clique e toque subiriam pela árvore do React até o card
+                  (abrindo a ficha) e até o wrapper do arrastar */}
+              <DropdownMenuContent
+                align="end"
+                className="min-w-[10rem]"
+                onClick={e => e.stopPropagation()}
+                onTouchStart={e => e.stopPropagation()}
               >
-                <MessagesSquare className="h-3.5 w-3.5" />
-              </button>
-            )}
-            {!!profileContactId && !isRestricted && (
-              <button
-                type="button"
-                className="text-muted-foreground hover:text-primary transition-colors"
-                onClick={e => { e.stopPropagation(); router.push(`/contatos/${profileContactId}`); }}
-                title={tCrm("viewProfile")}
-                aria-label={tCrm("viewProfile")}
-              >
-                <UserRound className="h-3.5 w-3.5" />
-              </button>
-            )}
-            <button
-              type="button"
-              className="text-muted-foreground hover:text-destructive transition-colors"
-              onClick={e => { e.stopPropagation(); onDelete(); }}
-            >
-              <Trash2 className="h-3.5 w-3.5" />
-            </button>
+                {!!profileContactId && !isRestricted && (
+                  <DropdownMenuItem onClick={() => router.push(`/contatos/${profileContactId}`)}>
+                    <UserRound className="mr-2 h-4 w-4" />
+                    {tCrm("viewProfile")}
+                  </DropdownMenuItem>
+                )}
+                <DropdownMenuItem className="text-destructive focus:text-destructive" onClick={onDelete}>
+                  <Trash2 className="mr-2 h-4 w-4" />
+                  {t("deleteAction")}
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
           </div>
         </div>
 
         {/* Title & Value */}
         <div>
           <p className="text-sm font-semibold leading-snug">#{opp.id} - {opp.name}</p>
-          <p className="text-sm font-bold text-green-600 mt-0.5">{formatValue(opp.value)}</p>
+          <p className="text-sm font-bold text-green-600 mt-0.5">{formatValue(opp.value, formatMoney)}</p>
         </div>
 
         {/* Contact */}
         {opp.contact && (
           <div className="flex items-center gap-2">
             <ContactAvatar
-              name={opp.contact.name}
+              name={contactName}
               profilePicUrl={opp.contact.profilePicUrl}
               sizeClassName="w-7 h-7 shrink-0"
               fallbackClassName="bg-primary/20 text-primary text-xs font-bold"
               blur={isLiveMode}
             />
             <div className="min-w-0">
-              {opp.contact.name && (
+              {contactName && (
                 <div className={cn("flex items-center gap-1 text-xs text-muted-foreground truncate", isLiveMode && "live-blur-text")}>
-                  <User className="h-3 w-3 shrink-0" />{opp.contact.name}
+                  <User className="h-3 w-3 shrink-0" />{contactName}
                 </div>
               )}
-              {displayContactIdentity(opp.contact) && (
+              {contactIdentity && (
                 <div className={cn("flex items-center gap-1 text-xs text-muted-foreground truncate", isLiveMode && "live-blur-text")}>
-                  <Phone className="h-3 w-3 shrink-0" />{displayContactIdentity(opp.contact)}
+                  <Phone className="h-3 w-3 shrink-0" />{contactIdentity}
                 </div>
               )}
             </div>
@@ -1490,6 +1264,15 @@ function OpportunityCardComp({ opp, onClick, onDelete, onSendMessage, onSendEmai
             </div>
           )}
         </div>
+
+        {/* Selo do atendimento + Abrir/Iniciar (D1, D9); sem contato o selo não aparece */}
+        <OpportunityTicketBadge
+          variant="card"
+          contact={opp.contact}
+          onClick={onTicketClick}
+          canStart={canStartTicket}
+          loading={ticketLoading}
+        />
       </CardContent>
     </Card>
   );
@@ -1502,7 +1285,6 @@ interface FilterBarProps {
   onFiltersChange: (f: Partial<Filters>) => void;
   onApply: () => void;
   onClear: () => void;
-  pipelines: Pipeline[];
   stages: Stage[];
   responsaveis: Responsible[];
   tagsList: TagOption[];
@@ -1510,22 +1292,35 @@ interface FilterBarProps {
   kanbansList: KanbanOption[];
 }
 
-function FilterBar({ filters, onFiltersChange, onApply, onClear, pipelines, stages, responsaveis, tagsList, walletsList, kanbansList }: FilterBarProps) {
+// O funil saiu daqui: é o seletor do topo, sempre visível (D4).
+function FilterBar({ filters, onFiltersChange, onApply, onClear, stages, responsaveis, tagsList, walletsList, kanbansList }: FilterBarProps) {
   const t = useTranslations("funilKanbanPage");
   const searchRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [isOpen, setIsOpen] = useState<boolean>(() => {
     if (typeof window === "undefined") return false;
-    return localStorage.getItem("funilKanbanFiltersOpen") === "true";
+    try {
+      return localStorage.getItem("funilKanbanFiltersOpen") === "true";
+    } catch {
+      return false;
+    }
   });
 
   useEffect(() => {
     if (typeof window === "undefined") return;
-    localStorage.setItem("funilKanbanFiltersOpen", String(isOpen));
+    try {
+      localStorage.setItem("funilKanbanFiltersOpen", String(isOpen));
+    } catch {
+      // sem armazenamento: o painel só não lembra se estava aberto
+    }
   }, [isOpen]);
 
+  useEffect(() => () => {
+    if (searchRef.current) clearTimeout(searchRef.current);
+  }, []);
+
+  // O funil escolhido não conta como filtro (não dá para "tirar" o funil)
   const activeCount = useMemo(() => {
     let c = 0;
-    if (filters.pipelineId != null) c++;
     if (filters.stageId != null) c++;
     if (filters.responsibleId != null) c++;
     // "open" é o status default — não conta como filtro ativo
@@ -1540,9 +1335,10 @@ function FilterBar({ filters, onFiltersChange, onApply, onClear, pipelines, stag
     return c;
   }, [filters]);
 
-  const filteredStages = filters.pipelineId
+  // Só as etapas do funil escolhido
+  const filteredStages = filters.pipelineId != null
     ? stages.filter(s => String(s.pipelineId) === String(filters.pipelineId))
-    : stages;
+    : [];
 
   function handleSearchChange(val: string) {
     onFiltersChange({ searchTerm: val });
@@ -1582,26 +1378,8 @@ function FilterBar({ filters, onFiltersChange, onApply, onClear, pipelines, stag
       {isOpen && (
       <div className="border-t p-4 space-y-3">
       {/* Row 1 */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
-        {/* Pipeline */}
-        <div>
-          <Label className="text-xs mb-1 block">{t("filterPipeline")}</Label>
-          <Select
-            value={filters.pipelineId ? String(filters.pipelineId) : "all"}
-            onValueChange={v => {
-              onFiltersChange({ pipelineId: v === "all" ? null : Number(v), stageId: null });
-              setTimeout(() => onApply(), 0);
-            }}
-          >
-            <SelectTrigger className="h-8 text-xs"><SelectValue placeholder={t("filterAll")} /></SelectTrigger>
-            <SelectContent>
-              <SelectItem value="all">{t("filterAll")}</SelectItem>
-              {pipelines.map(p => <SelectItem key={p.id} value={String(p.id)}>{p.name}</SelectItem>)}
-            </SelectContent>
-          </Select>
-        </div>
-
-        {/* Etapa */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+        {/* Etapa (do funil escolhido no topo) */}
         <div>
           <Label className="text-xs mb-1 block">{t("filterStage")}</Label>
           <Select
@@ -1781,6 +1559,7 @@ function FilterBar({ filters, onFiltersChange, onApply, onClear, pipelines, stag
 
 // ─── Main Kanban Page ─────────────────────────────────────────────────────────
 
+// pipelineId aqui é sempre o funil escolhido no seletor do topo (um funil por vez, D4).
 const DEFAULT_FILTERS: Filters = {
   pipelineId: null,
   stageId: null,
@@ -1799,6 +1578,72 @@ const DEFAULT_FILTERS: Filters = {
 
 const DEFAULT_PAGINATION: Pagination = { page: 1, limit: 100, total: 0 };
 
+// Último funil escolhido, por usuário: o logout não limpa chaves novas, e dois usuários
+// no mesmo navegador não herdam o funil um do outro.
+const PIPELINE_STORAGE_PREFIX = "funilKanbanPipeline:";
+
+function readStoredPipelineId(userId: number | null | undefined): number | null {
+  if (userId == null) return null;
+  try {
+    const raw = window.localStorage.getItem(`${PIPELINE_STORAGE_PREFIX}${userId}`);
+    if (!raw || !/^\d+$/.test(raw)) return null;
+    const n = Number(raw);
+    return n > 0 ? n : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeStoredPipelineId(userId: number | null | undefined, pipelineId: number) {
+  if (userId == null) return;
+  try {
+    window.localStorage.setItem(`${PIPELINE_STORAGE_PREFIX}${userId}`, String(pipelineId));
+  } catch {
+    // navegador sem armazenamento: o quadro só não lembra o funil
+  }
+}
+
+function positiveIntParam(params: URLSearchParams, key: string): number | null {
+  const raw = params.get(key);
+  if (!raw || !/^\d+$/.test(raw)) return null;
+  const n = Number(raw);
+  return n > 0 ? n : null;
+}
+
+// ?pipeline= (sempre) e &opportunity= (enquanto a ficha está aberta) sem passar pelo
+// roteador: router.replace iria ao servidor (layout raiz com revalidate = 0).
+function syncBoardUrl(pipelineId: number | null, opportunityId: number | null) {
+  if (typeof window === "undefined") return;
+  try {
+    const params = new URLSearchParams(window.location.search);
+    if (pipelineId != null) params.set("pipeline", String(pipelineId));
+    else params.delete("pipeline");
+    if (opportunityId != null) params.set("opportunity", String(opportunityId));
+    else params.delete("opportunity");
+    const qs = params.toString();
+    const next = `${window.location.pathname}${qs ? `?${qs}` : ""}${window.location.hash}`;
+    const current = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+    if (next !== current) window.history.replaceState(null, "", next);
+  } catch {
+    // a URL é só o link para colar; nunca derruba o quadro
+  }
+}
+
+/** 1ª etapa do funil pela ordem (a nova oportunidade nasce nela) */
+function firstStageOf(stages: Stage[], pipelineId: number | null): number | null {
+  if (pipelineId == null) return null;
+  const sorted = stages
+    .filter(s => Number(s.pipelineId) === Number(pipelineId))
+    .sort((a, b) =>
+      (a.order ?? Number.MAX_SAFE_INTEGER) - (b.order ?? Number.MAX_SAFE_INTEGER) || Number(a.id) - Number(b.id));
+  return sorted[0]?.id ?? null;
+}
+
+interface BoardLookups {
+  pipelines: Pipeline[];
+  stages: Stage[];
+}
+
 export default function FunilKanbanPage() {
   // Gate isolado num wrapper: sair com `return` no meio dos hooks do conteúdo
   // quebrava o React ("Rendered fewer hooks than expected") quando a permissão
@@ -1812,13 +1657,37 @@ function FunilKanbanPageContent() {
   const t = useTranslations("funilKanbanPage");
   const tCommon = useTranslations("common");
   const { user, supervisorAdmin } = useAuthStore();
-  const [loading, setLoading] = useState(true);
+  const isRestricted = useAuthStore((s) => s.isRestrictedUser());
+  // Perfil personalizado sem "criar atendimento" nem "envio em massa": o /individual recusa (D12)
+  const canStartConversation = useAuthStore((s) => s.canStartConversation());
+  const { formatMoney, country: regionCountry } = useRegion();
+  // Funil escolhido resolvido (URL, salvo ou padrão) antes da 1ª busca de oportunidades
+  const [pipelineReady, setPipelineReady] = useState(false);
+  const [lookupsLoading, setLookupsLoading] = useState(true);
+  const [oppsLoading, setOppsLoading] = useState(false);
   const [pipelines, setPipelines] = useState<Pipeline[]>([]);
   const [stages, setStages] = useState<Stage[]>([]);
   const [opportunities, setOpportunities] = useState<Opportunity[]>([]);
   const [responsaveis, setResponsaveis] = useState<Responsible[]>([]);
   const [filters, setFilters] = useState<Filters>({ ...DEFAULT_FILTERS });
   const [pagination, setPagination] = useState<Pagination>({ ...DEFAULT_PAGINATION });
+
+  // Valores atuais para quem roda fora do render (timers do FilterBar, ficha, fluxo de
+  // atendimento). O setTimeout do FilterBar chamava o onApply do render anterior e
+  // aplicava o filtro de antes (a busca ficava sem a última letra).
+  const filtersRef = useRef<Filters>(filters);
+  const paginationRef = useRef<Pagination>(pagination);
+  useEffect(() => { filtersRef.current = filters; }, [filters]);
+  useEffect(() => { paginationRef.current = pagination; }, [pagination]);
+
+  const updateFilters = useCallback((next: Filters) => {
+    filtersRef.current = next;
+    setFilters(next);
+  }, []);
+  const updatePagination = useCallback((next: Pagination) => {
+    paginationRef.current = next;
+    setPagination(next);
+  }, []);
 
   const boardRef = useRef<HTMLDivElement | null>(null);
   const scrollBoard = useCallback((dir: -1 | 1) => {
@@ -1878,9 +1747,14 @@ function FunilKanbanPageContent() {
   // Cancela o loop de auto-scroll no unmount
   useEffect(() => stopEdgeAutoScroll, [stopEdgeAutoScroll]);
 
-  const [formOpen, setFormOpen] = useState(false);
-  const [detailsOpen, setDetailsOpen] = useState(false);
-  const [selectedOpp, setSelectedOpp] = useState<Opportunity | null>(null);
+  // Google Agenda na casca: o diálogo de criar fecha antes da pergunta "criar evento?"
+  const gcal = useOpportunityCalendarEvent();
+  const pendingEventRef = useRef<OpportunityEventData | null>(null);
+  const [createOpen, setCreateOpen] = useState(false);
+
+  // Ficha da oportunidade (clique no card, alertas e ?opportunity=)
+  const [sheetOpp, setSheetOpp] = useState<Opportunity | null>(null);
+  const [sheetOpen, setSheetOpen] = useState(false);
 
   const [deleteConfirm, setDeleteConfirm] = useState<Opportunity | null>(null);
   const [deleting, setDeleting] = useState(false);
@@ -1898,7 +1772,6 @@ function FunilKanbanPageContent() {
   const [walletsList, setWalletsList] = useState<WalletOption[]>([]);
   const [kanbansList, setKanbansList] = useState<KanbanOption[]>([]);
   const [msgModal, setMsgModal] = useState<{ open: boolean; opp: Opportunity | null }>({ open: false, opp: null });
-  const [crmOpp, setCrmOpp] = useState<Opportunity | null>(null);
   const [emailModal, setEmailModal] = useState<{ open: boolean; opp: Opportunity | null }>({ open: false, opp: null });
   const [exportTipo, setExportTipo] = useState<"oportunidades" | "pipelines" | "etapas" | "">("");
 
@@ -1906,31 +1779,11 @@ function FunilKanbanPageContent() {
   const [draggingOpp, setDraggingOpp] = useState<Opportunity | null>(null);
   const [dragOverStage, setDragOverStage] = useState<number | null>(null);
 
-  const loadData = useCallback(async (f: Filters = filters, pg: Pagination = pagination) => {
-    setLoading(true);
+  // Listas de apoio: só na abertura e no "Atualizar" (antes iam junto a cada filtro)
+  const loadLookups = useCallback(async (): Promise<BoardLookups | null> => {
+    setLookupsLoading(true);
     try {
-      const params: Record<string, unknown> = {
-        page: pg.page,
-        limit: pg.limit,
-        ordenacao: f.ordenacao,
-        // Includes opt-in para enriquecer Contact com tags/wallets/kanban
-        include: "tags,wallets,kanban",
-      };
-      if (f.pipelineId) params.pipelineId = f.pipelineId;
-      if (f.stageId) params.stageId = f.stageId;
-      if (f.responsibleId) params.responsibleId = f.responsibleId;
-      if (f.status) params.status = f.status;
-      if (f.valorMin != null) params.valorMin = f.valorMin;
-      if (f.valorMax != null) params.valorMax = f.valorMax;
-      if (f.dataInicio) params.startDate = f.dataInicio;
-      if (f.dataFim) params.endDate = f.dataFim;
-      if (f.searchTerm) params.searchTerm = f.searchTerm;
-      if (f.tagId) params.tagId = f.tagId;
-      if (f.walletUserId) params.walletUserId = f.walletUserId;
-      if (f.kanbanId) params.kanbanId = f.kanbanId;
-
-      const [oppsRes, stagesRes, pipesRes, usersRes, whatsRes, tagsRes, walletsRes, kanbansRes] = await Promise.all([
-        fetchOpportunities(params),
+      const [stagesRes, pipesRes, usersRes, whatsRes, tagsRes, walletsRes, kanbansRes] = await Promise.all([
         fetchStages({ page: 1, limit: 1000 }),
         fetchPipelines(),
         fetchAllUsers(),
@@ -1940,20 +1793,10 @@ function FunilKanbanPageContent() {
         fetchKanbans().catch(() => ({ data: [] as KanbanOption[] })),
       ]);
 
-      const rawOpps = oppsRes.data?.data ?? (Array.isArray(oppsRes.data) ? oppsRes.data : []);
-      setOpportunities(rawOpps.map((o: Opportunity) => ({
-        ...o,
-        stageId: Number(o.stageId),
-        pipelineId: Number(o.pipelineId),
-        value: Number(o.value),
-        status: o.status ? o.status.toLowerCase() : "",
-      })));
-      setPagination(p => ({ ...p, total: oppsRes.data?.pagination?.total ?? rawOpps.length }));
-
-      const rawStages = stagesRes.data?.data ?? (Array.isArray(stagesRes.data) ? stagesRes.data : []);
+      const rawStages: Stage[] = stagesRes.data?.data ?? (Array.isArray(stagesRes.data) ? stagesRes.data : []);
       setStages(rawStages);
 
-      const rawPipes = pipesRes.data?.data ?? (Array.isArray(pipesRes.data) ? pipesRes.data : []);
+      const rawPipes: Pipeline[] = pipesRes.data?.data ?? (Array.isArray(pipesRes.data) ? pipesRes.data : []);
       setPipelines(rawPipes);
 
       const rawUsers = usersRes.data?.users ?? (Array.isArray(usersRes.data) ? usersRes.data : []);
@@ -1969,21 +1812,165 @@ function FunilKanbanPageContent() {
       setTagsList(Array.isArray(tagsRes.data) ? tagsRes.data : []);
       setWalletsList(Array.isArray(walletsRes.data) ? walletsRes.data : []);
       setKanbansList(Array.isArray(kanbansRes.data) ? kanbansRes.data : []);
+      return { pipelines: rawPipes, stages: rawStages };
     } catch {
       toast.error(t("loadError"));
+      return null;
     } finally {
-      setLoading(false);
+      setLookupsLoading(false);
     }
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [t]);
 
-  useEffect(() => { loadData(DEFAULT_FILTERS, DEFAULT_PAGINATION); }, [loadData]);
+  // Oportunidades do funil escolhido: 1 request por filtro/funil/página/gravação.
+  // Só a resposta da última busca vale (troca rápida de filtro não volta atrás).
+  const oppsRequestSeq = useRef(0);
+  const loadOpportunities = useCallback(async (f: Filters, pg: Pagination) => {
+    const seq = ++oppsRequestSeq.current;
+    if (f.pipelineId == null) {
+      setOpportunities([]);
+      setPagination(p => ({ ...p, total: 0 }));
+      setOppsLoading(false);
+      return;
+    }
+    setOppsLoading(true);
+    try {
+      const params: Record<string, unknown> = {
+        page: pg.page,
+        limit: pg.limit,
+        ordenacao: f.ordenacao,
+        pipelineId: f.pipelineId,
+        // Includes opt-in: tags/carteiras/kanban do contato e o atendimento ativo (selo do card).
+        // Backend antigo descarta `activeTicket` e o card fica sem selo.
+        include: "tags,wallets,kanban,activeTicket",
+      };
+      if (f.stageId) params.stageId = f.stageId;
+      if (f.responsibleId) params.responsibleId = f.responsibleId;
+      if (f.status) params.status = f.status;
+      if (f.valorMin != null) params.valorMin = f.valorMin;
+      if (f.valorMax != null) params.valorMax = f.valorMax;
+      if (f.dataInicio) params.startDate = f.dataInicio;
+      if (f.dataFim) params.endDate = f.dataFim;
+      if (f.searchTerm) params.searchTerm = f.searchTerm;
+      if (f.tagId) params.tagId = f.tagId;
+      if (f.walletUserId) params.walletUserId = f.walletUserId;
+      if (f.kanbanId) params.kanbanId = f.kanbanId;
 
-  // Filtered & visible stages
-  const etapasVisiveis = (() => {
-    if (filters.stageId != null) return stages.filter(s => Number(s.id) === Number(filters.stageId));
-    if (filters.pipelineId != null) return stages.filter(s => Number(s.pipelineId) === Number(filters.pipelineId));
-    return stages;
-  })();
+      const oppsRes = await fetchOpportunities(params);
+      if (seq !== oppsRequestSeq.current) return;
+      const rawOpps: Opportunity[] = oppsRes.data?.data ?? (Array.isArray(oppsRes.data) ? oppsRes.data : []);
+      setOpportunities(rawOpps.map((o) => normalizeOpportunity(o)));
+      setPagination(p => ({ ...p, total: oppsRes.data?.pagination?.total ?? rawOpps.length }));
+    } catch {
+      if (seq === oppsRequestSeq.current) toast.error(t("loadError"));
+    } finally {
+      if (seq === oppsRequestSeq.current) setOppsLoading(false);
+    }
+  }, [t]);
+
+  const reloadOpportunities = useCallback(
+    () => loadOpportunities(filtersRef.current, paginationRef.current),
+    [loadOpportunities]
+  );
+
+  // Abertura: URL e funil resolvidos UMA vez (o ref segura o StrictMode e as trocas de
+  // dependência). Ordem: ?opportunity= → ?pipeline= → salvo do usuário → mais antigo com etapas.
+  const initDoneRef = useRef(false);
+  useEffect(() => {
+    if (initDoneRef.current) return;
+    initDoneRef.current = true;
+    (async () => {
+      let deepOppId: number | null = null;
+      let urlPipelineId: number | null = null;
+      try {
+        const params = new URLSearchParams(window.location.search);
+        deepOppId = positiveIntParam(params, "opportunity");
+        urlPipelineId = positiveIntParam(params, "pipeline");
+      } catch {
+        // sem URL legível: segue pelo salvo/padrão
+      }
+      const deepOppPromise: Promise<Opportunity | null> = deepOppId != null
+        ? fetchOpportunity(deepOppId, { include: "activeTicket" })
+          .then((res) => {
+            const data = res?.data as Opportunity | undefined;
+            return data && typeof data === "object" && data.id ? normalizeOpportunity(data) : null;
+          })
+          .catch(() => null)
+        : Promise.resolve(null);
+      const [lookups, deepOpp] = await Promise.all([loadLookups(), deepOppPromise]);
+      if (deepOppId != null && !deepOpp) toast.error(t("opportunityNotFound"));
+
+      const pipes = lookups?.pipelines ?? [];
+      const inList = (id: number | null | undefined) =>
+        id != null && pipes.some(p => Number(p.id) === Number(id));
+      let pipelineId: number | null = null;
+      if (deepOpp && inList(deepOpp.pipelineId)) pipelineId = Number(deepOpp.pipelineId);
+      else if (inList(urlPipelineId)) pipelineId = urlPipelineId;
+      else {
+        const stored = readStoredPipelineId(useAuthStore.getState().user?.userId);
+        if (inList(stored)) pipelineId = stored;
+      }
+      if (pipelineId == null) pipelineId = pickDefaultPipeline(pipes, lookups?.stages ?? [])?.id ?? null;
+
+      const f: Filters = { ...filtersRef.current, pipelineId, stageId: null };
+      updateFilters(f);
+      if (deepOpp) {
+        setSheetOpp(deepOpp);
+        setSheetOpen(true);
+      }
+      setPipelineReady(true);
+      loadOpportunities(f, paginationRef.current);
+    })();
+  }, [loadLookups, loadOpportunities, updateFilters, t]);
+
+  // URL acompanha o funil e a ficha aberta (link para colar)
+  const openSheetId = sheetOpen ? sheetOpp?.id ?? null : null;
+  useEffect(() => {
+    if (!pipelineReady) return;
+    syncBoardUrl(filters.pipelineId, openSheetId);
+  }, [pipelineReady, filters.pipelineId, openSheetId]);
+
+  // Atendimento ativo relido no clique do selo: corrige o contato no card e na ficha
+  const handleActiveTicketRefreshed = useCallback((opportunityId: number, contact: OpportunityContact) => {
+    // Mesmo contato: mantém etiquetas/carteiras/kanban que só a lista traz. Contato trocado
+    // por outra pessoa depois da carga: substitui, sem misturar dados dos dois.
+    const merge = (o: Opportunity): Opportunity => ({
+      ...o,
+      contact: o.contact && Number(o.contact.id) === Number(contact.id) ? { ...o.contact, ...contact } : contact,
+    });
+    setOpportunities(list => list.map(o => (o.id === opportunityId ? merge(o) : o)));
+    setSheetOpp(cur => (cur && cur.id === opportunityId ? merge(cur) : cur));
+  }, []);
+  const ticketFlow = useOpportunityTicketFlow({ onActiveTicketRefreshed: handleActiveTicketRefreshed });
+
+  const openSheet = useCallback((opp: Opportunity) => {
+    setSheetOpp(opp);
+    setSheetOpen(true);
+  }, []);
+
+  // Ficha gravou: mesma oportunidade (já com o contato preservado) na lista e na ficha
+  const handleOppChanged = useCallback((opp: Opportunity) => {
+    setOpportunities(list => list.map(o => (o.id === opp.id ? opp : o)));
+    setSheetOpp(cur => (cur && cur.id === opp.id ? opp : cur));
+  }, []);
+
+  const handleOppDeleted = useCallback((id: number) => {
+    setOpportunities(list => list.filter(o => o.id !== id));
+    setSheetOpen(false);
+    loadOpportunities(filtersRef.current, paginationRef.current);
+  }, [loadOpportunities]);
+
+  // Etapas do funil escolhido (nunca mais as de todos os funis misturadas)
+  const etapasVisiveis = useMemo(() => {
+    if (filters.pipelineId == null) return [] as Stage[];
+    const doFunil = stages.filter(s => Number(s.pipelineId) === Number(filters.pipelineId));
+    if (filters.stageId != null) return doFunil.filter(s => Number(s.id) === Number(filters.stageId));
+    return doFunil;
+  }, [stages, filters.pipelineId, filters.stageId]);
+
+  const createDefaultStageId = useMemo(
+    () => firstStageOf(stages, filters.pipelineId),
+    [stages, filters.pipelineId]
+  );
 
   function oppsForStage(stageId: number) {
     return opportunities.filter(o => Number(o.stageId) === Number(stageId));
@@ -1996,23 +1983,64 @@ function FunilKanbanPageContent() {
   const isPartialPage = pagination.total > opportunities.length;
 
   function applyFilters(newFilters: Filters) {
-    const pg = { ...pagination, page: 1 };
-    setPagination(pg);
-    loadData(newFilters, pg);
+    const pg = { ...paginationRef.current, page: 1 };
+    updatePagination(pg);
+    loadOpportunities(newFilters, pg);
   }
 
   function handleFilterChange(partial: Partial<Filters>) {
-    setFilters(f => ({ ...f, ...partial }));
+    updateFilters({ ...filtersRef.current, ...partial });
   }
 
+  // "Limpar filtros" mantém o funil escolhido
   function handleClearFilters() {
-    const cleared = { ...DEFAULT_FILTERS };
-    setFilters(cleared);
+    const cleared: Filters = { ...DEFAULT_FILTERS, pipelineId: filtersRef.current.pipelineId };
+    updateFilters(cleared);
     applyFilters(cleared);
   }
 
   function handleApplyFilters() {
-    applyFilters(filters);
+    applyFilters(filtersRef.current);
+  }
+
+  // Trocar de funil: lembra a escolha, zera etapa e página e busca só as oportunidades
+  function handlePipelineChange(pipelineId: number) {
+    if (Number(filtersRef.current.pipelineId) === Number(pipelineId)) return;
+    writeStoredPipelineId(useAuthStore.getState().user?.userId, pipelineId);
+    const f: Filters = { ...filtersRef.current, pipelineId, stageId: null };
+    updateFilters(f);
+    setOpportunities([]);
+    applyFilters(f);
+  }
+
+  async function handleRefresh() {
+    const [lookups] = await Promise.all([
+      loadLookups(),
+      loadOpportunities(filtersRef.current, paginationRef.current),
+    ]);
+    if (!lookups) return;
+    const cur = filtersRef.current;
+    const pipelineOk = cur.pipelineId != null && lookups.pipelines.some(p => Number(p.id) === Number(cur.pipelineId));
+    if (pipelineOk) {
+      // Etapa filtrada que deixou de existir: volta para todas as etapas do funil
+      const stageOk = cur.stageId == null || lookups.stages.some(s =>
+        Number(s.id) === Number(cur.stageId) && Number(s.pipelineId) === Number(cur.pipelineId));
+      if (!stageOk) {
+        const f: Filters = { ...cur, stageId: null };
+        updateFilters(f);
+        applyFilters(f);
+      }
+      return;
+    }
+    // Funil escolhido apagado (ou a 1ª carga falhou): salvo do usuário, senão o padrão
+    const stored = readStoredPipelineId(useAuthStore.getState().user?.userId);
+    const pipelineId = stored != null && lookups.pipelines.some(p => Number(p.id) === stored)
+      ? stored
+      : pickDefaultPipeline(lookups.pipelines, lookups.stages)?.id ?? null;
+    const f: Filters = { ...cur, pipelineId, stageId: null };
+    updateFilters(f);
+    setOpportunities([]);
+    applyFilters(f);
   }
 
   function handleExportCSV() {
@@ -2037,7 +2065,7 @@ function FunilKanbanPageContent() {
         return [
           String(o.id),
           o.name ?? "",
-          Number(o.value ?? 0).toFixed(2).replace(".", ","),
+          csvDecimal(o.value, regionCountry),
           o.description ?? "",
           statusLabel(o.status, t),
           pipeline?.name ?? (o.pipelineId ? String(o.pipelineId) : ""),
@@ -2065,7 +2093,8 @@ function FunilKanbanPageContent() {
       return;
     }
 
-    const rows = [headers.join(","), ...linhas.map(l => l.map(csvEscape).join(","))];
+    const sep = csvDelimiter(regionCountry);
+    const rows = [headers.join(sep), ...linhas.map(l => l.map(csvEscape).join(sep))];
     const blob = new Blob(["\uFEFF" + rows.join("\n")], { type: "text/csv;charset=utf-8;" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
@@ -2076,18 +2105,21 @@ function FunilKanbanPageContent() {
   }
 
   function openCreateForm() {
-    setSelectedOpp(null);
-    setFormOpen(true);
+    pendingEventRef.current = null;
+    setCreateOpen(true);
   }
 
-  function openEditForm(opp: Opportunity) {
-    setSelectedOpp(opp);
-    setFormOpen(true);
-  }
+  const handleCreated = useCallback((data: OpportunityEventData) => {
+    pendingEventRef.current = data;
+  }, []);
 
-  function openDetails(opp: Opportunity) {
-    setSelectedOpp(opp);
-    setDetailsOpen(true);
+  function handleCreateSaved() {
+    setCreateOpen(false);
+    reloadOpportunities();
+    // Pergunta do Google Agenda depois de fechar o formulário (o hook vive aqui)
+    const eventData = pendingEventRef.current;
+    pendingEventRef.current = null;
+    if (eventData) gcal.askToCreateEvent(eventData);
   }
 
   async function handleDelete() {
@@ -2097,7 +2129,7 @@ function FunilKanbanPageContent() {
       await deleteOpportunity(deleteConfirm.id);
       toast.success(t("deleteSuccess"));
       setDeleteConfirm(null);
-      loadData(filters, pagination);
+      reloadOpportunities();
     } catch {
       toast.error(t("deleteError"));
     } finally {
@@ -2105,9 +2137,12 @@ function FunilKanbanPageContent() {
     }
   }
 
-  // Touch drag-and-drop
-  const { touchStart, touchMove, touchEnd } = useTouchDrag<Opportunity>({
+  // Touch drag-and-drop (segurar o card ~300 ms; antes disso o dedo rola a coluna)
+  const { touchStart } = useTouchDrag<Opportunity>({
     dataAttr: "data-stage-id",
+    // Touch: mesmo auto-scroll de borda do drag nativo, usando a posicao do dedo
+    onMove: (clientX) => updateEdgeAutoScroll(clientX),
+    onEnd: stopEdgeAutoScroll,
     onDrop: (opp, zoneId) => {
       const stageId = Number(zoneId);
       if (opp.stageId === stageId) return;
@@ -2116,22 +2151,10 @@ function FunilKanbanPageContent() {
       setOpportunities(opps => opps.map(o => o.id === opp.id ? { ...o, stageId, pipelineId: payload.pipelineId } : o));
       updateOpportunity(opp.id, payload).catch(() => {
         toast.error(t("moveError"));
-        loadData(filters, pagination);
+        reloadOpportunities();
       });
     },
   });
-
-  // Touch: mesmo auto-scroll de borda do drag nativo, usando a posicao do dedo
-  const handleCardTouchMove = (e: React.TouchEvent) => {
-    touchMove(e);
-    const touch = e.touches[0];
-    if (touch) updateEdgeAutoScroll(touch.clientX);
-  };
-
-  const handleCardTouchEnd = (e: React.TouchEvent) => {
-    stopEdgeAutoScroll();
-    touchEnd(e);
-  };
 
   // Drag-and-drop handlers
   function onDragStart(opp: Opportunity) {
@@ -2164,11 +2187,11 @@ function FunilKanbanPageContent() {
       toast.success(t("moveSuccess"));
     } catch {
       toast.error(t("moveError"));
-      loadData(filters, pagination);
+      reloadOpportunities();
     }
   }
 
-  if (loading && stages.length === 0) {
+  if (!pipelineReady) {
     return (
       <div className="flex gap-4 overflow-x-auto pb-4">
         {Array.from({ length: 4 }).map((_, i) => <Skeleton key={i} className="h-96 w-72 shrink-0" />)}
@@ -2176,21 +2199,51 @@ function FunilKanbanPageContent() {
     );
   }
 
+  const refreshing = lookupsLoading || oppsLoading;
+
   return (
     <div className="flex flex-col gap-2">
-      <OpportunityAlerts opportunities={opportunities} onOpen={(id) => { const opp = opportunities.find((o) => o.id === id); if (opp) openDetails(opp); }} />
-      {/* Top controls — stats + help + ações + scroll na mesma linha */}
+      <OpportunityAlerts
+        opportunities={opportunities}
+        onOpen={(id) => { const opp = opportunities.find((o) => o.id === id); if (opp) openSheet(opp); }}
+      />
+      {/* Top controls — funil + help + stats + ações + scroll na mesma linha */}
       <div className="flex items-center justify-between gap-4 flex-wrap shrink-0">
-        <div className="flex items-center gap-2 min-w-0">
+        <div className="flex items-center gap-2 min-w-0 flex-wrap">
+          <PipelineSelector
+            pipelines={pipelines}
+            value={filters.pipelineId}
+            onChange={handlePipelineChange}
+          />
           <PageHelp
             description={t("helpDesc")}
             sections={[
               { title: t("helpS0T"), items: [t("helpS0I0"), t("helpS0I1"), t("helpS0I2")] },
-              { title: t("helpS1T"), items: [t("helpS1I0"), t("helpS1I1"), t("helpS1I2")] },
+              { title: t("helpS1T"), items: [t("helpS1I0"), tCommon("touchDragHint"), t("helpS1I1"), t("helpS1I2")] },
               { title: t("helpS2T"), items: [t("helpS2I0"), t("helpS2I1")] },
+              { title: t("helpS3T"), items: [t("helpS3I0"), t("helpS3I1"), t("helpS3I2")] },
             ]}
           />
-          <KanbanStatsChips opportunities={opportunities} paginationTotal={pagination.total} />
+          <div className="flex items-center gap-1 min-w-0">
+            <KanbanStatsChips opportunities={opportunities} paginationTotal={pagination.total} />
+            {/* Números do topo (e alertas) são só do funil escolhido (D12) */}
+            <TooltipProvider delayDuration={200}>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <button
+                    type="button"
+                    aria-label={t("alertsScopeHint")}
+                    className="text-muted-foreground/70 hover:text-foreground transition-colors shrink-0"
+                  >
+                    <Info className="h-3.5 w-3.5" />
+                  </button>
+                </TooltipTrigger>
+                <TooltipContent className="max-w-xs text-xs font-normal">
+                  {t("alertsScopeHint")}
+                </TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
+          </div>
         </div>
         <div className="flex gap-2 flex-wrap items-center">
           <Select value={exportTipo} onValueChange={v => setExportTipo(v as typeof exportTipo)}>
@@ -2207,8 +2260,8 @@ function FunilKanbanPageContent() {
             <Download className="mr-2 h-4 w-4" />
             {t("exportCSV")}
           </Button>
-          <Button variant="outline" size="sm" onClick={() => loadData(filters, pagination)} disabled={loading}>
-            <RefreshCw className={`mr-2 h-4 w-4 ${loading ? "animate-spin" : ""}`} />
+          <Button variant="outline" size="sm" onClick={handleRefresh} disabled={refreshing}>
+            <RefreshCw className={`mr-2 h-4 w-4 ${refreshing ? "animate-spin" : ""}`} />
             {t("refresh")}
           </Button>
           <Button size="sm" onClick={openCreateForm}>
@@ -2232,7 +2285,6 @@ function FunilKanbanPageContent() {
         onFiltersChange={handleFilterChange}
         onApply={handleApplyFilters}
         onClear={handleClearFilters}
-        pipelines={pipelines}
         stages={stages}
         responsaveis={responsaveis}
         tagsList={tagsList}
@@ -2248,8 +2300,8 @@ function FunilKanbanPageContent() {
             disabled={pagination.page <= 1}
             onClick={() => {
               const pg = { ...pagination, page: pagination.page - 1 };
-              setPagination(pg);
-              loadData(filters, pg);
+              updatePagination(pg);
+              loadOpportunities(filtersRef.current, pg);
             }}
           >
             <ChevronLeft className="h-4 w-4" />
@@ -2260,8 +2312,8 @@ function FunilKanbanPageContent() {
             disabled={pagination.page >= totalPages}
             onClick={() => {
               const pg = { ...pagination, page: pagination.page + 1 };
-              setPagination(pg);
-              loadData(filters, pg);
+              updatePagination(pg);
+              loadOpportunities(filtersRef.current, pg);
             }}
           >
             <ChevronRight className="h-4 w-4" />
@@ -2270,8 +2322,8 @@ function FunilKanbanPageContent() {
             value={String(pagination.limit)}
             onValueChange={v => {
               const pg = { ...pagination, limit: Number(v), page: 1 };
-              setPagination(pg);
-              loadData(filters, pg);
+              updatePagination(pg);
+              loadOpportunities(filtersRef.current, pg);
             }}
           >
             <SelectTrigger className="w-24 h-8 text-xs"><SelectValue /></SelectTrigger>
@@ -2323,7 +2375,7 @@ function FunilKanbanPageContent() {
                       className="text-xs font-semibold text-green-600 tabular-nums"
                       title={isPartialPage ? t("statOnThisPage") : undefined}
                     >
-                      {formatValue(items.reduce((s, o) => s + (Number(o.value) || 0), 0))}
+                      {formatValue(items.reduce((s, o) => s + (Number(o.value) || 0), 0), formatMoney)}
                       {isPartialPage && (
                         <span className="ml-1 text-[10px] font-normal text-muted-foreground">
                           ({t("statOnThisPage")})
@@ -2345,19 +2397,30 @@ function FunilKanbanPageContent() {
                       <div
                         key={opp.id}
                         draggable
-                        onDragStart={() => onDragStart(opp)}
-                        onTouchStart={(e) => touchStart(e, opp)}
-                        onTouchMove={handleCardTouchMove}
-                        onTouchEnd={handleCardTouchEnd}
-                        className={`touch-none select-none${draggingOpp?.id === opp.id ? " opacity-50" : ""}`}
+                        // Eventos vindos de portal (espiar, menu "⋯") sobem pela árvore do React
+                        // até aqui: só o que nasce dentro do card arrasta
+                        onDragStart={(e) => {
+                          if (!(e.currentTarget as HTMLElement).contains(e.target as Node)) return;
+                          onDragStart(opp);
+                        }}
+                        // Soltar fora de uma etapa (ou Esc) nao chama onDrop: sem isto o card ficava apagado
+                        onDragEnd={() => setDraggingOpp(null)}
+                        onTouchStart={(e) => {
+                          if (!(e.currentTarget as HTMLElement).contains(e.target as Node)) return;
+                          touchStart(e, opp);
+                        }}
+                        className={`select-none [-webkit-touch-callout:none]${draggingOpp?.id === opp.id ? " opacity-50" : ""}`}
                       >
                         <OpportunityCardComp
                           opp={opp}
-                          onClick={() => openEditForm(opp)}
+                          isRestricted={isRestricted}
+                          onClick={() => openSheet(opp)}
                           onDelete={() => setDeleteConfirm(opp)}
-                          onSendMessage={opp.contact?.number ? () => setMsgModal({ open: true, opp }) : undefined}
-                          onSendEmail={opp.contact?.email ? () => setEmailModal({ open: true, opp }) : undefined}
-                          onOpenCrm={opp.contact?.id ? () => setCrmOpp(opp) : undefined}
+                          onSendMessage={!isRestricted && canStartConversation && opp.contact?.number ? () => setMsgModal({ open: true, opp }) : undefined}
+                          onSendEmail={!isRestricted && opp.contact?.email ? () => setEmailModal({ open: true, opp }) : undefined}
+                          onTicketClick={() => ticketFlow.openFromOpportunity(opp)}
+                          canStartTicket={ticketFlow.canStart(opp.contact)}
+                          ticketLoading={ticketFlow.busyOpportunityId === opp.id}
                         />
                       </div>
                     ))
@@ -2378,26 +2441,35 @@ function FunilKanbanPageContent() {
         <Plus className="h-6 w-6" />
       </button>
 
-      {/* Opportunity Form Modal */}
-      <OpportunityForm
-        open={formOpen}
-        onClose={() => { setFormOpen(false); setSelectedOpp(null); }}
-        onSaved={() => loadData(filters, pagination)}
-        oportunidade={selectedOpp}
+      {/* Nova oportunidade (só criação; editar é na ficha) */}
+      <CreateOpportunityDialog
+        open={createOpen}
+        onClose={() => setCreateOpen(false)}
+        onSaved={handleCreateSaved}
+        onCreated={handleCreated}
         pipelines={pipelines}
         stages={stages}
         responsaveis={responsaveis}
+        defaultPipelineId={filters.pipelineId}
+        defaultStageId={createDefaultStageId}
       />
 
-      {/* Opportunity Details Modal */}
-      <OpportunityDetails
-        open={detailsOpen}
-        onClose={() => { setDetailsOpen(false); setSelectedOpp(null); }}
-        onEdit={opp => { setDetailsOpen(false); openEditForm(opp); }}
-        oportunidade={selectedOpp}
+      {/* Ficha da oportunidade (D5-D8) */}
+      <OpportunitySheet
+        open={sheetOpen}
+        onOpenChange={setSheetOpen}
+        opportunity={sheetOpp}
         pipelines={pipelines}
         stages={stages}
         responsaveis={responsaveis}
+        isRestricted={isRestricted}
+        ticketFlow={ticketFlow}
+        gcal={gcal}
+        onChanged={handleOppChanged}
+        onReloadList={reloadOpportunities}
+        onDeleted={handleOppDeleted}
+        onSendMessage={isRestricted ? undefined : (o) => setMsgModal({ open: true, opp: o })}
+        onSendEmail={isRestricted ? undefined : (o) => setEmailModal({ open: true, opp: o })}
       />
 
       {/* Send Message Modal */}
@@ -2440,17 +2512,10 @@ function FunilKanbanPageContent() {
         </DialogContent>
       </Dialog>
 
-      <ContactConversationDialog
-        open={!!crmOpp}
-        onOpenChange={(o) => { if (!o) setCrmOpp(null); }}
-        contact={crmOpp?.contact ? {
-          id: crmOpp.contact.id,
-          name: crmOpp.contact.name || "",
-          number: crmOpp.contact.number ?? undefined,
-          profilePicUrl: crmOpp.contact.profilePicUrl ?? undefined,
-        } : null}
-        onChanged={() => loadData(filters, pagination)}
-      />
+      {/* Diálogos do atendimento e do Google Agenda: uma vez na página, fora de card e ficha
+          (clique dentro de portal sobe pela árvore do React até o pai) */}
+      {ticketFlow.dialogs}
+      {gcal.dialogs}
     </div>
   );
 }

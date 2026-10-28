@@ -4,6 +4,8 @@ import React, { useState, useEffect, useLayoutEffect, useCallback, useRef } from
 import { createPortal } from "react-dom";
 import { displayContactIdentity, displayContactName } from "@/lib/contact-identity";
 import { handleTicketAccessDenied } from "@/lib/ticket-access-denied";
+import { isMetaTokenUnauthorized, getBackendErrorCode, metaRateLimitedMessage } from "@/lib/backend-error-code";
+import { isForwardTargetChannelSupported, isForwardTextOnlyChannel } from "@/lib/forward-channel";
 import { motion, AnimatePresence } from "framer-motion";
 import { useSearchParams, useRouter } from "next/navigation";
 import { useTranslations } from "next-intl";
@@ -23,7 +25,8 @@ import {
   ChevronsDown, ChevronsUp, ChevronLeft, ChevronRight, ChevronUp, ChevronDown,
   Pause, Play, Pin, Check, ChevronsUpDown, HelpCircle, Radio, ShoppingBag, Linkedin,
   Youtube, Music2, WifiOff, Wifi, Hourglass,
-  Plus, Trash2, Route, PhoneIncoming, AlertTriangle,
+  Plus, Trash2, Route, PhoneIncoming, AlertTriangle, History as HistoryIcon,
+  Megaphone, MapPin, MessageSquareShare,
   type LucideIcon,
 } from "lucide-react";
 import { useAuthStore } from "@/stores/auth-store";
@@ -32,7 +35,7 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { Checkbox } from "@/components/ui/checkbox";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Badge } from "@/components/ui/badge";
+import { Badge, badgeVariants } from "@/components/ui/badge";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { TruncateWithTooltip } from "@/components/ui/truncate-with-tooltip";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -50,14 +53,18 @@ import {
 } from "@/components/ui/tooltip";
 import { cn, getInitials, getAvatarColor, isValidHttpUrl } from "@/lib/utils";
 import { ProfilePicPreviewDialog, type ProfilePicPreview } from "@/components/shared/profile-pic-preview-dialog";
+import { PanelAppOpenMenuSub } from "@/components/panel-apps/panel-app-open-menu";
 import { getReadableTextColor } from "@/lib/color-contrast";
 import { normalizeBrPhone } from "@/lib/phone-utils";
+import { examplePhone, looksLikeMissingDialCode } from "@/lib/region";
+import { useRegion } from "@/hooks/use-region";
 import { useTicketStore, type Ticket, type Message } from "@/stores/ticket-store";
 import { useTicketFilterStore } from "@/stores/ticket-filter-store";
 import { useNotificationStore } from "@/stores/notification-store";
 import { useWebphoneStore } from "@/stores/webphone-store";
 import { useUrgencyStore } from "@/stores/urgency-store";
 import { analyzeSentiment } from "@/services/copilot";
+import { clearCopilotAutoPause, isCopilotAutoPaused, noteCopilotAutoFailure } from "@/lib/copilot-auto-pause";
 import { isFeatureNotInPlanError } from "@/lib/api";
 import { useChatDraftStore } from "@/stores/chat-draft-store";
 import { useLiveMode } from "@/hooks/use-live-mode";
@@ -78,7 +85,7 @@ import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import {
   Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList,
 } from "@/components/ui/command";
-import { fetchTickets, fetchTicket, updateTicket, updateTicketForce, pauseTicket, resumeTicket, transferToChatbot, fetchTicketSharedByUser, deleteTicketShared, fetchTicketShared, createTicketShared, updateTicketShared, transferTicketChannel, fetchCrossChannelSiblings, type CrossChannelSibling } from "@/services/tickets";
+import { fetchTickets, fetchTicket, updateTicket, farewellFailed, updateTicketForce, pauseTicket, resumeTicket, transferToChatbot, fetchTicketSharedByUser, deleteTicketShared, fetchTicketShared, createTicketShared, updateTicketShared, transferTicketChannel, fetchCrossChannelSiblings, type CrossChannelSibling, lookupLegacyTickets, type LegacyTicketMatch } from "@/services/tickets";
 import { useTicketSharedSocket } from "@/hooks/use-ticket-shared-socket";
 import {
   fetchMessages, fetchTicketMediaCount, sendMessage as sendMessageApi, sendNoRedis, sendLocation,
@@ -115,29 +122,41 @@ import {
 } from "@/services/dialog360-messages";
 import { fetchFarewells, type FarewellPrivateMessage } from "@/services/farewell";
 import { fetchReasons, type Reason } from "@/services/reasons";
-import { fetchEvaluationConfig, updateEvaluationByTicket, type EvaluationConfig } from "@/services/evaluations";
+import { fetchEvaluationConfig, type EvaluationConfig } from "@/services/evaluations";
 import { sendEvaluationForTicket, channelSupportsEvaluation } from "@/lib/send-evaluation";
 import { createWabaTemplateSchedule } from "@/services/schedules";
 import { getTemplatesForChannel } from "@/services/channel-templates";
 import { sendPrivateMessage } from "@/services/private-chat";
 import { fetchChatFlows } from "@/services/chatflow";
 import { fetchQueues } from "@/services/queues";
-import { fetchUsers, fetchAllUsers, updateUserConfigs } from "@/services/users";
-import { fetchContacts, type Contact } from "@/services/contacts";
+import { fetchUser, fetchUsers, fetchAllUsers, updateUserConfigs } from "@/services/users";
+import { normalizePinnedTicketIds, queuePinChange } from "@/lib/pinned-tickets";
+import { fetchContacts, refreshContactPicture, type Contact } from "@/services/contacts";
+import {
+  claimContactPictureRefresh,
+  isWhatsappPicUrlStale,
+  releaseContactPictureRefresh,
+  shouldRetryContactPictureRefresh,
+} from "@/lib/whatsapp-pic-expiry";
 import { fetchWhatsapps } from "@/services/whatsapp";
 import { fetchTags } from "@/services/tags";
 import { fetchKanbans } from "@/services/kanban";
 import { type GalleryItem } from "@/services/gallery";
 import { GalleryPickerWithUploadDialog, wabaHeaderFormatToGalleryParams } from "@/components/gallery/gallery-picker-with-upload-dialog";
-import { MessageBubble, NON_FORWARDABLE_TYPES } from "@/components/atendimento/message-bubble";
+import { MessageBubble, canForwardMessage } from "@/components/atendimento/message-bubble";
+import { buildLocationShareText, getMessageLocation, isLocationMediaType, type ParsedLocation } from "@/lib/location-message";
 import { MessageInput } from "@/components/atendimento/message-input";
-import { TicketDetail } from "@/components/atendimento/ticket-detail";
+import { TicketDetail, TicketMigrationRefBadge } from "@/components/atendimento/ticket-detail";
 import { PinMessageDialog, type PinDuration } from "@/components/atendimento/pin-message-dialog";
 import { EspiarConversaDialog } from "@/components/atendimento/espiar-conversa-dialog";
 import { GlobalMessageSearchDialog } from "@/components/atendimento/global-message-search-dialog";
 import { WabaConnectionQualityBadge } from "@/components/atendimento/waba-connection-quality-badge";
 import { ReplyViaChannelDialog } from "@/components/atendimento/reply-via-channel-dialog";
+import { InstagramCommentReplyDialog } from "@/components/atendimento/instagram-comment-reply-dialog";
+import { isInstagramCommentMessage } from "@/lib/instagram-comment";
 import { normalizeTicket } from "@/lib/normalize-ticket";
+import { keepAdReferral } from "@/lib/ad-referral";
+import { AdReferralIdCopy } from "@/components/atendimento/ad-referral-id-copy";
 // Helper compartilhado com o gate do sino (lib/can-user-see-ticket.ts:340) — lista e sino
 // precisam usar a MESMA definição de "ticket ainda no fluxo do bot".
 import { isTicketInBotFlow } from "@/lib/can-user-see-ticket";
@@ -152,11 +171,33 @@ import { findExistingOpenTicket, findCrossChannelSiblingForTicket, findOpenTicke
 import { TransferChannelConfirmDialog } from "@/components/atendimento/transfer-channel-confirm-dialog";
 import { ExistingTicketDialog } from "@/components/atendimento/existing-ticket-dialog";
 import { ReopenConfirmDialog } from "@/components/atendimento/reopen-confirm-dialog";
+import { ReleaseAiAgentDialog } from "@/components/atendimento/release-ai-agent-dialog";
+import { WebchatInviteSendDialog } from "@/components/atendimento/webchat-invite-send-dialog";
+import { isWebchatInviteSendChannel, useWebchatInviteMessage } from "@/hooks/use-webchat-invite-message";
+import { useAiAgentPauseToggle } from "@/components/atendimento/ai-agent-pause-button";
 import { buildReopenNotices, isWindowClosedForTicket, type ReopenNotices } from "@/lib/reopen-notices";
 import { buildEmailReplyInfo } from "@/lib/email-reply";
-import { buildSignedBody, isWhatsappChannel } from "@/lib/signature";
+import { buildSignedBody, isSignatureMandatory, isWhatsappChannel } from "@/lib/signature";
+import { useQuickReplies } from "@/hooks/use-quick-replies";
+import { QuickReplyTextarea, type QuickReplyVarWarningsContext } from "@/components/quick-replies/quick-reply-textarea";
+import { QuickReplyTemplateShortcuts } from "@/components/quick-replies/quick-reply-template-shortcuts";
+import { AVULSA_MESSAGE_CHANNEL_TYPES, AVULSA_EMAIL_CHANNEL_TYPES } from "@/services/individual-message";
 import { getTicketLastMessagePreview, getTicketListPreview, getSyntheticBodyLabel } from "@/lib/template-preview";
 import { normalizeUploadFilename } from "@/lib/chat-upload-validation";
+import { uazapiQuoteWillBeDropped } from "@/lib/uazapi-quote-window";
+import {
+  agentGroupSecondsFor,
+  appendOrStart as appendWabaAgentText,
+  flushAll as flushAllWabaAgentText,
+  flushNow as flushWabaAgentTextNow,
+  flushPendingWabaText,
+  hasPending as hasPendingWabaText,
+  takeForCaption as takeWabaAgentTextForCaption,
+  type WabaGroupCallbacks,
+  type WabaGroupSnapshot,
+} from "@/lib/waba-agent-grouping";
+import { fitsGroupedText } from "@/lib/waba-text-grouping";
+import { fetchMediaBlob } from "@/lib/media-fetch";
 import { toast } from "sonner";
 import { useSettings } from "@/hooks/use-settings";
 import { PageHelp } from "@/components/layout/page-help";
@@ -196,11 +237,14 @@ function isApiSentMessage(m: { fromMe?: boolean; sendType?: string | null }): bo
 // Normaliza a fonte do "tempo aproximado" para epoch-ms.
 // lastMessageAt e BIGINT e chega do backend como string numerica ("1751800000000") —
 // new Date(string) daria Invalid Date; converter com Number. updatedAt e ISO string —
-// usar new Date direto. Number ja vem em epoch-ms.
+// usar new Date direto. Number ja vem em epoch-ms. Caminhos antigos gravam lastMessageAt
+// em segundos: abaixo de 1e11 nao ha ms plausivel (1973), entao vira ms — mesma regra do
+// ORDER BY do servidor com "Listar atendimentos pela ultima mensagem".
 function toEpochMs(value: string | number): number {
-  if (typeof value === "number") return value;
+  const secondsToMs = (n: number) => (n > 0 && n < 1e11 ? n * 1000 : n);
+  if (typeof value === "number") return secondsToMs(value);
   const v = value.trim();
-  if (/^\d+$/.test(v)) return Number(v);
+  if (/^\d+$/.test(v)) return secondsToMs(Number(v));
   return new Date(v).getTime();
 }
 
@@ -212,6 +256,13 @@ function ticketBadgeDate(ticket: { lastMessageAt?: string | number | null; updat
   const lm = ticket.lastMessageAt;
   if (lm != null && Number(lm) > 0) return lm;
   return ticket.updatedAt ?? "";
+}
+
+// Chave da ordem da lista com "Listar atendimentos pela ultima mensagem" ligado: a mesma data
+// do selo do card, igual ao ORDER BY do servidor. Desligado, a lista segue no updatedAt.
+function ticketLastMessageSortMs(ticket: { lastMessageAt?: string | number | null; updatedAt?: string | null }): number {
+  const ms = toEpochMs(ticketBadgeDate(ticket));
+  return Number.isFinite(ms) ? ms : 0;
 }
 
 function timeAgo(date: string | number, nowLabel = ""): string {
@@ -378,6 +429,10 @@ const TicketListItem = React.memo(function TicketListItem({
   // Bloquear/retomar chatbot deste ticket direto no card (pendentes — onde o bot atua)
   const [itemBotBlocked, setItemBotBlocked] = useState(!!(ticket as unknown as { botStopped?: boolean }).botStopped);
   const [itemBotToggling, setItemBotToggling] = useState(false);
+  // Atendimento com agente de IA (sem fluxo): o mesmo botão pausa/retoma o agente
+  // só neste atendimento (docs/PLANO_AGENTES_IA_BLOQUEIO_INATIVIDADE.md D2).
+  const aiAgentPause = useAiAgentPauseToggle(ticket);
+  const itemAgentMode = !ticket.chatbot && aiAgentPause.available;
   useEffect(() => {
     setItemBotBlocked(!!(ticket as unknown as { botStopped?: boolean }).botStopped);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -650,6 +705,19 @@ const TicketListItem = React.memo(function TicketListItem({
                 ? `${(ticket.contact?.name || tE("contact")).slice(0, 5)}...`
                 : (ticket.contact?.name || tE("noName"))}
             </span>
+            {/* Atendimento que começou por anúncio da Meta (mesmo ícone da densidade confortável) */}
+            {ticket.adReferral && (
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Megaphone className="h-3 w-3 text-amber-500 shrink-0" />
+                </TooltipTrigger>
+                <TooltipContent className="max-w-xs break-words">
+                  {ticket.adReferral.adTitle
+                    ? tE("adLeadTooltip", { title: ticket.adReferral.adTitle })
+                    : tE("adLeadTooltipNoTitle")}
+                </TooltipContent>
+              </Tooltip>
+            )}
             {ticket.queue && <span className="h-1.5 w-1.5 rounded-full shrink-0" style={{ backgroundColor: ticket.queue.color }} />}
             <span className={cn("text-[10px] whitespace-nowrap shrink-0", timeAgoColor(ticketBadgeDate(ticket), active))}>
               {timeAgo(ticketBadgeDate(ticket), tE("now"))}
@@ -677,6 +745,19 @@ const TicketListItem = React.memo(function TicketListItem({
                   <FileDown className="h-3 w-3 text-info shrink-0" />
                 </TooltipTrigger>
                 <TooltipContent>{tE("importedTooltip")}</TooltipContent>
+              </Tooltip>
+            )}
+            {/* Atendimento que começou por anúncio da Meta (1º anúncio registrado nele) */}
+            {ticket.adReferral && (
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Megaphone className="h-3 w-3 text-amber-500 shrink-0" />
+                </TooltipTrigger>
+                <TooltipContent className="max-w-xs break-words">
+                  {ticket.adReferral.adTitle
+                    ? tE("adLeadTooltip", { title: ticket.adReferral.adTitle })
+                    : tE("adLeadTooltipNoTitle")}
+                </TooltipContent>
               </Tooltip>
             )}
             <span className={cn("text-[10px] whitespace-nowrap", timeAgoColor(ticketBadgeDate(ticket), active))}>
@@ -749,24 +830,28 @@ const TicketListItem = React.memo(function TicketListItem({
                 </Tooltip>
               )}
             </div>
-            {isPending && (ticket.chatbot || itemBotBlocked) && (
+            {isPending && (ticket.chatbot || itemBotBlocked || itemAgentMode) && (
               <Tooltip>
                 <TooltipTrigger asChild>
                   <button
                     type="button"
-                    disabled={itemBotToggling}
-                    onClick={handleItemToggleBot}
+                    disabled={itemAgentMode ? aiAgentPause.busy : itemBotToggling}
+                    onClick={itemAgentMode ? (e) => { void aiAgentPause.toggle(e); } : handleItemToggleBot}
                     className={cn(
                       "h-7 w-7 rounded flex items-center justify-center shrink-0 disabled:opacity-50",
-                      itemBotBlocked
+                      (itemAgentMode ? aiAgentPause.paused : itemBotBlocked)
                         ? "hover:bg-amber-100 dark:hover:bg-amber-900/40 text-amber-500"
                         : "hover:bg-blue-100 dark:hover:bg-blue-900/40 text-blue-500"
                     )}
                   >
-                    {itemBotBlocked ? <BotOff className="h-4 w-4" /> : <Bot className="h-4 w-4" />}
+                    {(itemAgentMode ? aiAgentPause.paused : itemBotBlocked) ? <BotOff className="h-4 w-4" /> : <Bot className="h-4 w-4" />}
                   </button>
                 </TooltipTrigger>
-                <TooltipContent>{itemBotBlocked ? tE("resumeChatbotTicket") : tE("blockChatbotTicket")}</TooltipContent>
+                <TooltipContent>
+                  {itemAgentMode
+                    ? (aiAgentPause.paused ? tE("resumeAiAgentTicket") : tE("pauseAiAgentTicket"))
+                    : (itemBotBlocked ? tE("resumeChatbotTicket") : tE("blockChatbotTicket"))}
+                </TooltipContent>
               </Tooltip>
             )}
             {isPending && onSpy && (
@@ -832,14 +917,17 @@ const TicketListItem = React.memo(function TicketListItem({
               <TooltipContent side="top" className="text-xs max-w-[280px]">
                 <div className="space-y-0.5">
                   {crossSiblings.map((s) => {
+                    // ownerHidden: atendimento de colega que este usuário não abre; o servidor
+                    // omite o nome e a tela diz só "outro atendente".
+                    const hasOwner = Boolean(s.ownerName) || s.ownerHidden === true;
                     const key = s.sameChannel
-                      ? (s.ownerName ? "sameChannelSiblingTooltip" : "sameChannelSiblingTooltipNoOwner")
-                      : (s.ownerName ? "crossChannelSiblingTooltip" : "crossChannelSiblingTooltipNoOwner");
+                      ? (hasOwner ? "sameChannelSiblingTooltip" : "sameChannelSiblingTooltipNoOwner")
+                      : (hasOwner ? "crossChannelSiblingTooltip" : "crossChannelSiblingTooltipNoOwner");
                     return (
                       <div key={s.ticketId}>
                         {tE(key, {
                           channel: s.whatsappName || "?",
-                          owner: s.ownerName || "",
+                          owner: s.ownerHidden ? tE("siblingOwnerHidden") : s.ownerName || "",
                           ticketId: String(s.ticketId),
                         })}
                       </div>
@@ -1038,6 +1126,7 @@ function ChatHeader({
   userName,
   signatureEnabled = true,
   onCloseChat,
+  onSendText,
 }: {
   ticket: Ticket;
   onToggleDetail: () => void;
@@ -1064,9 +1153,38 @@ function ChatHeader({
   signatureEnabled?: boolean;
   /** Fecha a tela do chat (deseleciona o ticket) — mesma ação do ESC. */
   onCloseChat?: () => void;
+  /** Envio de texto do chat (o mesmo da caixa de mensagem) — usado pelo convite do WebChat. */
+  onSendText?: (text: string, quotedMsg?: Message, opts?: { forceLinked?: boolean; webchatInvite?: boolean }) => void;
 }) {
   const tE = useTranslations("atendimentoChatExtra");
+  const tInvite = useTranslations("webchatPage.inviteSend");
+  // "Enviar convite do WebChat": canal oficial, fora de grupo, aberto e com o convite pronto
+  // na empresa. Com a janela de 24 h fechada o botão fica desabilitado (o texto seria recusado).
+  const [webchatInviteOpen, setWebchatInviteOpen] = useState(false);
+  const webchatInvite = useWebchatInviteMessage(
+    !!onSendText && ticket.status === "open" && !ticket.isGroup && isWebchatInviteSendChannel(ticket.channel)
+  );
+  const canSendWebchatInvite = !!onSendText && ticket.status === "open" && !!webchatInvite.info?.ready;
+  const webchatInviteWindowClosed = isWindowClosedForTicket(ticket);
+  // A janela é conferida de novo no clique: o cabeçalho não tem relógio e pode estar
+  // renderizado de antes de ela fechar. No celular o item fica habilitado e explica no aviso.
+  const openWebchatInvite = () => {
+    if (isWindowClosedForTicket(ticket)) {
+      toast.warning(tInvite("windowClosed"));
+      return;
+    }
+    setWebchatInviteOpen(true);
+  };
+  const sendWebchatInvite = (inviteText: string) => {
+    if (!onSendText) return;
+    onSendText(
+      signatureEnabled && userName?.trim() ? buildSignedBody(userName, inviteText, ticket.channel) : inviteText,
+      undefined,
+      { webchatInvite: true }
+    );
+  };
   const tErrors = useTranslations("errors");
+  const tCommon = useTranslations("common");
   const { isLiveMode } = useLiveMode();
   const openTab = (tab: DetailTab) => {
     onOpenDetailTab?.(tab);
@@ -1098,6 +1216,12 @@ function ChatHeader({
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchTerm, setSearchTerm] = useState("");
   const [chatbotOpen, setChatbotOpen] = useState(false);
+  // "Desligar agente de IA": só com o agente respondendo (mesmo critério do selo da lista).
+  const [releaseAiAgentOpen, setReleaseAiAgentOpen] = useState(false);
+  // Pausar/Retomar (D12): com o agente respondendo OU pausado, "Desligar" fica ao lado.
+  const aiAgentPause = useAiAgentPauseToggle(ticket);
+  const aiAgentActive = ticket.status !== "closed" && (getTicketAutomations(ticket).aiAgent || aiAgentPause.available);
+  const tAiRelease = useTranslations("aiAgentRelease");
   const [channelTransferOpen, setChannelTransferOpen] = useState(false);
   const [channelTransferId, setChannelTransferId] = useState("");
   // Aviso consultivo da troca de canal: contato já tem atendimento no destino.
@@ -1398,8 +1522,9 @@ function ChatHeader({
     try {
       const payload: Record<string, unknown> = { status: "closed" };
       if (reason) payload.closingReason = reason;
-      await updateTicket(ticket.id, payload);
+      const closeRes = await updateTicket(ticket.id, payload);
       toast.success(tE("ticketClosed"));
+      if (farewellFailed(closeRes)) toast.warning(tE("farewellNotSent"));
       onRefresh();
     } catch {
       updateTicketInStore({ id: ticket.id, status: prevStatus });
@@ -1409,6 +1534,8 @@ function ChatHeader({
 
   /** Envia farewell message (despedida) via canal correto e aguarda 5s antes de fechar */
   const sendFarewellMsg = async (farewell: FarewellPrivateMessage) => {
+    // WABA: texto do atendente que esperava para juntar sai antes da despedida.
+    await flushPendingWabaText(ticket.id);
     const ch = (ticket.channel || "").toLowerCase();
     const wa = ticket.whatsapp;
     const idFront = `farewell-${ticket.id}-${Date.now()}`;
@@ -1436,7 +1563,9 @@ function ChatHeader({
       const farewellUpdate: { isFarewellMessage: boolean; reasons?: number } = { isFarewellMessage: true };
       if (farewell.reasonId) farewellUpdate.reasons = farewell.reasonId;
       await updateTicket(ticket.id, farewellUpdate);
-      try { await updateEvaluationByTicket(ticket.id, { attempts: 2 }); } catch { /* ignore */ }
+      // A despedida não mexe na pesquisa pendente: a pesquisa enviada à mão continua
+      // valendo e a nota do cliente é gravada. (O antigo PUT /ticketEvaluations/<id do
+      // atendimento> alterava a avaliação de OUTRO atendimento com o mesmo número.)
       toast.success(tE("farewellSent"));
       await new Promise<void>((r) => setTimeout(r, 5000));
     } catch { /* silenciar erros de envio da despedida */ }
@@ -1535,7 +1664,12 @@ function ChatHeader({
       if (behavior === "closeOnResolve") {
         await doSendEvaluationOnClose(config);
         updateTicketInStore({ id: ticket.id, status: "closed" });
-        try { await updateTicket(ticket.id, { status: "closed" }); toast.success(tE("ticketClosed")); onRefresh(); }
+        try {
+          const closeRes = await updateTicket(ticket.id, { status: "closed" });
+          toast.success(tE("ticketClosed"));
+          if (farewellFailed(closeRes)) toast.warning(tE("farewellNotSent"));
+          onRefresh();
+        }
         catch { updateTicketInStore({ id: ticket.id, status: "open" }); toast.error(tE("errorClosing")); }
         return;
       }
@@ -1606,7 +1740,8 @@ function ChatHeader({
 
   const handleReturnToQueue = async () => {
     try {
-      await updateTicket(ticket.id, { status: "pending", userId: null });
+      // transferIntent: registra a devolução no histórico de transferências (backend antigo ignora).
+      await updateTicket(ticket.id, { status: "pending", userId: null, transferIntent: "return_to_queue" });
       toast.success(tE("returnedToQueue"));
       onRefresh();
     } catch { toast.error(tE("errorReturning")); }
@@ -1651,7 +1786,16 @@ function ChatHeader({
         setIsPaused(false);
         updateTicketInStore({ id: ticket.id, isPaused: false, pauseReason: null });
         toast.success(tE("ticketResumed"));
-      } catch { toast.error(tE("errorPause")); }
+      } catch (err) {
+        // Já tinha sido retomado (outra aba ou retomada automática): só acerta a tela.
+        if (getBackendErrorCode(err) === "ERR_TICKET_NOT_PAUSED") {
+          setIsPaused(false);
+          updateTicketInStore({ id: ticket.id, isPaused: false, pauseReason: null });
+          toast.info(tE("ticketAlreadyResumed"));
+        } else {
+          toast.error(tE("errorPause"));
+        }
+      }
     } else {
       setPauseReason("");
       setPauseTransferAfter(false);
@@ -1670,7 +1814,17 @@ function ChatHeader({
       if (pauseTransferAfter) {
         setTransferOpen(true);
       }
-    } catch { toast.error(tE("errorPause")); }
+    } catch (err) {
+      // Já estava em pausa (clique duplo, outra aba): a tela passa a mostrar a pausa.
+      if (getBackendErrorCode(err) === "ERR_TICKET_ALREADY_PAUSED") {
+        setIsPaused(true);
+        updateTicketInStore({ id: ticket.id, isPaused: true });
+        setPauseDialogOpen(false);
+        toast.info(tE("ticketAlreadyPaused"));
+      } else {
+        toast.error(tE("errorPause"));
+      }
+    }
     finally { setPauseSending(false); }
   };
 
@@ -1749,10 +1903,17 @@ function ChatHeader({
         setWabaTemplates([...list].sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase())));
       } catch (err: any) {
         setWabaTemplates([]);
-        const data = err?.response?.data;
-        const upstreamStatus = data?.upstreamStatus ?? err?.response?.status;
-        const reason = data?.message || data?.error || err?.message;
-        toast.error(`${tE("errorLoadingTemplates") || "Erro ao listar templates"}${upstreamStatus ? ` (HTTP ${upstreamStatus})` : ""}${reason ? `: ${reason}` : ""}`);
+        const rateLimitedText = metaRateLimitedMessage(err, tCommon);
+        if (rateLimitedText) {
+          toast.error(rateLimitedText);
+        } else if (isMetaTokenUnauthorized(err)) {
+          toast.error(tCommon("metaTokenInvalidReconnect"));
+        } else {
+          const data = err?.response?.data;
+          const upstreamStatus = data?.upstreamStatus ?? err?.response?.status;
+          const reason = data?.message || data?.error || err?.message;
+          toast.error(`${tE("errorLoadingTemplates") || "Erro ao listar templates"}${upstreamStatus ? ` (HTTP ${upstreamStatus})` : ""}${reason ? `: ${reason}` : ""}`);
+        }
       }
       finally { setScheduleLoading(false); }
     }
@@ -1991,10 +2152,54 @@ function ChatHeader({
                   <TooltipContent>{tE("importedTooltip")}</TooltipContent>
                 </Tooltip>
               )}
+              {/* Atendimento que começou por anúncio da Meta: Popover (abre no toque), com
+                  stopPropagation porque o clique no cabeçalho abre/fecha o painel. */}
+              {ticket.adReferral && (() => {
+                const adLead = ticket.adReferral;
+                if (!adLead) return null;
+                const adLeadHint = adLead.adTitle
+                  ? tE("adLeadTooltip", { title: adLead.adTitle })
+                  : tE("adLeadTooltipNoTitle");
+                return (
+                  <Popover>
+                    <PopoverTrigger asChild>
+                      <button
+                        type="button"
+                        onClick={(e) => e.stopPropagation()}
+                        title={adLeadHint}
+                        className={cn(
+                          badgeVariants({ variant: "outline" }),
+                          "text-[9px] px-1 py-0 h-4 gap-0.5 leading-none shrink-0 cursor-pointer bg-amber-500/10 border-amber-500/30 text-amber-600 dark:text-amber-400"
+                        )}
+                      >
+                        <Megaphone className="h-2.5 w-2.5" aria-hidden="true" />
+                        {tE("adLead")}
+                      </button>
+                    </PopoverTrigger>
+                    <PopoverContent
+                      side="bottom"
+                      align="start"
+                      className="w-auto max-w-[min(20rem,calc(100vw-2rem))] space-y-1.5 text-xs leading-relaxed"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      <p className="flex items-start gap-1.5 text-sm font-medium">
+                        <Megaphone className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-500" aria-hidden="true" />
+                        <span className="min-w-0 break-words">{adLeadHint}</span>
+                      </p>
+                      {adLead.adId && <AdReferralIdCopy adId={adLead.adId} />}
+                      <p className="text-[11px] text-muted-foreground">{tE("adLeadHelp")}</p>
+                    </PopoverContent>
+                  </Popover>
+                );
+              })()}
             </h3>
             <p className="text-xs text-muted-foreground truncate">
               #{ticket.id}
-              {!isRestricted && displayContactIdentity(ticket.contact) && <span className={cn("ml-1", isLiveMode && "live-blur-text")}>· {displayContactIdentity(ticket.contact)}</span>}
+              {/* Atendimento trazido de outro servidor: número que ele tinha lá (Popover) */}
+              {ticket.migrationRef?.oldId && (
+                <TicketMigrationRefBadge migrationRef={ticket.migrationRef} stopPropagation className="ml-1" />
+              )}
+              {!isRestricted && displayContactIdentity(ticket.contact) &&<span className={cn("ml-1", isLiveMode && "live-blur-text")}>· {displayContactIdentity(ticket.contact)}</span>}
               {ticket.queue && <span className="ml-1">· {ticket.queue.name}</span>}
               {ticket.user && <span className="ml-1">· {ticket.user.name}</span>}
             </p>
@@ -2102,6 +2307,26 @@ function ChatHeader({
                 </Button>
               </TooltipTrigger><TooltipContent>{tE("transferChannel")}</TooltipContent></Tooltip>
             )}
+            {/* Convite do WebChat — oculto no mobile (disponível no dropdown e no ⋮ da caixa).
+                O span segura a dica com o botão desabilitado (janela de 24 h fechada). */}
+            {canSendWebchatInvite && (
+              <Tooltip><TooltipTrigger asChild>
+                <span className="hidden sm:inline-flex" tabIndex={webchatInviteWindowClosed ? 0 : -1}>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="h-8 w-8"
+                    aria-label={tInvite("menuItem")}
+                    disabled={webchatInviteWindowClosed}
+                    onClick={openWebchatInvite}
+                  >
+                    <MessageSquareShare className="h-4 w-4" />
+                  </Button>
+                </span>
+              </TooltipTrigger><TooltipContent className="max-w-[260px] text-xs leading-snug">
+                {webchatInviteWindowClosed ? tInvite("windowClosed") : tInvite("tooltip")}
+              </TooltipContent></Tooltip>
+            )}
             {/* Mídias, links e docs — oculto no mobile (disponível no dropdown) */}
             <Tooltip><TooltipTrigger asChild>
               <Button variant="ghost" size="icon" className="h-8 w-8 hidden sm:inline-flex" onClick={openMediaModal} disabled={!ticket.id}>
@@ -2137,7 +2362,8 @@ function ChatHeader({
               <DropdownMenuTrigger asChild>
                 <Button variant="ghost" size="icon" className="h-8 w-8"><MoreHorizontal className="h-4 w-4" /></Button>
               </DropdownMenuTrigger>
-              <DropdownMenuContent align="end" className="w-56">
+              {/* Rolagem no próprio menu: em celular baixo os últimos itens saíam da tela. */}
+              <DropdownMenuContent align="end" className="w-56 max-h-[var(--radix-dropdown-menu-content-available-height)] overflow-y-auto">
                 <DropdownMenuItem onClick={onToggleDetail}>
                   <Info className="mr-2 h-4 w-4" /> {tE("viewContactDetails")}
                 </DropdownMenuItem>
@@ -2159,6 +2385,16 @@ function ChatHeader({
                 <DropdownMenuItem onClick={() => setSearchOpen(!searchOpen)} className="sm:hidden">
                   <Search className="mr-2 h-4 w-4" /> {tE("searchMessages")}
                 </DropdownMenuItem>
+                {/* Convite do WebChat — só no mobile (no computador é o botão do topo) */}
+                {canSendWebchatInvite && (
+                  <DropdownMenuItem onClick={openWebchatInvite} className="sm:hidden">
+                    <MessageSquareShare className="mr-2 h-4 w-4" /> {tInvite("menuItem")}
+                  </DropdownMenuItem>
+                )}
+                {/* "Abrir em...": apps da empresa marcadas para o atendimento. Vai só o id do
+                    atendimento (o servidor lê o contato e confere o acesso); nunca o objeto
+                    do store, que tem tokens do canal. Sem app = nada aparece. */}
+                <PanelAppOpenMenuSub placement="ticket" ticketId={ticket.id} />
                 <DropdownMenuSeparator />
                 <DropdownMenuItem onClick={() => setTransferOpen(true)} disabled={ticket.status === "closed"}>
                   <ArrowRightLeft className="mr-2 h-4 w-4" /> {tE("transfer")}
@@ -2166,6 +2402,31 @@ function ChatHeader({
                 <DropdownMenuItem onClick={handleOpenChatbot} disabled={ticket.status === "closed" || (controlFeatures && userProfile === "user")}>
                   <Bot className="mr-2 h-4 w-4" /> {tE("transferToChatbot")}
                 </DropdownMenuItem>
+                {aiAgentPause.available && !ticket.chatbot && (
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <DropdownMenuItem onClick={() => { void aiAgentPause.toggle(); }} disabled={aiAgentPause.busy}>
+                        {aiAgentPause.paused ? <Play className="mr-2 h-4 w-4" /> : <Pause className="mr-2 h-4 w-4" />}{" "}
+                        {aiAgentPause.paused ? tAiRelease("resumeMenuItem") : tAiRelease("pauseMenuItem")}
+                      </DropdownMenuItem>
+                    </TooltipTrigger>
+                    <TooltipContent side="left" className="max-w-[240px] text-xs leading-snug">
+                      {tAiRelease("pauseHelp")}
+                    </TooltipContent>
+                  </Tooltip>
+                )}
+                {aiAgentActive && (
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <DropdownMenuItem onClick={() => setReleaseAiAgentOpen(true)}>
+                        <BotOff className="mr-2 h-4 w-4" /> {tAiRelease("menuItem")}
+                      </DropdownMenuItem>
+                    </TooltipTrigger>
+                    <TooltipContent side="left" className="max-w-[240px] text-xs leading-snug">
+                      {tAiRelease("help")}
+                    </TooltipContent>
+                  </Tooltip>
+                )}
                 {availableWhatsapps && availableWhatsapps.length > 0 && (
                   <DropdownMenuItem onClick={() => setChannelTransferOpen(true)} disabled={ticket.status === "closed"}>
                     <Radio className="mr-2 h-4 w-4" /> {tE("transferChannel")}
@@ -2237,6 +2498,20 @@ function ChatHeader({
           </div>
         </TooltipProvider>
       </div>
+
+      <ReleaseAiAgentDialog
+        ticketId={ticket.id}
+        open={releaseAiAgentOpen}
+        onOpenChange={setReleaseAiAgentOpen}
+      />
+
+      {webchatInviteOpen && (
+        <WebchatInviteSendDialog
+          open={webchatInviteOpen}
+          onOpenChange={setWebchatInviteOpen}
+          onSend={sendWebchatInvite}
+        />
+      )}
 
       {/* Transfer Dialog */}
       <Dialog open={transferOpen} onOpenChange={(open) => { setTransferOpen(open); if (!open) { setTransferQueue(""); setTransferNoQueue(false); setTransferUser(""); setTransferMessage(""); } }}>
@@ -2430,7 +2705,7 @@ function ChatHeader({
                   {[
                     { label: "+30 min", ms: 30 * 60 * 1000 },
                     { label: tE("tomorrow"), ms: 24 * 60 * 60 * 1000 },
-                    { label: "+1 semana", ms: 7 * 24 * 60 * 60 * 1000 },
+                    { label: tE("plusOneWeek"), ms: 7 * 24 * 60 * 60 * 1000 },
                   ].map(({ label, ms }) => (
                     <button key={label} type="button"
                       className="text-xs px-2 py-1 rounded border border-input bg-muted hover:bg-accent transition-colors"
@@ -2595,7 +2870,7 @@ function ChatHeader({
                           {[
                             { label: "+30 min", ms: 30 * 60 * 1000 },
                             { label: tE("tomorrow"), ms: 24 * 60 * 60 * 1000 },
-                            { label: "+1 semana", ms: 7 * 24 * 60 * 60 * 1000 },
+                            { label: tE("plusOneWeek"), ms: 7 * 24 * 60 * 60 * 1000 },
                           ].map(({ label, ms }) => (
                             <button key={label} type="button"
                               className="text-xs px-2 py-1 rounded border border-input bg-background hover:bg-accent transition-colors"
@@ -3438,8 +3713,8 @@ function ChatArea({
   messagesLoading?: boolean;
   hasMore: boolean;
   onLoadMore: () => void;
-  onSendText: (text: string, quotedMsg?: Message, opts?: { forceLinked?: boolean }) => void;
-  onSendMedia: (file: File, caption: string, quotedMsg?: Message, isSticker?: boolean) => void;
+  onSendText: (text: string, quotedMsg?: Message, opts?: { forceLinked?: boolean; webchatInvite?: boolean }) => void;
+  onSendMedia: (file: File, caption: string, quotedMsg?: Message, isSticker?: boolean, opts?: { voice?: boolean; allowGroupCaption?: boolean }) => void | Promise<void>;
   onSendLocation: (lat: number, lng: number, name?: string, address?: string) => void;
   onDeleteMessage: (msg: Message) => void;
   onForwardMessage: (msg: Message) => void;
@@ -3488,6 +3763,8 @@ function ChatArea({
 }) {
   const { isRestrictedUser } = useAuthStore();
   const isRestricted = isRestrictedUser();
+  // "Responder por outro canal" abre a Nova Conversa: some para quem não pode iniciar conversa.
+  const canStartConversation = useAuthStore((s) => s.canStartConversation());
   const [replyTo, setReplyTo] = useState<Message | null>(null);
   useEffect(() => { setReplyTo(null); }, [clearReplySignal]);
   const [smsModalOpen, setSmsModalOpen] = useState(false);
@@ -3548,29 +3825,37 @@ function ChatArea({
   // envio da API e envio manual do mesmo usuário não se fundam sob um avatar só.
   const isSystemAuthor = (m: Message) => !!m.fromMe && (isApiSentMessage(m) || (!m.user && !ticket?.user));
   const outgoingAuthorKey = (m: Message) => (isSystemAuthor(m) ? "__system__" : (m.user?.id ?? m.user?.name));
-  const router = useRouter();
   const scrollEnabled = autoScrollEnabled !== false;
   const channel = (ticket?.channel || "").toLowerCase();
   const isSmsChannel = channel === "sms";
   const isWooChannel = channel === "woocommerce" || channel === "nuvemshop";
   const ticketId = ticket?.id;
 
-  const [igCommentRedirectOpen, setIgCommentRedirectOpen] = useState(false);
+  // Comentário do Instagram: o "Responder" da bolha abre o diálogo de resposta ao
+  // comentário (público ou Direct) em vez de citar — citar mandaria Direct, que a Meta
+  // recusa quando a pessoa só comentou.
+  const [igReplyComment, setIgReplyComment] = useState<Message | null>(null);
+  const [igBannerDismissedId, setIgBannerDismissedId] = useState<string | null>(null);
   const [replyChannelOpen, setReplyChannelOpen] = useState(false);
 
   const handleReply = useCallback((msg: Message) => {
-    if (channel.includes("instagram")) {
-      const body = msg.body || "";
-      if (
-        body.startsWith("💬 Comentário em") ||
-        body.startsWith("↩️ Resposta a comentário em")
-      ) {
-        setIgCommentRedirectOpen(true);
-        return;
-      }
+    if (channel.includes("instagram") && isInstagramCommentMessage(msg)) {
+      setIgReplyComment(msg);
+      return;
     }
     setReplyTo(msg);
   }, [channel]);
+
+  // Aviso acima da caixa quando a última mensagem do atendimento é um comentário do cliente.
+  const igPendingComment = React.useMemo(() => {
+    if (!channel.includes("instagram")) return null;
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const m = messages[i];
+      if (m.isDeleted) continue;
+      return isInstagramCommentMessage(m) ? m : null;
+    }
+    return null;
+  }, [channel, messages]);
 
   const handleLoadMoreClick = () => {
     if (scrollRef.current) {
@@ -3785,6 +4070,7 @@ function ChatArea({
         userName={userName}
         signatureEnabled={signatureEnabled}
         onCloseChat={onCloseChat}
+        onSendText={isReadOnly ? undefined : onSendText}
       />
 
       {pinnedMessages.length > 0 && (
@@ -3879,18 +4165,18 @@ function ChatArea({
         )}
         <div data-msgs-container className="w-full">
           {messages.map((msg, idx) => {
-            const isSystemMsg = ["notes", "transfer", "callNotes", "transcription"].includes(msg.mediaType || "");
+            const isSystemMsg = ["notes", "transfer", "callNotes", "transcription", "form_submission"].includes(msg.mediaType || "");
             const nextMsg = messages[idx + 1];
             const isLastInIncomingGroup = !msg.fromMe && !isSystemMsg && (
               !nextMsg ||
               nextMsg.fromMe ||
-              ["notes", "transfer", "callNotes", "transcription"].includes(nextMsg.mediaType || "") ||
+              ["notes", "transfer", "callNotes", "transcription", "form_submission"].includes(nextMsg.mediaType || "") ||
               (ticket?.isGroup && (nextMsg.contact?.id ?? nextMsg.contact?.name) !== (msg.contact?.id ?? msg.contact?.name))
             );
             const isLastInOutgoingGroup = msg.fromMe && !isSystemMsg && (
               !nextMsg ||
               !nextMsg.fromMe ||
-              ["notes", "transfer", "callNotes", "transcription"].includes(nextMsg.mediaType || "") ||
+              ["notes", "transfer", "callNotes", "transcription", "form_submission"].includes(nextMsg.mediaType || "") ||
               outgoingAuthorKey(nextMsg) !== outgoingAuthorKey(msg)
             );
             const contactName = msg.contact?.name || ticket?.contact?.name || "?";
@@ -3915,7 +4201,7 @@ function ChatArea({
             // diferente da anterior, mensagem de sistema, ou separador de data/
             // ticket entre elas). Espelha os critérios de autor dos flags de fim
             // de run (incoming compara contato só em grupo; outgoing compara user).
-            const prevIsSystem = prevMsg ? ["notes", "transfer", "callNotes", "transcription"].includes(prevMsg.mediaType || "") : false;
+            const prevIsSystem = prevMsg ? ["notes", "transfer", "callNotes", "transcription", "form_submission"].includes(prevMsg.mediaType || "") : false;
             const sameRunAsPrev = !!prevMsg && !isNewDate && !isNewTicket && !isSystemMsg && !prevIsSystem &&
               prevMsg.fromMe === msg.fromMe &&
               (msg.fromMe
@@ -3962,7 +4248,7 @@ function ChatArea({
                     <div className="w-7 shrink-0" />
                   )
                 )}
-                {multiForwardActive && !isReadOnly && !NON_FORWARDABLE_TYPES.has(msg.mediaType || "") && !isRestricted && (
+                {multiForwardActive && !isReadOnly && canForwardMessage(msg) && !isRestricted && (
                   <input
                     type="checkbox"
                     className="mt-3 h-4 w-4 shrink-0 cursor-pointer accent-primary"
@@ -4100,23 +4386,48 @@ function ChatArea({
             // pelo gatilho do modal cross-channel reply: cria ticket no canal alvo
             // (WhatsApp, email...) com cross-ref pro pedido WC e redireciona pra
             // ele, onde o admin compoe a mensagem real.
-            <div className="border-t p-3">
-              <div className="flex flex-col items-center justify-center max-w-3xl mx-auto gap-1.5">
-                <Button
-                  type="button"
-                  variant="outline"
-                  className="gap-2"
-                  onClick={() => setReplyChannelOpen(true)}
-                >
-                  <ShoppingBag className="h-4 w-4" />
-                  {tReply("title")}
-                </Button>
-                <p className="text-xs text-muted-foreground text-center">
-                  {tReply("description")}
+            canStartConversation ? (
+              <div className="border-t p-3">
+                <div className="flex flex-col items-center justify-center max-w-3xl mx-auto gap-1.5">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    className="gap-2"
+                    onClick={() => setReplyChannelOpen(true)}
+                  >
+                    <ShoppingBag className="h-4 w-4" />
+                    {tReply("title")}
+                  </Button>
+                  <p className="text-xs text-muted-foreground text-center">
+                    {tReply("description")}
+                  </p>
+                </div>
+              </div>
+            ) : (
+              // Perfil que não pode iniciar conversa (o servidor recusaria): explica em vez de sumir.
+              <div className="border-t p-3">
+                <p className="flex items-start justify-center gap-1.5 max-w-3xl mx-auto text-xs text-muted-foreground text-center">
+                  <Info className="h-3.5 w-3.5 mt-0.5 shrink-0" aria-hidden="true" />
+                  <span>{tReply("noPermission")}</span>
                 </p>
               </div>
-            </div>
+            )
           ) : (
+            <>
+            {igPendingComment && igPendingComment.id !== igBannerDismissedId && ticket.status === "open" && (
+              <div className="border-t bg-muted/40 px-3 py-2">
+                <div className="flex flex-wrap items-center gap-2 max-w-3xl mx-auto">
+                  <MessageCircle className="h-4 w-4 shrink-0 text-muted-foreground" />
+                  <p className="flex-1 min-w-[12rem] text-xs text-muted-foreground">{t("igCommentBannerText")}</p>
+                  <Button type="button" size="sm" variant="outline" className="h-7 text-xs" onClick={() => setIgReplyComment(igPendingComment)}>
+                    {t("igCommentBannerAction")}
+                  </Button>
+                  <Button type="button" size="icon" variant="ghost" className="h-7 w-7" title={t("igCommentBannerDismiss")} aria-label={t("igCommentBannerDismiss")} onClick={() => setIgBannerDismissedId(igPendingComment.id)}>
+                    <X className="h-3.5 w-3.5" />
+                  </Button>
+                </div>
+              </div>
+            )}
             <MessageInput
               key={ticket.id}
               ticketId={ticket.id}
@@ -4136,6 +4447,7 @@ function ChatArea({
               onToggleSignature={onToggleSignature}
               detailOpen={detailOpen}
             />
+            </>
           )}
         </>
       )}
@@ -4181,7 +4493,7 @@ function ChatArea({
       />
 
       <ReplyViaChannelDialog
-        open={replyChannelOpen}
+        open={replyChannelOpen && canStartConversation}
         onOpenChange={setReplyChannelOpen}
         sourceTicketId={ticket.id}
         contactName={ticket.contact?.name}
@@ -4189,22 +4501,13 @@ function ChatArea({
         contactEmail={(ticket.contact as any)?.email}
       />
 
-      <Dialog open={igCommentRedirectOpen} onOpenChange={setIgCommentRedirectOpen}>
-        <DialogContent className="max-w-sm">
-          <DialogHeader>
-            <DialogTitle>{t("igCommentRedirectTitle")}</DialogTitle>
-            <DialogDescription>{t("igCommentRedirectDescription")}</DialogDescription>
-          </DialogHeader>
-          <DialogFooter className="gap-2 sm:gap-0">
-            <Button variant="outline" onClick={() => setIgCommentRedirectOpen(false)}>
-              {t("igCommentRedirectCancel")}
-            </Button>
-            <Button onClick={() => { setIgCommentRedirectOpen(false); router.push("/instagram-comentarios"); }}>
-              {t("igCommentRedirectConfirm")}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      <InstagramCommentReplyDialog
+        open={!!igReplyComment}
+        onOpenChange={(o) => { if (!o) setIgReplyComment(null); }}
+        ticketId={ticket.id}
+        comment={igReplyComment}
+        messages={messages}
+      />
     </div>
   );
 }
@@ -4315,6 +4618,44 @@ const BULK_ACTION_SENDING_CONCURRENCY = 1;
 const CROSS_SIBLINGS_DEBOUNCE_MS = 1000;
 const CROSS_SIBLINGS_MAX_WAIT_MS = 5000;
 
+// Localização com coordenada legível é encaminhada como texto com os links do Google
+// Maps e do Waze (docs/PLANO_LOCALIZACAO_ENVIO_ENCAMINHAR.md, D1). Critério único do
+// envio (contato, várias, outro canal, chat interno) e da nota dos diálogos.
+function getForwardLocation(msg: Message | null | undefined): ParsedLocation | null {
+  return msg && isLocationMediaType(msg.mediaType) ? getMessageLocation(msg) : null;
+}
+
+// Mídia encaminhada leva a legenda que a bolha mostra; no Instagram e no Messenger ela
+// chega como mensagem separada e o Instagram só aceita documento em PDF.
+function isForwardMediaMessage(msg: Message | null | undefined): boolean {
+  if (!msg || !msg.mediaUrl) return false;
+  const type = String(msg.mediaType || "");
+  return !["chat", "text", "conversation"].includes(type) && !isLocationMediaType(msg.mediaType);
+}
+
+function ForwardMediaNote({ className, otherChannel }: { className?: string; otherChannel?: boolean }) {
+  const t = useTranslations("atendimentoChat");
+  return (
+    <div className={cn("flex items-start gap-1.5 text-xs text-muted-foreground", className)}>
+      <Info className="h-3.5 w-3.5 shrink-0 mt-0.5" />
+      <div className="space-y-1">
+        <p>{t("forwardMediaNote")}</p>
+        {otherChannel && <p>{t("forwardChannelListNote")}</p>}
+      </div>
+    </div>
+  );
+}
+
+function ForwardLocationNote({ className }: { className?: string }) {
+  const t = useTranslations("locationShare");
+  return (
+    <p className={cn("flex items-start gap-1.5 text-xs text-muted-foreground", className)}>
+      <MapPin className="h-3.5 w-3.5 shrink-0 mt-0.5" />
+      <span>{t("forwardNote")}</span>
+    </p>
+  );
+}
+
 export default function AtendimentoPage() {
   const t = useTranslations("atendimentoChat");
   const tMixin = useTranslations("atendimentoMixinAtualizar");
@@ -4323,10 +4664,17 @@ export default function AtendimentoPage() {
   const tNC = useTranslations("layoutHeader.newConversation");
   const tE = useTranslations("atendimentoChatExtra");
   const tBubble = useTranslations("messageBubble");
+  const tInviteSend = useTranslations("webchatPage.inviteSend");
   const tOrder = useTranslations("orderDetails");
   // Só para a caixa "não enviar despedida" do encerrar em massa: reusa as chaves que
   // o painel de atendimentos já tem nos 13 idiomas, em vez de duplicá-las aqui.
   const tPainel = useTranslations("painelAtendimentosPage");
+  const tPhone = useTranslations("phoneInput");
+  // Aviso da busca pelo número/protocolo do servidor anterior (empresa migrada).
+  const tMigRef = useTranslations("migrationRef");
+  const { isLiveMode: legacyLookupLiveMode } = useLiveMode();
+  // País da empresa: exemplo e aviso de DDI do número da conversa avulsa (campo cru).
+  const { country: regionCountry } = useRegion();
   const searchParams = useSearchParams();
   const router = useRouter();
   const statusTabs = useStatusTabs();
@@ -4340,11 +4688,12 @@ export default function AtendimentoPage() {
   const isLegacyAdminProfile = user?.profile === "admin" || supervisorIsAdmin || user?.profile === "superadmin";
   // Perfil custom com tickets_view_all é admin-like para ESCOPO DE TICKETS — espelha
   // ListTicketsServiceFrontNovoZPRO.ts:119-121 (isAdmin/isAdminShowAll) e o guard
-  // CanUserAccessTicketServiceZPRO.ts:47-56. Nenhum dos dois exige customProfileEnabled,
-  // então aqui também não exigimos: sem este espelho a lista escondia tickets que o
-  // próprio REST devolveu para esse perfil.
+  // CanUserAccessTicketServiceZPRO.ts:47-56. Desde 16/10/2026 o servidor zera as permissões
+  // do custom com o recurso desligado na empresa (EffectiveCustomPermissionsZPRO), então o
+  // espelho exige customProfileEnabled: sem ele a lista mostraria o que o REST não devolve.
   const customCanViewAllTickets =
     user?.profile === "custom" &&
+    user?.customProfileEnabled === true &&
     (user?.customProfile?.customPermissions as unknown as { tickets_view_all?: boolean } | undefined)
       ?.tickets_view_all === true;
   const isAdminLike = isLegacyAdminProfile || customCanViewAllTickets;
@@ -4371,7 +4720,10 @@ export default function AtendimentoPage() {
   const forceReason = getConfigValue("forceReason") === "enabled";
   // Assinatura obrigatória isenta só os perfis admin clássicos: tickets_view_all é
   // permissão de ESCOPO de lista, não de isenção de regra de envio (nenhum espelho no backend).
-  const forceSignature = getConfigValue("signed") === "enabled" && !isLegacyAdminProfile;
+  // Helper único dos diálogos que iniciam conversa (mesmo resultado de isLegacyAdminProfile).
+  const forceSignature = isSignatureMandatory({ signedSetting: getConfigValue("signed"), profile: user?.profile, supervisorAdmin });
+  // Iniciar conversa: custom sem tickets_create e sem mass_send_manage não vê os botões (o /individual recusa).
+  const canStartConversation = useAuthStore((s) => s.canStartConversation());
   const fixarConexao = getConfigValue("fixarConexao") === "enabled";
   const universalCounter = getConfigValue("universalCounter") === "enabled";
   // Aviso cross-canal em Pendentes (flag por-tenant crossChannelTicketCheck):
@@ -4381,20 +4733,32 @@ export default function AtendimentoPage() {
   const [acceptCrossTicket, setAcceptCrossTicket] = useState<ExistingOpenTicket | null>(null);
   const [acceptPendingTicket, setAcceptPendingTicket] = useState<Ticket | null>(null);
 
-  const pinnedTickets: number[] = user?.configs?.pinnedTickets ?? [];
+  const rawPinnedTickets = user?.configs?.pinnedTickets;
+  const pinnedTickets = React.useMemo(() => normalizePinnedTicketIds(rawPinnedTickets), [rawPinnedTickets]);
 
+  // Grava só a mudança deste atendimento sobre a lista do servidor (lib/pinned-tickets.ts):
+  // gravar a lista deste aparelho apagava o que outro aparelho tinha fixado.
   const togglePin = useCallback(async (ticket: Ticket) => {
-    const current: number[] = user?.configs?.pinnedTickets ?? [];
-    const newPinned = current.includes(ticket.id)
-      ? current.filter((id) => id !== ticket.id)
-      : [...current, ticket.id];
-    setPinnedTickets(newPinned);
-    try {
-      await updateUserConfigs(user!.userId, { pinnedTickets: newPinned });
-    } catch {
-      setPinnedTickets(current);
-    }
-  }, [user, setPinnedTickets]);
+    const userId = useAuthStore.getState().user?.userId;
+    if (userId == null) return;
+    const getLocal = () => normalizePinnedTicketIds(useAuthStore.getState().user?.configs?.pinnedTickets);
+    await queuePinChange(
+      { ticketId: ticket.id, pin: !getLocal().includes(ticket.id) },
+      {
+        readServer: async () => {
+          const { data } = await fetchUser(userId);
+          if (!data || typeof data !== "object") throw new Error("ERR_PINNED_TICKETS_READ");
+          const configs = (data as { configs?: unknown }).configs;
+          return configs && typeof configs === "object"
+            ? (configs as { pinnedTickets?: unknown }).pinnedTickets
+            : [];
+        },
+        write: (ids) => updateUserConfigs(userId, { pinnedTickets: ids }),
+        getLocal,
+        setLocal: setPinnedTickets,
+      },
+    );
+  }, [setPinnedTickets]);
 
   const tickets = useTicketStore((s) => s.tickets);
   const setTickets = useTicketStore((s) => s.setTickets);
@@ -4455,6 +4819,11 @@ export default function AtendimentoPage() {
   const [whatsappsList, setWhatsappsList] = useState<{ id: number; name: string; type?: string; tokenAPI?: string; status?: string; bmToken?: string; wabaId?: string; wabaVersion?: string; number?: string }[]>([]);
   const [chatFlowsList, setChatFlowsList] = useState<{ id: number; name: string }[]>([]);
   const lastDeepLinkRef = useRef<number | null>(null);
+  // Link direto (?ticketId=): a lista do usuário pode voltar VAZIA (atendimento de colega,
+  // filtro, fila sem nada) e o efeito precisa saber que ela já carregou para buscar o
+  // atendimento pelo id. A trava evita dois GET /tickets/:id do mesmo id ao mesmo tempo.
+  const ticketsListLoadedRef = useRef(false);
+  const deepLinkFetchingRef = useRef<number | null>(null);
 
   // ── Iniciar conversa avulsa ────────────────────────────────────────────────
   const [avulsaOpen, setAvulsaOpen] = useState(false);
@@ -4487,6 +4856,11 @@ export default function AtendimentoPage() {
   const [avulsaContactSearch, setAvulsaContactSearch] = useState("");
   const [avulsaContactResults, setAvulsaContactResults] = useState<Contact[]>([]);
   const [avulsaContactLoading, setAvulsaContactLoading] = useState(false);
+  // Contato escolhido na busca: só ele garante os dados do cadastro nas variáveis da
+  // mensagem rápida (vale enquanto o número/e-mail do campo for o dele).
+  const [avulsaPickedContact, setAvulsaPickedContact] = useState<{ number: string; email: string; name: string } | null>(null);
+  // Mensagens rápidas ("/") da avulsa: carregadas a cada abertura do diálogo.
+  const { rows: avulsaQuickReplies, loading: avulsaQuickRepliesLoading } = useQuickReplies(avulsaOpen);
 
   const [showAll, setShowAll] = useState(() => getSavedFilters().showAll);
   const [includeClosed, setIncludeClosed] = useState(() => getSavedFilters().includeClosed);
@@ -4498,6 +4872,9 @@ export default function AtendimentoPage() {
   // default DESC (mais novos primeiro). effectiveOrderAsc = override local OU, se ausente, o tenant.
   const tenantReverseOrder = getConfigValue("reverseOrder") === "enabled";
   const effectiveOrderAsc = orderAsc ?? tenantReverseOrder;
+  // "Listar atendimentos pela ultima mensagem" (Config Geral): o servidor ja pagina por essa
+  // data; a reordenacao local precisa usar a mesma, senao desfaz a ordem dentro das paginas.
+  const listByLastMessage = getConfigValue("listarPelaUltimaMensagem") === "enabled";
   const [selectedQueueIds, setSelectedQueueIds] = useState<number[]>(() => getSavedFilters().queuesIds);
   const [selectedWhatsappIds, setSelectedWhatsappIds] = useState<number[]>(() => getSavedFilters().whatsappIds);
   const [selectedUserIds, setSelectedUserIds] = useState<string[]>(() => getSavedFilters().selectedUsers);
@@ -4567,6 +4944,14 @@ export default function AtendimentoPage() {
   const failedByTicketRef = useRef(new Map<number, Message[]>());
   // Último pct de upload reportado por idFront (throttle ≥5 pontos ou 100).
   const uploadPctRef = useRef(new Map<string, number>());
+  // WABA: o texto do atendente que esperava para juntar sai ao trocar de atendimento
+  // (pelo retrato do atendimento dele) e ao sair da página (lib/waba-agent-grouping).
+  useEffect(() => {
+    const id = currentTicket?.id;
+    if (!id) return;
+    return () => { void flushWabaAgentTextNow(id); };
+  }, [currentTicket?.id]);
+  useEffect(() => () => { void flushAllWabaAgentText(); }, []);
   // Mirror do handleSelectTicket p/ o listener global de atalhos (função não é memoizada).
   const handleSelectTicketRef = useRef<((ticket: Ticket) => Promise<void>) | null>(null);
   // Pill "Reconectando..." — só UI; o resync de dados já existe nos hooks de socket.
@@ -5153,6 +5538,28 @@ export default function AtendimentoPage() {
     return () => clearTimeout(timer);
   }, [search]);
 
+  // Busca pelo número ou protocolo que o atendimento tinha no servidor anterior (empresa
+  // migrada): só com termo numérico ("123" ou "#123"), 400 ms depois de parar de digitar.
+  // O aviso some na hora em que o termo muda. Empresa sem migração: o servidor responde
+  // [] sem consultar nada; backend anterior (sem a rota) = [] em silêncio.
+  const [legacyMatches, setLegacyMatches] = useState<LegacyTicketMatch[]>([]);
+  useEffect(() => {
+    // Mesma referência quando já está vazio: sem render extra da página a cada tecla.
+    setLegacyMatches((prev) => (prev.length > 0 ? [] : prev));
+    const term = search.trim();
+    if (!/^#?\d+$/.test(term)) return;
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      void lookupLegacyTickets(term).then((items) => {
+        if (!cancelled && items.length > 0) setLegacyMatches(items);
+      });
+    }, 400);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [search]);
+
   // "Fechados" no STATUS é subordinado a "Incluir tickets fechados" no modo Ver Todos
   // (admin/super): nesse modo o backend ignora o array de status e inclui fechados apenas
   // quando includeClosed=true. Mantemos a UI coerente desmarcando "closed" do filtro quando
@@ -5239,8 +5646,8 @@ export default function AtendimentoPage() {
   // Active filter chips for display below search bar
   const activeFilterChips = React.useMemo(() => {
     const chips: { label: string; onRemove: () => void }[] = [];
-    if (showAll) chips.push({ label: "Ver todos", onRemove: () => setShowAll(false) });
-    if (withUnreadMessages) chips.push({ label: "Não lidos", onRemove: () => setWithUnreadMessages(false) });
+    if (showAll) chips.push({ label: t("chipShowAll"), onRemove: () => setShowAll(false) });
+    if (withUnreadMessages) chips.push({ label: t("chipUnread"), onRemove: () => setWithUnreadMessages(false) });
     selectedQueueIds.forEach((id) => {
       const q = queues.find((q) => q.id === id);
       if (q) chips.push({ label: q.name, onRemove: () => toggleQueueId(id) });
@@ -5262,10 +5669,10 @@ export default function AtendimentoPage() {
       const k = kanbansList.find((k) => k.id === Number(id));
       if (k) chips.push({ label: k.name, onRemove: () => toggleId(setSelectedKanbanIds, id) });
     });
-    if (dateFrom) chips.push({ label: `De: ${dateFrom}`, onRemove: () => setDateFrom("") });
-    if (dateTo) chips.push({ label: `Até: ${dateTo}`, onRemove: () => setDateTo("") });
+    if (dateFrom) chips.push({ label: t("chipDateFrom", { date: dateFrom }), onRemove: () => setDateFrom("") });
+    if (dateTo) chips.push({ label: t("chipDateTo", { date: dateTo }), onRemove: () => setDateTo("") });
     return chips;
-  }, [showAll, withUnreadMessages, selectedQueueIds, selectedWhatsappIds, selectedUserIds, selectedTagIds, selectedKanbanIds, queues, availableWhatsapps, usersList, tagsList, kanbansList, dateFrom, dateTo, toggleId]);
+  }, [showAll, withUnreadMessages, selectedQueueIds, selectedWhatsappIds, selectedUserIds, selectedTagIds, selectedKanbanIds, queues, availableWhatsapps, usersList, tagsList, kanbansList, dateFrom, dateTo, toggleId, t]);
 
   // ESC key → deselect current ticket
   // Colisão resolvida: com bulkMode ativo, Escape SÓ cancela a seleção múltipla
@@ -5488,7 +5895,8 @@ export default function AtendimentoPage() {
       if (!data) return;
       // Stale-fetch guard
       if (selectionRef.current !== ticketId) return;
-      const normalized = normalizeTicket(data as Record<string, unknown>);
+      // Selo "Anúncio" do card fica quando a resposta não traz a chave (keepAdReferral).
+      const normalized = keepAdReferral<Ticket>(ticket, normalizeTicket(data as Record<string, unknown>));
       setCurrentTicket(normalized);
       setDetailOpen(false);
       setTickets([normalized, ...tickets.filter((x) => x.id !== ticketId)]);
@@ -5577,7 +5985,13 @@ export default function AtendimentoPage() {
         seen.add(id);
         return true;
       });
-      setTickets(deduped.map((tk) => normalizeTicket(tk)));
+      // Selo "Anúncio" que chegou pelo aviso de tempo real antes de o servidor que respondeu
+      // a lista saber dele: a recarga não o apaga (keepAdReferral, só quando a chave não vem).
+      const prevTicketsById = new Map(useTicketStore.getState().tickets.map((tk) => [tk.id, tk] as const));
+      setTickets(deduped.map((tk) => {
+        const normalizedTk = normalizeTicket(tk);
+        return keepAdReferral<Ticket>(prevTicketsById.get(normalizedTk.id), normalizedTk);
+      }));
       setHasMoreTickets(lastHasMore);
       setTicketsPageNumber(lastFetchedPage || 1);
     } catch {
@@ -5586,6 +6000,7 @@ export default function AtendimentoPage() {
       setTicketsPageNumber(prevPageNumber);
       toast.error(t("errorLoadingTickets"));
     } finally {
+      ticketsListLoadedRef.current = true;
       setLoading(false);
       loadTicketsInFlightRef.current = false;
     }
@@ -5624,6 +6039,10 @@ export default function AtendimentoPage() {
       if (!updated.contact?.tags?.length && prevContactTags?.length) {
         withTags = { ...withTags, contact: { ...withTags.contact, tags: prevContactTags } };
       }
+      // Selo "Anúncio" já na tela fica quando a resposta não traz a chave (keepAdReferral):
+      // vale o do atendimento aberto (o aviso de tempo real pode ter chegado só nele), senão o do card.
+      const openNow = useTicketStore.getState().currentTicket;
+      withTags = keepAdReferral<Ticket>(openNow?.id === ticketId && openNow.adReferral ? openNow : prev, withTags);
       setCurrentTicket(withTags);
       setTickets(listNow.map((t) => t.id === ticketId ? withTags : t));
     } catch { /* silently ignore */ }
@@ -5842,7 +6261,9 @@ export default function AtendimentoPage() {
   }, [hasMoreTickets, loadingMoreTickets, loadMoreTickets]);
 
   useEffect(() => {
-    if (!tickets.length) return;
+    // Lista vazia só espera enquanto ainda não carregou: depois de carregada (mesmo vazia,
+    // como para quem abre o link de um atendimento de colega) o atendimento é buscado pelo id.
+    if (!tickets.length && (loading || !ticketsListLoadedRef.current)) return;
     // Aceita ?ticketId=ID e ?ticket=ID (vindo de protocolos, notas, etc.)
     const ticketIdParam = searchParams.get("ticketId") || searchParams.get("ticket");
     if (!ticketIdParam) {
@@ -5860,30 +6281,70 @@ export default function AtendimentoPage() {
       setStatusFilter(found.status || "open");
       handleSelectTicket(found);
     } else if (!loading) {
+      // Uma busca por id de cada vez: sem a trava, cada troca da lista/loading durante o GET
+      // disparava outro (e cada GET /tickets/:id grava um registro de acesso).
+      if (deepLinkFetchingRef.current === id) return;
+      deepLinkFetchingRef.current = id;
       import("@/services/tickets").then(({ fetchTicket }) =>
         fetchTicket(id).then(({ data }) => {
+          // Resposta vazia também é final: sem a marca o GET se repetiria a cada mudança da lista.
+          lastDeepLinkRef.current = id;
           if (data) {
-            lastDeepLinkRef.current = id;
             const normalized = normalizeTicket(data as Record<string, unknown>);
             if (tabParam === "groups" || normalized.isGroup) setTabType("groups");
             else setTabType("private");
             setStatusFilter(normalized.status || "open");
-            setTickets([normalized, ...tickets.filter((t) => t.id !== normalized.id)]);
+            // Lista lida do store NO MOMENTO da escrita (não da closure): um loadTickets
+            // concluído durante o GET não pode ser apagado por um retrato antigo.
+            const listNow = useTicketStore.getState().tickets;
+            setTickets([normalized, ...listNow.filter((tk) => tk.id !== normalized.id)]);
             handleSelectTicket(normalized);
           }
         }).catch((err) => {
-          // Link direto (sino, protocolo, nota) para atendimento que o backend nega: avisa, tira
-          // a entrada do sino e marca o id como tratado — sem a marca este efeito refazia o GET
-          // a cada mudança da lista (todo evento de socket) enquanto a URL tivesse o ticketId.
-          // Os demais erros seguem silenciosos, como antes.
-          if (handleTicketAccessDenied(err, id, t("noTicketAccess"))) {
-            lastDeepLinkRef.current = id;
-          }
+          // Link direto (sino, protocolo, nota) para atendimento que o backend nega: avisa e tira
+          // a entrada do sino. Todo erro final (403, 404, 5xx, rede) marca o id como tratado —
+          // sem a marca este efeito refazia o GET a cada mudança da lista (todo evento de socket)
+          // enquanto a URL tivesse o ticketId. Os demais erros seguem silenciosos, como antes.
+          handleTicketAccessDenied(err, id, t("noTicketAccess"));
+          lastDeepLinkRef.current = id;
         })
-      );
+      ).catch(() => {
+        // Falha ao carregar o módulo (rede): também final, para não repetir a cada troca da lista.
+        lastDeepLinkRef.current = id;
+      }).finally(() => {
+        if (deepLinkFetchingRef.current === id) deepLinkFetchingRef.current = null;
+      });
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tickets, loading, searchParams]);
+
+  // Clique no aviso da busca pelo número antigo (empresa migrada): abre o atendimento do
+  // mesmo jeito que o link direto (?ticketId=) — pela lista quando ele já está nela,
+  // senão pelo GET do atendimento (que confere o acesso de novo).
+  const openLegacyMatch = (ticketId: number) => {
+    const found = useTicketStore.getState().tickets.find((tk) => tk.id === ticketId);
+    if (found) {
+      setTabType(found.isGroup ? "groups" : "private");
+      setStatusFilter(found.status || "open");
+      handleSelectTicket(found);
+      return;
+    }
+    fetchTicket(ticketId)
+      .then(({ data }) => {
+        if (!data) return;
+        const normalized = normalizeTicket(data as Record<string, unknown>);
+        setTabType(normalized.isGroup ? "groups" : "private");
+        setStatusFilter(normalized.status || "open");
+        const listNow = useTicketStore.getState().tickets;
+        setTickets([normalized, ...listNow.filter((tk) => tk.id !== normalized.id)]);
+        handleSelectTicket(normalized);
+      })
+      .catch((err) => {
+        if (!handleTicketAccessDenied(err, ticketId, t("noTicketAccess"))) {
+          toast.error(t("ticketNotFound"));
+        }
+      });
+  };
 
   // Handler para ?spy=ID (vindo de protocolos)
   const spyDeepLinkHandled = useRef(false);
@@ -5907,6 +6368,9 @@ export default function AtendimentoPage() {
   }, [searchParams]);
 
   const handleSelectTicket = async (ticket: Ticket) => {
+    // Texto do atendente esperando para juntar (WABA) sai antes da troca — inclusive ao
+    // reabrir o mesmo atendimento, que limpa as bolhas da tela.
+    void flushWabaAgentTextNow(useTicketStore.getState().currentTicket?.id);
     // Marca esta selecao como a atual; resolucoes async de clicks anteriores
     // ficam invalidadas pelo guard logo abaixo apos o fetchTicket.
     selectionRef.current = ticket.id;
@@ -5938,8 +6402,14 @@ export default function AtendimentoPage() {
       const fullTicket = !normalized.tags?.length && ticket.tags?.length
         ? { ...normalized, tags: ticket.tags }
         : normalized;
-      // Preserva unreadMessages: 0 — o ticket já foi aberto, não restaurar o valor antigo
-      const fullTicketRead = { ...fullTicket, unreadMessages: 0 };
+      // Preserva unreadMessages: 0 — o ticket já foi aberto, não restaurar o valor antigo.
+      // Selo "Anúncio" já recebido (lista ou aviso de tempo real, inclusive durante o GET)
+      // fica quando a resposta não traz a chave (keepAdReferral).
+      const openedNow = useTicketStore.getState().currentTicket;
+      const fullTicketRead = keepAdReferral<Ticket>(
+        openedNow?.id === ticket.id ? openedNow : ticket,
+        { ...fullTicket, unreadMessages: 0 }
+      );
       setCurrentTicket(fullTicketRead);
       // Popula o cache de validação Baileys com o número fresco do banco — primeiro send
       // depois disso não precisa de round-trip extra (vide handleSendText/handleSendMedia).
@@ -6049,6 +6519,30 @@ export default function AtendimentoPage() {
     searchNavRef.current = { term: "", lastId: null };
     setSearchNav(null);
   }, [currentTicket?.id]);
+
+  // Foto do WhatsApp vencida (a URL do Baileys/Zapo vence em ~10 dias e só era
+  // renovada para contato sem foto): ao abrir a conversa, pede a busca de novo.
+  // Uma vez por contato na página (canal fora/ocupado ou falha de rede liberam
+  // para a próxima abertura); a foto nova chega pelo contact:update.
+  const picTicketId = currentTicket?.id;
+  const picChannel = (currentTicket?.channel || "").toLowerCase();
+  const picContactId = currentTicket?.contact?.id;
+  const picUrl = currentTicket?.contact?.profilePicUrl;
+  useEffect(() => {
+    if (!picTicketId || !picContactId) return;
+    if (picChannel !== "baileys" && picChannel !== "zapo") return;
+    if (!isWhatsappPicUrlStale(picUrl)) return;
+    if (!claimContactPictureRefresh(picContactId)) return;
+    refreshContactPicture(picTicketId)
+      .then(({ data }) => {
+        if (shouldRetryContactPictureRefresh(data?.status)) releaseContactPictureRefresh(picContactId);
+      })
+      .catch((err) => {
+        // O catch recebe o response (lib/api). 404 = backend sem a rota: não insistir.
+        const status = err?.status ?? err?.response?.status;
+        if (status !== 404) releaseContactPictureRefresh(picContactId);
+      });
+  }, [picTicketId, picChannel, picContactId, picUrl]);
 
   const handleSearchMessagesInHistory = useCallback(async (term: string, direction: "older" | "newer" = "older") => {
     if (!term.trim() || !currentTicket || searching) return;
@@ -6261,6 +6755,7 @@ export default function AtendimentoPage() {
     (async () => {
       try {
         const result = await analyzeSentiment(tid, { background: true });
+        clearCopilotAutoPause("sentiment");
         if (cancelled) { toast.dismiss(toastId); return; }
         useUrgencyStore.getState().setSentiment(tid, result.sentiment);
         updateTicketInStore({
@@ -6281,6 +6776,9 @@ export default function AtendimentoPage() {
         }
       } catch (err) {
         toast.dismiss(toastId);
+        // Falha (fora o 422 de "sem chave") suspende o disparo AUTOMÁTICO por 10 min
+        // nesta aba; o "Reanalisar" do aviso e o botão do Copiloto seguem funcionando.
+        noteCopilotAutoFailure("sentiment", err);
         const e = err as { response?: { status?: number; data?: { error?: string } } };
         if (e.response?.status !== 422) {
           process.env.NODE_ENV === "development" && console.warn("auto-sentiment failed:", err);
@@ -6330,6 +6828,9 @@ export default function AtendimentoPage() {
       });
       return;
     }
+    // Provedor de IA falhou há pouco nesta aba: nada de disparo automático por
+    // 10 min (senão cada atendimento aberto repetia a falha). O manual segue.
+    if (isCopilotAutoPaused("sentiment")) return;
     // Sem análise prévia → roda automaticamente.
     runSentimentAnalysis(tid);
   }, [currentTicket?.id, currentTicket?.sentiment, currentTicket?.sentimentAnalyzedAt, copilotAutoSentiment, t, runSentimentAnalysis]);
@@ -6394,7 +6895,127 @@ export default function AtendimentoPage() {
     }
   };
 
-  const handleSendText = async (text: string, quotedMsg?: Message, opts?: { forceLinked?: boolean }) => {
+  // ── WABA: texto do atendente esperando para juntar (lib/waba-agent-grouping) ──
+  // Avisos do gerente: o balão é o do idFront do grupo; o grupo pode sair depois de
+  // trocar de atendimento (pelo retrato), então tudo aqui lê o store na hora.
+  const wabaGroupCallbacks: WabaGroupCallbacks = {
+    onSending: (g: WabaGroupSnapshot) => {
+      setMessages(useTicketStore.getState().messages.map((m: Message) =>
+        m.id === g.idFront && m.groupingPending ? { ...m, groupingPending: undefined } : m
+      ));
+    },
+    onSent: (g: WabaGroupSnapshot) => {
+      // `{ duplicate: true }` também chega aqui: a mensagem já tinha saído.
+      setMessages(useTicketStore.getState().messages.map((m: Message) =>
+        m.id === g.idFront ? { ...m, groupingPending: undefined, ...(m.ack === 0 ? { ack: 1 } : {}) } : m
+      ));
+      retryExecRef.current.delete(g.idFront);
+    },
+    onFailed: (g: WabaGroupSnapshot, sendErr: unknown, retry: () => Promise<unknown>) => {
+      const errAny = sendErr as { response?: unknown; data?: { error?: unknown }; status?: number } | null;
+      setMessages(useTicketStore.getState().messages.map((m: Message) =>
+        m.id === g.idFront ? { ...m, ack: -1, groupingPending: undefined } : m
+      ));
+      // "Tentar novamente" com o texto juntado (mesmo idFront), como no envio de hoje.
+      retryExecRef.current.set(g.idFront, { exec: retry, kind: "text", hadResponse: !!errAny?.response });
+      // A falha pode chegar com outro atendimento na tela: a bolha é refeita do retrato.
+      // Com o atendimento na tela e sem o balão do idFront, o servidor já gravou a linha
+      // (o chat:create trocou o balão) e ela mostra a falha sozinha: nada de bolha a mais.
+      const stillOnScreen = useTicketStore.getState().currentTicket?.id === g.ticketId;
+      const onScreenMsg = useTicketStore.getState().messages.find((m: Message) => m.id === g.idFront);
+      if (stillOnScreen && !onScreenMsg) {
+        if (handleTicketAccessDenied(sendErr, g.ticketId, t("noTicketAccess"))) return;
+        toast.error(t("errorSendingMessage"));
+        return;
+      }
+      const failedMsg: Message = onScreenMsg ?? {
+        id: g.idFront,
+        stableKey: g.idFront,
+        body: g.body,
+        read: true,
+        fromMe: true,
+        ack: -1,
+        createdAt: g.createdAt,
+        mediaType: "chat",
+        ...(g.quotedMsg ? { quotedMsg: g.quotedMsg as Message["quotedMsg"] } : {}),
+      };
+      const failedList = failedByTicketRef.current.get(g.ticketId) ?? [];
+      failedByTicketRef.current.set(g.ticketId, [...failedList.filter((m) => m.id !== g.idFront), { ...failedMsg, ack: -1, groupingPending: undefined }]);
+      if (handleTicketAccessDenied(sendErr, g.ticketId, t("noTicketAccess"))) return;
+      const copyAction = g.body
+        ? { action: { label: tBubble("copyText"), onClick: () => { navigator.clipboard.writeText(g.body); } } }
+        : undefined;
+      const errCode = String(errAny?.data?.error || "");
+      if (errCode.startsWith("ERR_NUMBER_RESOLVED_MISMATCH")) toast.error(tErrors("numberResolvedMismatch"), copyAction);
+      else toast.error(t("errorSendingMessage"), copyAction);
+    },
+    onRemove: (g: WabaGroupSnapshot) => {
+      setMessages(useTicketStore.getState().messages.filter((m: Message) => m.id !== g.idFront));
+    },
+  };
+
+  // Segundos que este texto espera (0 = sai na hora): canal WABA com o campo do
+  // atendente ligado, fora do modo híbrido (D17), sem envio forçado pelo vinculado
+  // e com folga até o fim da janela de 24 h.
+  const wabaAgentGroupSeconds = (ticket: Ticket, opts?: { forceLinked?: boolean }): number => {
+    const wid = (ticket as unknown as { whatsappId?: number }).whatsappId ?? ticket.whatsapp?.id;
+    if (wid == null) return 0;
+    const whatsapp = useWhatsappStore.getState().whatsapps.find((w) => w.id === wid);
+    return agentGroupSecondsFor({
+      channel: ticket.channel,
+      whatsapp,
+      lastMessageReceived: ticket.lastMessageReceived,
+      forceLinked: opts?.forceLinked,
+    });
+  };
+
+  // Texto do atendente no WABA que espera para juntar: cria o balão (ou faz o que
+  // espera crescer). false = não juntou (dados do canal faltando) e o envio de hoje segue.
+  const sendWabaTextGrouped = async (ticket: Ticket, text: string, quotedMsg: Message | undefined, seconds: number): Promise<boolean> => {
+    const whatsapp = (ticket as { whatsapp?: { tokenAPI?: string; token_api?: string } }).whatsapp;
+    let tokenApi = whatsapp?.tokenAPI ?? whatsapp?.token_api;
+    let contactNumber: string | undefined = ticket.contact?.number || undefined;
+    let contactBsuid: string | undefined = ticket.contact?.bsuid || undefined;
+    if (!tokenApi || !contactNumber) {
+      const freshData = await hydrateWabaSendData(ticket.id);
+      tokenApi = tokenApi || freshData?.tokenApi;
+      contactNumber = contactNumber || freshData?.contactNumber;
+      contactBsuid = contactBsuid || freshData?.contactBsuid;
+    }
+    const contactIdentifier = contactNumber || contactBsuid;
+    if (!tokenApi || !contactIdentifier) return false;
+    const result = appendWabaAgentText({
+      ticketId: ticket.id,
+      text,
+      quotedMsg,
+      seconds,
+      base: { from: contactIdentifier, tokenApi, ticketId: ticket.id },
+      callbacks: wabaGroupCallbacks,
+    });
+    if (!result) return false;
+    // A busca dos dados do canal pode terminar com outra conversa na tela: o balão não
+    // entra na conversa errada e o texto sai na hora (o atendente já saiu deste atendimento).
+    if (useTicketStore.getState().currentTicket?.id !== ticket.id) {
+      void flushWabaAgentTextNow(ticket.id);
+      return true;
+    }
+    // addMessage mescla quando o balão já existe (texto acrescentado = mesmo idFront).
+    addMessage({
+      id: result.idFront,
+      stableKey: result.idFront,
+      body: result.body,
+      read: true,
+      fromMe: true,
+      ack: 0,
+      createdAt: result.createdAt,
+      mediaType: "chat",
+      groupingPending: true,
+      ...(result.quotedMsg ? { quotedMsg: result.quotedMsg as Message["quotedMsg"] } : {}),
+    });
+    return true;
+  };
+
+  const handleSendText = async (text: string, quotedMsg?: Message, opts?: { forceLinked?: boolean; webchatInvite?: boolean }) => {
     // Snapshot do ticket no momento do disparo. Toda a funcao usa `ticket.*`,
     // nao `currentTicket.*`, pra garantir que callbacks/closures concorrentes
     // nao desviem o destino entre o addMessage otimista e a chamada de envio.
@@ -6413,7 +7034,22 @@ export default function AtendimentoPage() {
       toast.info(t("useEmailButton"));
       return;
     }
+    // WABA com "Juntar textos do atendente" no canal: o texto espera num balão que
+    // cresce e sai junto com os próximos (lib/waba-agent-grouping). Fora disso, o
+    // envio de hoje — e o sendTextWaba solta antes o que estiver esperando.
+    // O convite do WebChat nunca espera: juntado, podia virar legenda de um arquivo, e a
+    // legenda vai crua à Meta (o cliente receberia "{{linkWebchat}}").
+    if (ch === "waba" && !opts?.webchatInvite) {
+      const groupSeconds = wabaAgentGroupSeconds(ticket, opts);
+      if (groupSeconds > 0 && fitsGroupedText([], text)) {
+        if (await sendWabaTextGrouped(ticket, text, quotedMsg, groupSeconds)) return;
+      }
+    }
     const idFront = `front-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    // UAzapi: citação que não vai chegar ao celular (fora dos 7 dias) não entra na
+    // bolha provisória — o merge do chat:create mantém a citação dela quando o
+    // servidor manda sem. A citação segue indo ao servidor, que decide de novo.
+    const optimisticQuote = ch === "uazapi" && uazapiQuoteWillBeDropped(quotedMsg) ? undefined : quotedMsg;
     addMessage({
       id: idFront,
       stableKey: idFront,
@@ -6424,7 +7060,7 @@ export default function AtendimentoPage() {
       ack: 0,
       createdAt: new Date().toISOString(),
       mediaType: "chat",
-      ...(quotedMsg ? { quotedMsg } : {}),
+      ...(optimisticQuote ? { quotedMsg: optimisticQuote } : {}),
     });
     try {
       if (ch === "waba") {
@@ -6459,6 +7095,8 @@ export default function AtendimentoPage() {
         if (quotedMsg) payload.quotedMsg = quotedMsg;
         // Janela 24h fechada + modo híbrido: força o envio pela conexão vinculada.
         if (opts?.forceLinked) payload.forceLinked = true;
+        // Botão do convite: o servidor recusa (409) em vez de mandar o texto sem o link.
+        if (opts?.webchatInvite) payload.webchatInvite = true;
         retryExecRef.current.set(idFront, { exec: () => sendTextWaba(payload), kind: "text" });
         await sendTextWaba(payload);
       } else if (ch === "whatsapp" || ch === "baileys" || ch === "zapo") {
@@ -6511,6 +7149,7 @@ export default function AtendimentoPage() {
           read: 1,
         };
         if (quotedMsg) payload.quotedMsg = quotedMsg;
+        if (opts?.webchatInvite) payload.webchatInvite = true;
         retryExecRef.current.set(idFront, { exec: () => sendGupshupText(payload), kind: "text" });
         await sendGupshupText(payload);
       } else if (ch === "dialog360") {
@@ -6525,6 +7164,7 @@ export default function AtendimentoPage() {
           read: 1,
         };
         if (quotedMsg) payload.quotedMsg = quotedMsg;
+        if (opts?.webchatInvite) payload.webchatInvite = true;
         retryExecRef.current.set(idFront, { exec: () => sendDialog360Text(payload), kind: "text" });
         await sendDialog360Text(payload);
       } else {
@@ -6568,6 +7208,9 @@ export default function AtendimentoPage() {
       const errCode = String(sendErr?.response?.data?.error || sendErr?.data?.error || "");
       if (errCode.startsWith("ERR_NUMBER_RESOLVED_MISMATCH")) {
         toast.error(tErrors("numberResolvedMismatch"), copyAction);
+      } else if (getBackendErrorCode(sendErr) === "ERR_WEBCHAT_INVITE_UNAVAILABLE") {
+        // Convite recusado no servidor: o link sairia vazio (o Gupshup traz o código em `message`).
+        toast.error(tInviteSend("sendRefused"));
       } else if (errCode === "ERR_INSTAGRAM_THREAD_NOT_OWNED") {
         toast.error(t("errInstagramThreadNotOwned"), copyAction);
       } else if (errCode === "ERR_ML_NO_REPLY_CONTEXT") {
@@ -6582,7 +7225,7 @@ export default function AtendimentoPage() {
     }
   };
 
-  const handleSendMedia = async (file: File, caption: string, quotedMsg?: Message, isSticker?: boolean) => {
+  const handleSendMedia = async (file: File, caption: string, quotedMsg?: Message, isSticker?: boolean, opts?: { voice?: boolean; allowGroupCaption?: boolean }) => {
     // Snapshot — vide handleSendText (mesma protecao contra envio cruzado).
     const ticket = currentTicket;
     if (!ticket) return;
@@ -6605,7 +7248,29 @@ export default function AtendimentoPage() {
     }
     const idFront = `front-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     const mediaType = isSticker ? "sticker" : (mimePrefix === "image" ? "image" : mimePrefix === "video" ? "video" : mimePrefix === "audio" ? "audio" : "document");
+    // WABA: texto do atendente que esperava para juntar (lib/waba-agent-grouping). No
+    // envio de UM arquivo (imagem, vídeo, documento) ele vira a legenda, até 1.024, e
+    // a citação dele vai na mídia sem citação própria (D13). Vários arquivos, mensagem
+    // rápida, figurinha, áudio e voz (ou legenda que não cabe): o texto sai antes,
+    // separado — o sendMediaWaba/sendStickerWaba solta o grupo antes do POST.
+    // Só com os dados de envio já no atendimento: se faltarem, o envio abaixo pode desistir
+    // (aviso de dados indisponíveis) e o texto tirado do grupo sumiria junto com a mídia.
+    const wabaSnap = (ticket as { whatsapp?: { tokenAPI?: string; token_api?: string } }).whatsapp;
+    const hasWabaSendData = !!(wabaSnap?.tokenAPI ?? wabaSnap?.token_api) && !!(ticket.contact?.number || ticket.contact?.bsuid);
+    if (ch === "waba" && opts?.allowGroupCaption && !isSticker && !opts?.voice && hasWabaSendData && hasPendingWabaText(ticket.id)
+      && (mediaType === "image" || mediaType === "video" || mediaType === "document")) {
+      const taken = takeWabaAgentTextForCaption(ticket.id, caption);
+      if (taken) {
+        caption = taken.caption;
+        if (!quotedMsg && taken.quotedMsg) quotedMsg = taken.quotedMsg as Message;
+      }
+    }
+    // Áudio do gravador (ou resposta rápida com "Mensagem de Voz"): pede ao backend que mande
+    // como mensagem de voz. Campo próprio — nunca o `voice` do /noRedis (lá ele envia em dobro).
+    const asVoice = !!opts?.voice && mediaType === "audio";
     const blobUrl = URL.createObjectURL(file);
+    // UAzapi: mesma regra do handleSendText (citação fora dos 7 dias não entra na bolha).
+    const optimisticQuote = ch === "uazapi" && uazapiQuoteWillBeDropped(quotedMsg) ? undefined : quotedMsg;
     addMessage({
       id: idFront,
       stableKey: idFront,
@@ -6618,7 +7283,7 @@ export default function AtendimentoPage() {
       mediaUrl: blobUrl,
       mediaType,
       fileName: file.name,
-      ...(quotedMsg ? { quotedMsg } : {}),
+      ...(optimisticQuote ? { quotedMsg: optimisticQuote } : {}),
     });
     // Progresso de upload na bolha otimista: throttle de ≥5 pontos (ou 100) p/ não
     // re-renderizar a lista a cada chunk. e.total pode ser undefined → não seta.
@@ -6669,6 +7334,7 @@ export default function AtendimentoPage() {
         fd.append("ticketId", String(ticket.id));
         if (caption) fd.append("caption", caption);
         if (quotedMsg) fd.append("quotedMsg", JSON.stringify(quotedMsg));
+        if (asVoice) fd.append("asVoice", "true");
         // Figurinha (image/webp) tem endpoint dedicado /wabametaSticker —
         // /wabametaFile so aceita image/jpeg|png + audio/video/doc.
         if (isSticker) {
@@ -6712,6 +7378,7 @@ export default function AtendimentoPage() {
         fd.append("ticket", JSON.stringify(ticket));
         if (caption) fd.append("caption", caption);
         if (quotedMsg) fd.append("quotedMsg", JSON.stringify(quotedMsg));
+        if (asVoice) fd.append("asVoice", "true");
         retryExecRef.current.set(idFront, { exec: () => sendNoRedis(fd, { onUploadProgress }), kind: "media" });
         await sendNoRedis(fd, { onUploadProgress });
       } else if (ch === "gupshup" || ch === "dialog360") {
@@ -6731,6 +7398,7 @@ export default function AtendimentoPage() {
         fd.append("fromMe", "true");
         fd.append("read", "1");
         if (quotedMsg) fd.append("quotedMsg", JSON.stringify(quotedMsg));
+        if (asVoice) fd.append("asVoice", "true");
         const senderMap = ch === "gupshup"
           ? { image: sendGupshupImage, video: sendGupshupVideo, audio: sendGupshupAudio, document: sendGupshupDocument, sticker: sendGupshupSticker }
           : { image: sendDialog360Image, video: sendDialog360Video, audio: sendDialog360Audio, document: sendDialog360Doc, sticker: sendDialog360Sticker };
@@ -6752,6 +7420,7 @@ export default function AtendimentoPage() {
         // detecta mime image/webp e manda como foto normal.
         fd.append("isSticker", isSticker ? "true" : "false");
         if (quotedMsg) fd.append("quotedMsg", String(quotedMsg.id ?? ""));
+        if (asVoice) fd.append("asVoice", "true");
         retryExecRef.current.set(idFront, { exec: () => sendMessageApi(ticket.id, fd, { channel: ticket.channel, onUploadProgress }), kind: "media" });
         await sendMessageApi(ticket.id, fd, { channel: ticket.channel, onUploadProgress });
       }
@@ -6948,7 +7617,7 @@ export default function AtendimentoPage() {
       setWebmailModalOpen(false);
       setWebmailFiles([]);
     } catch (e: unknown) {
-      const msg = (e as { response?: { data?: { error?: string } }; message?: string })?.response?.data?.error ?? (e as Error).message ?? "Erro ao enviar e-mail";
+      const msg = (e as { response?: { data?: { error?: string } }; message?: string })?.response?.data?.error ?? (e as Error).message ?? t("errorSendingEmail");
       toast.error(String(msg));
     } finally {
       setWebmailLoading(false);
@@ -6987,12 +7656,22 @@ export default function AtendimentoPage() {
     return match?.[1] || path.split("/").pop() || undefined;
   };
 
-  const buildForwardMsg = (msg: Message) => ({
-    ...msg,
-    mediaName: deriveForwardMediaName(msg),
-    ticketId: msg.ticketId ?? currentTicket?.id,
-    ticket: { channel: currentTicket?.channel ?? "" },
-  });
+  const buildForwardMsg = (msg: Message) => {
+    const ticketId = msg.ticketId ?? currentTicket?.id;
+    const ticket = { channel: currentTicket?.channel ?? "" };
+    // Localização vai como texto pela fila de texto de cada canal, SEM o id da original:
+    // com ele o backend relê a linha e reaproveita a miniatura JPEG do WhatsApp Web como mídia.
+    const loc = getForwardLocation(msg);
+    if (loc) {
+      return { ticketId, ticket, isForwarded: true, mediaType: "chat", body: buildLocationShareText(loc) };
+    }
+    return {
+      ...msg,
+      mediaName: deriveForwardMediaName(msg),
+      ticketId,
+      ticket,
+    };
+  };
 
   // ── Forward to contact (opens contact search modal) ──────────────────────
   const [forwardContactMsg, setForwardContactMsg] = useState<Message | null>(null);
@@ -7054,8 +7733,14 @@ export default function AtendimentoPage() {
       setForwardContactMsg(null);
       setMultiForwardSelected([]);
       setMultiForwardActive(false);
-    } catch {
-      toast.error(t("errorForwardingMessage"));
+    } catch (err) {
+      toast.error(
+        getBackendErrorCode(err) === "ERR_FORWARD_CHANNEL_NOT_SUPPORTED"
+          ? t("forwardChannelNotSupported")
+          : getBackendErrorCode(err) === "ERR_FORWARD_MEDIA_NOT_SUPPORTED"
+            ? t("forwardMediaNotSupported")
+            : t("errorForwardingMessage")
+      );
     } finally {
       setForwardContactSending(false);
     }
@@ -7104,8 +7789,11 @@ export default function AtendimentoPage() {
       const myId = user?.userId;
       const date = new Date();
       const msg = forwardPrivateMsg;
+      // Localização vai pelo ramo de texto com os links (a do WhatsApp Web guarda uma
+      // miniatura em mediaUrl, que não é a localização).
+      const forwardLoc = getForwardLocation(msg);
 
-      if (msg.mediaUrl && !msg.mediaUrl.includes("nullextension")) {
+      if (!forwardLoc && msg.mediaUrl && !msg.mediaUrl.includes("nullextension")) {
         // Fetch media blob once, then send to each selected user.
         // Prefer storageUrl (S3/R2 público) quando existir — evita 404 em deploy com keepLocalCopy=false.
         const apiUrl = process.env.NEXT_PUBLIC_API_URL || "";
@@ -7114,8 +7802,8 @@ export default function AtendimentoPage() {
         let mediaPath = sourceUrl;
         try { mediaPath = new URL(sourceUrl).pathname; } catch { /* keep as-is */ }
         const fetchUrl = isExternalMedia ? sourceUrl : `${apiUrl}${mediaPath}`
-        const resp = await fetch(fetchUrl, { credentials: isExternalMedia ? "omit" : "include" });
-        const blob = resp.ok ? await resp.blob() : null;
+        // Bucket S3/R2 sem CORS bloqueava a leitura direta e o encaminhamento falhava.
+        const blob = await fetchMediaBlob(fetchUrl, { credentials: isExternalMedia ? "omit" : "include" });
 
         for (const receiverId of forwardPrivateSelectedUsers) {
           const headerText = currentTicket
@@ -7145,7 +7833,7 @@ export default function AtendimentoPage() {
           }
         }
       } else {
-        const bodyText = msg.body || "";
+        const bodyText = forwardLoc ? buildLocationShareText(forwardLoc) : msg.body || "";
         const header = currentTicket
           ? `📎 Ticket #${currentTicket.id} — ${currentTicket.contact?.name || ""}\n`
           : "";
@@ -7186,8 +7874,14 @@ export default function AtendimentoPage() {
       });
       toast.success(t("messageForwardedToOtherChannel"));
       setForwardOtherChannelMsg(null);
-    } catch {
-      toast.error(t("errorForwardingToOtherChannel"));
+    } catch (err) {
+      toast.error(
+        getBackendErrorCode(err) === "ERR_FORWARD_CHANNEL_NOT_SUPPORTED"
+          ? t("forwardChannelNotSupported")
+          : getBackendErrorCode(err) === "ERR_FORWARD_MEDIA_NOT_SUPPORTED"
+            ? t("forwardMediaNotSupported")
+            : t("errorForwardingToOtherChannel")
+      );
     }
   };
 
@@ -7313,7 +8007,13 @@ export default function AtendimentoPage() {
       toast.success(t("messageEdited"));
     } catch (err) {
       if (handleTicketAccessDenied(err, Number(ticketId), t("noTicketAccess"))) return;
-      toast.error(t("errorEditingMessage"));
+      // Canais não oficiais: o servidor diz se o canal recusou, se não confirmou a tempo
+      // (pode ter editado) ou se está fora do ar. A bolha só muda quando o canal confirma.
+      const editCode = getBackendErrorCode(err);
+      if (/_EDIT_UNCONFIRMED$/.test(editCode)) toast.warning(tE("editUnconfirmed"));
+      else if (/_EDIT_UNAVAILABLE$/.test(editCode)) toast.error(tE("editUnavailable"));
+      else if (/_EDIT_REJECTED$/.test(editCode) || editCode === "ERR_SENDING_WAPP_EDITION_MSG") toast.error(tE("editRejected"));
+      else toast.error(t("errorEditingMessage"));
     }
   };
 
@@ -7549,6 +8249,7 @@ export default function AtendimentoPage() {
     setAvulsaMessage("");
     setAvulsaContactSearch("");
     setAvulsaContactResults([]);
+    setAvulsaPickedContact(null);
     setAvulsaApplyBrPhoneCorrection(true);
     setAvulsaOrderDetails(emptyOrderDetails());
     setAvulsaOpen(true);
@@ -7569,13 +8270,27 @@ export default function AtendimentoPage() {
     return () => clearTimeout(timer);
   }, [avulsaContactSearch]);
 
+  // Conexão da última carga: só a TROCA de conexão limpa lista/modelo/variáveis (a lista de
+  // conexões também muda com o status, e isso não pode apagar o modelo que está sendo preenchido).
+  const avulsaTplChannelRef = useRef<string | null>(null);
   // Carrega templates quando um canal oficial (WABA/Dialog360/Gupshup) é escolhido na avulsa.
   // Usa getTemplatesForChannel para despachar ao BSP certo (não só WABA via tokenAPI).
   // Recarrega SEMPRE que o modal abre (não só quando a sessão muda) para evitar
   // lista de templates em cache/stale — ex.: template editado para incluir {{2}}
   // que não aparecia porque a lista antiga só tinha {{1}}.
   useEffect(() => {
-    if (!avulsaOpen) return;
+    if (!avulsaOpen) {
+      setAvulsaLoadingTemplates(false);
+      return;
+    }
+    // Troca de conexão: o modelo escolhido (inclusive pelo atalho de 1 clique) era da anterior.
+    if (avulsaTplChannelRef.current !== avulsaWhatsappId) {
+      avulsaTplChannelRef.current = avulsaWhatsappId;
+      setAvulsaWabaTemplates([]);
+      setAvulsaSelectedTemplate(null);
+      setAvulsaTemplateVars([]);
+      setAvulsaTemplateSearch("");
+    }
     const wp = whatsappsList.find((w) => String(w.id) === avulsaWhatsappId);
     const tp = (wp?.type ?? "").toLowerCase();
     const isWabaLike = tp.includes("waba") || tp === "dialog360" || tp === "gupshup";
@@ -7583,16 +8298,21 @@ export default function AtendimentoPage() {
     if (!wp || !isWabaLike || (tp.includes("waba") && !wp.tokenAPI)) {
       setAvulsaWabaTemplates([]);
       setAvulsaSelectedTemplate(null);
+      setAvulsaLoadingTemplates(false);
       return;
     }
+    // Resposta de uma carga anterior (outra conexão) é descartada.
+    let alive = true;
     setAvulsaLoadingTemplates(true);
     getTemplatesForChannel({ id: wp.id, type: wp.type, tokenAPI: wp.tokenAPI, appId: (wp as { appId?: string }).appId })
       .then((res) => {
+        if (!alive) return;
         const list = (Array.isArray(res) ? res : (res as { data?: WabaTemplate[] })?.data || []) as WabaTemplate[];
         setAvulsaWabaTemplates([...list].sort((a, b) => (a.name || "").toLowerCase().localeCompare((b.name || "").toLowerCase())));
       })
       .catch(() => {})
-      .finally(() => setAvulsaLoadingTemplates(false));
+      .finally(() => { if (alive) setAvulsaLoadingTemplates(false); });
+    return () => { alive = false; };
   }, [avulsaWhatsappId, whatsappsList, avulsaOpen]);
 
   // Parse variables when avulsa template changes
@@ -7630,6 +8350,29 @@ export default function AtendimentoPage() {
     [avulsaSelectedTemplate]
   );
 
+  // Avisos de variável da mensagem rápida na avulsa, pelo canal escolhido: dados do cadastro
+  // só com contato escolhido na busca (nome com letra e o mesmo número/e-mail do campo);
+  // WhatsApp Web/Baileys/Zapo enviam antes de criar o atendimento (protocolo vazio);
+  // o e-mail não cria atendimento e {{user}} é quem envia.
+  const avulsaVarWarnings = React.useMemo<QuickReplyVarWarningsContext | null>(() => {
+    const wp = whatsappsList.find((w) => String(w.id) === avulsaWhatsappId);
+    if (!wp) return null;
+    const tp = (wp.type ?? "").toLowerCase();
+    const picked = avulsaPickedContact && /\p{L}/u.test(avulsaPickedContact.name) ? avulsaPickedContact : null;
+    if (AVULSA_EMAIL_CHANNEL_TYPES.includes(tp)) {
+      const email = avulsaEmail.trim().toLowerCase();
+      const contactKnown = !!picked && !!email && picked.email.trim().toLowerCase() === email;
+      return { contactKnown, ownerKnown: true, ticketVarsEmpty: true, channel: "email" };
+    }
+    const contactKnown = !!picked && !!picked.number && picked.number === avulsaNumber;
+    return {
+      contactKnown,
+      ownerKnown: avulsaDesiredStatus === "open",
+      ticketVarsEmpty: ["whatsapp", "baileys", "zapo"].includes(tp),
+      channel: "phone",
+    };
+  }, [whatsappsList, avulsaWhatsappId, avulsaPickedContact, avulsaEmail, avulsaNumber, avulsaDesiredStatus]);
+
   const handleSendAvulsa = useCallback(async (skipPrecheck = false) => {
     const wp = whatsappsList.find((w) => String(w.id) === avulsaWhatsappId);
     if (!wp) return;
@@ -7649,17 +8392,20 @@ export default function AtendimentoPage() {
           to: avulsaEmail.trim(),
           subject: avulsaEmailSubject.trim(),
           text: avulsaMessage.trim(),
+          // Variáveis trocadas no servidor: contato pelo e-mail do destino, {{user}} = quem envia.
+          applyVariables: true,
         });
         const ticketId = (emailRes as { ticketId?: number })?.ticketId;
         toast.success(t("messageSent"));
         setAvulsaOpen(false);
         setAvulsaWhatsappId(""); setAvulsaNumber(""); setAvulsaMessage("");
         setAvulsaEmail(""); setAvulsaEmailSubject(""); setAvulsaQueue("none");
+        setAvulsaPickedContact(null);
         if (ticketId) {
           router.push(`/atendimento?ticketId=${ticketId}`);
         }
       } catch {
-        toast.error(t("errorSending"));
+        toast.error(t("errorSendingEmail"));
       } finally {
         setAvulsaSending(false);
       }
@@ -7986,18 +8732,31 @@ export default function AtendimentoPage() {
     if (!ids.length) return;
     // Fechar SEM "não enviar despedida" manda mensagem a cada contato: um por vez.
     const sendsFarewell = action === "closed" && extra?.skipFarewell !== true;
+    // Encerrado, mas a despedida não saiu (o servidor responde 200 com farewellError).
+    let farewellFailures = 0;
     const res = await runBulkWithProgress(
       ids,
-      (id) => updateTicket(id, { status: action, ...extra }),
+      async (id) => {
+        const r = await updateTicket(id, {
+          status: action,
+          ...extra,
+          // "Pendente" em massa = devolver à fila: registra no histórico de transferências
+          // (backend antigo ignora o campo).
+          ...(action === "pending" ? { transferIntent: "return_to_queue" } : {}),
+        });
+        if (sendsFarewell && farewellFailed(r)) farewellFailures += 1;
+        return r;
+      },
       sendsFarewell ? BULK_ACTION_SENDING_CONCURRENCY : BULK_ACTION_CONCURRENCY
     );
     reportBulkResult(res);
+    if (farewellFailures > 0) toast.warning(tE("farewellNotSentBulk", { count: farewellFailures }));
     // Lote 100% falho não mexe em nada: mantém a seleção para o operador tentar de novo.
     if (res.ok > 0) {
       cancelBulkMode();
       loadTickets({ upToPage: ticketsPageNumberRef.current });
     }
-  }, [selectedTicketIds, runBulkWithProgress, reportBulkResult, cancelBulkMode, loadTickets]);
+  }, [selectedTicketIds, runBulkWithProgress, reportBulkResult, cancelBulkMode, loadTickets, tE]);
 
   // "Resolver" e "Encerrar" do menu de massa caem aqui: nenhum dos dois fecha nada
   // sem passar pela confirmação, que é onde o operador decide sobre a despedida.
@@ -8171,11 +8930,20 @@ export default function AtendimentoPage() {
 
     // Reordena por updatedAt para refletir atualizações via socket sem full refresh
     // Respeita a ordem efetiva (override do usuário ou reverseOrder do tenant): asc = mais antigos primeiro
-    list = [...list].sort((a, b) =>
-      effectiveOrderAsc
-        ? new Date(a.updatedAt).getTime() - new Date(b.updatedAt).getTime()
-        : new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()
-    );
+    // Com "Listar atendimentos pela última mensagem", reordena pela data do selo do card
+    // (mesma chave do servidor); o socket mantém o lastMessageAt atualizado no store.
+    if (listByLastMessage) {
+      list = [...list].sort((a, b) => {
+        const diff = ticketLastMessageSortMs(a) - ticketLastMessageSortMs(b);
+        return effectiveOrderAsc ? diff : -diff;
+      });
+    } else {
+      list = [...list].sort((a, b) =>
+        effectiveOrderAsc
+          ? new Date(a.updatedAt).getTime() - new Date(b.updatedAt).getTime()
+          : new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()
+      );
+    }
 
     if (sortByAnswered) {
       list = [...list].sort((a, b) => {
@@ -8225,7 +8993,7 @@ export default function AtendimentoPage() {
     }
 
     return list;
-  }, [visibleTicketsAllStatuses, statusFilter, sortByAnswered, isReversed, effectiveOrderAsc, pinnedTickets, withUnreadMessages]);
+  }, [visibleTicketsAllStatuses, statusFilter, sortByAnswered, isReversed, effectiveOrderAsc, listByLastMessage, pinnedTickets, withUnreadMessages]);
 
   // Keep ref in sync so toggleTicketSelect (defined before filteredTickets) can use it
   filteredTicketsRef.current = filteredTickets;
@@ -8852,7 +9620,7 @@ export default function AtendimentoPage() {
                               {bulkMode ? t("cancelSelection") : t("selectMultiple")}
                             </DropdownMenuItem>
                             <DropdownMenuSeparator />
-                            {!isRestricted && (
+                            {!isRestricted && canStartConversation && (
                               <DropdownMenuItem onClick={handleIniciarConversaAvulsa}>
                                 <SendIcon className="h-4 w-4 mr-2" />
                                 {t("startAvulsa")}
@@ -8866,7 +9634,7 @@ export default function AtendimentoPage() {
                               </DropdownMenuItem>
                             )}
                             <DropdownMenuItem onClick={() => setIsReversed(!isReversed)}>
-                              <ArrowUpDown className="h-4 w-4 mr-2" />
+                              <ArrowUpDown className={cn("h-4 w-4 mr-2", isReversed && "text-primary")} />
                               {t("reverseOrder")}
                             </DropdownMenuItem>
                             <DropdownMenuItem onClick={() => setSortByAnswered(!sortByAnswered)}>
@@ -9293,7 +10061,15 @@ export default function AtendimentoPage() {
                                           const resumed = { ...pt, isPaused: false };
                                           handleSelectTicket(resumed);
                                           setPausedPanelOpen(false);
-                                        } catch { toast.error(tE("errorPause")); }
+                                        } catch (err) {
+                                          // Já tinha sido retomado: sai da lista de pausados mesmo assim.
+                                          if (getBackendErrorCode(err) === "ERR_TICKET_NOT_PAUSED") {
+                                            setPausedTickets((prev) => prev.filter((x) => x.id !== pt.id));
+                                            toast.info(tE("ticketAlreadyResumed"));
+                                          } else {
+                                            toast.error(tE("errorPause"));
+                                          }
+                                        }
                                       }}
                                     >
                                       <Play className="h-3.5 w-3.5 text-emerald-600" />
@@ -9660,6 +10436,43 @@ export default function AtendimentoPage() {
               )}
             </div>
           ) : (
+          <>
+          {/* Busca pelo número/protocolo do servidor anterior (empresa migrada): aviso
+              acima da lista, fora dos filtros dela (aba, data, limite de dias). */}
+          {legacyMatches.length > 0 && (
+            <div role="status" className="mx-1 mt-1 shrink-0 rounded-md border border-info/30 bg-info/10 p-2 text-xs">
+              <p className="mb-1 flex items-center gap-1.5 font-medium text-info">
+                <HistoryIcon className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                {tMigRef("lookupTitle")}
+              </p>
+              <div className="space-y-0.5">
+                {legacyMatches.map((match) => {
+                  const name = match.contactName
+                    ? (isRestricted
+                      ? `${match.contactName.slice(0, 5)}${match.contactName.length > 5 ? "..." : ""}`
+                      : match.contactName)
+                    : "";
+                  return (
+                    <button
+                      key={match.ticketId}
+                      type="button"
+                      onClick={() => openLegacyMatch(match.ticketId)}
+                      className="flex w-full min-w-0 flex-col items-start rounded px-1.5 py-1 text-left hover:bg-info/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+                    >
+                      <span className="max-w-full truncate font-medium text-foreground">
+                        {tMigRef("lookupItem", { oldId: match.oldId, ticketId: match.ticketId })}
+                      </span>
+                      {name && (
+                        <span className={cn("max-w-full truncate text-muted-foreground", legacyLookupLiveMode && "live-blur-text")}>
+                          {name}
+                        </span>
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
           <ScrollArea ref={listScrollRef} className="flex-1 min-h-0 min-w-0 overflow-x-hidden">
             {loading && tickets.length === 0 ? (
               <div className="p-1 space-y-0.5">
@@ -9798,6 +10611,7 @@ export default function AtendimentoPage() {
               </div>
             )}
           </ScrollArea>
+          </>
           )}
         </div>
 
@@ -9851,7 +10665,12 @@ export default function AtendimentoPage() {
               if (!tData) return;
               // Stale-fetch guard: descarta se o usuario trocou de ticket no meio do refresh
               if (selectionRef.current !== null && selectionRef.current !== ticketId) return;
-              const updated = normalizeTicket(tData as Record<string, unknown>);
+              // Selo "Anúncio" já na tela fica quando a resposta não traz a chave (keepAdReferral).
+              const openBeforeRefresh = useTicketStore.getState().currentTicket;
+              const updated = keepAdReferral<Ticket>(
+                openBeforeRefresh?.id === ticketId ? openBeforeRefresh : null,
+                normalizeTicket(tData as Record<string, unknown>)
+              );
               if (updated.status === "closed") {
                 // Mesma regra do refreshCurrentTicket: fora da aba Fechados o ticket
                 // encerrado sai da lista e da conversa; na aba Fechados ele segue visível
@@ -10030,6 +10849,12 @@ export default function AtendimentoPage() {
                   {multiForwardSelected.length > 0 && ` · ${multiForwardSelected.length} ${t("messages")}`}
                 </p>
               )}
+              {(multiForwardSelected.length > 0
+                ? multiForwardSelected.some((m) => getForwardLocation(m) !== null)
+                : getForwardLocation(forwardContactMsg) !== null) && <ForwardLocationNote />}
+              {(multiForwardSelected.length > 0
+                ? multiForwardSelected.some((m) => isForwardMediaMessage(m))
+                : isForwardMediaMessage(forwardContactMsg)) && <ForwardMediaNote />}
             </div>
             <DialogFooter>
               <Button variant="outline" onClick={() => { setForwardContactMsg(null); setMultiForwardActive(false); setMultiForwardSelected([]); }}>{t("cancel")}</Button>
@@ -10044,7 +10869,7 @@ export default function AtendimentoPage() {
         <Dialog open={!!forwardPrivateMsg} onOpenChange={(o) => { if (!o) setForwardPrivateMsg(null); }}>
           <DialogContent className="max-w-sm">
             <DialogHeader>
-              <DialogTitle>Encaminhar para Chat Privado</DialogTitle>
+              <DialogTitle>{t("forwardToPrivateChat")}</DialogTitle>
               <DialogDescription>{t("forwardPrivateChatDesc")}</DialogDescription>
             </DialogHeader>
             <div className="py-2 space-y-2">
@@ -10091,6 +10916,7 @@ export default function AtendimentoPage() {
                   )}
                 </>
               )}
+              {getForwardLocation(forwardPrivateMsg) !== null && <ForwardLocationNote />}
             </div>
             <DialogFooter>
               <Button variant="outline" onClick={() => setForwardPrivateMsg(null)}>{t("cancel")}</Button>
@@ -10129,16 +10955,30 @@ export default function AtendimentoPage() {
         <Dialog open={!!forwardOtherChannelMsg} onOpenChange={(o) => { if (!o) setForwardOtherChannelMsg(null); }}>
           <DialogContent className="max-w-sm">
             <DialogHeader>
-              <DialogTitle>Encaminhar para Outro Canal</DialogTitle>
+              <DialogTitle>{t("forwardToOtherChannel")}</DialogTitle>
               <DialogDescription>{t("selectDestinationDesc")}</DialogDescription>
             </DialogHeader>
             <div className="py-2">
               <SearchableSelect
-                options={whatsappsList.map((w) => ({ value: String(w.id), label: w.name }))}
+                // E-mail e lojas não têm fila de envio: a mensagem encaminhada nunca sairia.
+                // LinkedIn, OLX, TikTok e YouTube só recebem texto: saem quando há mídia.
+                options={whatsappsList
+                  .filter((w) => isForwardTargetChannelSupported(w.type))
+                  .filter((w) => !(isForwardMediaMessage(forwardOtherChannelMsg) && isForwardTextOnlyChannel(w.type)))
+                  .map((w) => ({ value: String(w.id), label: w.name }))}
                 value={forwardOtherChannelWhatsappId}
                 onValueChange={setForwardOtherChannelWhatsappId}
                 placeholder={t("selectChannelPlaceholder")}
               />
+              {getForwardLocation(forwardOtherChannelMsg) !== null && <ForwardLocationNote className="mt-3" />}
+              {isForwardMediaMessage(forwardOtherChannelMsg) ? (
+                <ForwardMediaNote className="mt-3" otherChannel />
+              ) : (
+                <p className="mt-3 flex items-start gap-1.5 text-xs text-muted-foreground">
+                  <Info className="h-3.5 w-3.5 shrink-0 mt-0.5" />
+                  <span>{t("forwardChannelListNote")}</span>
+                </p>
+              )}
             </div>
             <DialogFooter>
               <Button variant="outline" onClick={() => setForwardOtherChannelMsg(null)}>{t("cancel")}</Button>
@@ -10159,7 +10999,7 @@ export default function AtendimentoPage() {
             <div className="grid gap-4 py-4">
               <div className="grid gap-2">
                 <Label htmlFor="webmail-to">{t("webmailTo")}</Label>
-                <Input id="webmail-to" value={webmailTo} onChange={(e) => setWebmailTo(e.target.value)} placeholder="email@exemplo.com" />
+                <Input id="webmail-to" value={webmailTo} onChange={(e) => setWebmailTo(e.target.value)} placeholder={t("webmailToPlaceholder")} />
               </div>
               <div className="grid gap-2">
                 <Label htmlFor="webmail-cc">{t("webmailCcOpt")}</Label>
@@ -10171,11 +11011,11 @@ export default function AtendimentoPage() {
               </div>
               <div className="grid gap-2">
                 <Label htmlFor="webmail-subject">{t("webmailSubjectLabel")}</Label>
-                <Input id="webmail-subject" value={webmailSubject} onChange={(e) => setWebmailSubject(e.target.value)} placeholder="Assunto do e-mail" />
+                <Input id="webmail-subject" value={webmailSubject} onChange={(e) => setWebmailSubject(e.target.value)} placeholder={t("webmailSubjectPlaceholder")} />
               </div>
               <div className="grid gap-2">
                 <Label htmlFor="webmail-body">{t("webmailMessageLabel")}</Label>
-                <Textarea id="webmail-body" value={webmailBody} onChange={(e) => setWebmailBody(e.target.value)} placeholder="Corpo do e-mail" rows={6} className="resize-none" />
+                <Textarea id="webmail-body" value={webmailBody} onChange={(e) => setWebmailBody(e.target.value)} placeholder={t("webmailBodyPlaceholder")} rows={6} className="resize-none" />
               </div>
               <div className="grid gap-2">
                 <Label>{t("webmailAttachOpt")}</Label>
@@ -10317,7 +11157,7 @@ export default function AtendimentoPage() {
         </Dialog>
 
         {/* ── Iniciar conversa avulsa ──────────────────────────────────── */}
-        <Dialog open={avulsaOpen} onOpenChange={(o) => { if (!avulsaSending) { setAvulsaOpen(o); if (!o) { setAvulsaSelectedTemplate(null); setAvulsaTemplateVars([]); setAvulsaTemplateSearch(""); setAvulsaConnectionFilter(null); setAvulsaContactSearch(""); setAvulsaContactResults([]); setAvulsaEmail(""); setAvulsaEmailSubject(""); setAvulsaQueue("none"); setAvulsaApplyBrPhoneCorrection(true); setAvulsaOrderDetails(emptyOrderDetails()); } } }}>
+        <Dialog open={avulsaOpen} onOpenChange={(o) => { if (!avulsaSending) { setAvulsaOpen(o); if (!o) { setAvulsaSelectedTemplate(null); setAvulsaTemplateVars([]); setAvulsaTemplateSearch(""); setAvulsaConnectionFilter(null); setAvulsaContactSearch(""); setAvulsaContactResults([]); setAvulsaPickedContact(null); setAvulsaEmail(""); setAvulsaEmailSubject(""); setAvulsaQueue("none"); setAvulsaApplyBrPhoneCorrection(true); setAvulsaOrderDetails(emptyOrderDetails()); } } }}>
           <DialogContent className="sm:max-w-lg w-full" style={{ maxHeight: "90dvh", display: "flex", flexDirection: "column" }}>
             <DialogHeader className="shrink-0">
               <DialogTitle className="flex items-center gap-2">
@@ -10341,6 +11181,7 @@ export default function AtendimentoPage() {
                         <li>{t("avulsaHelpItem1")}</li>
                         <li>{t("avulsaHelpItem2")}</li>
                         <li>{t("avulsaHelpItem3")}</li>
+                        <li>{tNC("helpItem4")}</li>
                       </ul>
                     </TooltipContent>
                   </Tooltip>
@@ -10389,7 +11230,11 @@ export default function AtendimentoPage() {
                 </div>
                 <SearchableSelect
                   options={availableWhatsapps
-                    .filter((w) => w.status === "CONNECTED" && ["whatsapp", "baileys", "zapo", "meow", "evo", "evogo", "uazapi", "zapi", "waba", "dialog360", "gupshup", "email", "webmail"].includes((w.type ?? "").toLowerCase()))
+                    .filter((w) => {
+                      if (w.status !== "CONNECTED") return false;
+                      const tp = (w.type ?? "").toLowerCase();
+                      return AVULSA_MESSAGE_CHANNEL_TYPES.includes(tp) || AVULSA_EMAIL_CHANNEL_TYPES.includes(tp);
+                    })
                     .filter((w) => {
                       const tp = (w.type ?? "").toLowerCase();
                       const isEmailType = tp === "email" || tp === "webmail";
@@ -10453,7 +11298,7 @@ export default function AtendimentoPage() {
                 return (
                   <div className="space-y-2">
                     <Label>
-                      {isAvulsaEmail ? "Email do destinatario *" : <>{t("phoneNumberLabel")} <span className="text-muted-foreground text-xs">{t("phoneDdiHint")}</span></>}
+                      {isAvulsaEmail ? t("avulsaEmailRecipientLabel") : <>{t("phoneNumberLabel")} <span className="text-muted-foreground text-xs">{t("phoneDdiHintExample", { example: examplePhone(regionCountry) })}</span></>}
                     </Label>
                     {/* Busca de contato no sistema — pré-seleciona email/número conforme canal */}
                     <div className="relative">
@@ -10474,10 +11319,13 @@ export default function AtendimentoPage() {
                             type="button"
                             className="w-full text-left px-3 py-2 text-sm hover:bg-accent transition-colors"
                             onClick={() => {
-                              setAvulsaNumber((c.number || "").replace(/[^\d+]/g, ""));
-                              if ((c as { email?: string }).email) {
-                                setAvulsaEmail((c as { email?: string }).email || "");
+                              const pickedNumber = (c.number || "").replace(/[^\d+]/g, "");
+                              const pickedEmail = (c as { email?: string }).email || "";
+                              setAvulsaNumber(pickedNumber);
+                              if (pickedEmail) {
+                                setAvulsaEmail(pickedEmail);
                               }
+                              setAvulsaPickedContact({ number: pickedNumber, email: pickedEmail, name: String(c.name ?? "") });
                               setAvulsaContactSearch("");
                               setAvulsaContactResults([]);
                             }}
@@ -10499,14 +11347,14 @@ export default function AtendimentoPage() {
                         <Input
                           value={avulsaEmail}
                           onChange={(e) => setAvulsaEmail(e.target.value)}
-                          placeholder="contato@exemplo.com"
+                          placeholder={t("avulsaEmailPlaceholder")}
                           type="email"
                         />
-                        <Label className="pt-2">Assunto *</Label>
+                        <Label className="pt-2">{t("avulsaEmailSubjectLabel")}</Label>
                         <Input
                           value={avulsaEmailSubject}
                           onChange={(e) => setAvulsaEmailSubject(e.target.value)}
-                          placeholder="Assunto do e-mail"
+                          placeholder={t("webmailSubjectPlaceholder")}
                         />
                       </>
                     ) : (
@@ -10514,8 +11362,16 @@ export default function AtendimentoPage() {
                         <Input
                           value={avulsaNumber}
                           onChange={(e) => setAvulsaNumber(e.target.value.replace(/[^\d+]/g, ""))}
-                          placeholder="5511999999999"
+                          placeholder={examplePhone(regionCountry)}
                         />
+                        {/* Campo cru (o valor enviado não muda): aviso NÃO bloqueante quando o
+                            número parece nacional do país da empresa, sem o código do país. */}
+                        {looksLikeMissingDialCode(avulsaNumber, regionCountry) && (
+                          <p className="flex items-start gap-1 text-xs text-amber-600 dark:text-amber-400" role="status">
+                            <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" aria-hidden />
+                            <span>{tPhone("missingCountryCodeHint", { example: examplePhone(regionCountry) })}</span>
+                          </p>
+                        )}
                         {(() => {
                           const raw = avulsaNumber.replace(/\D/g, "");
                           const normalized = normalizeBrPhone(raw);
@@ -10577,6 +11433,14 @@ export default function AtendimentoPage() {
                         </div>
                       ) : !avulsaSelectedTemplate ? (
                         <>
+                          {/* Rápidas do tipo Template: atalho que pré-seleciona o modelo desta conexão. */}
+                          <QuickReplyTemplateShortcuts
+                            quickReplies={avulsaQuickReplies}
+                            templates={avulsaWabaTemplates}
+                            loading={avulsaLoadingTemplates || avulsaQuickRepliesLoading}
+                            onSelectTemplate={(tp) => setAvulsaSelectedTemplate(tp)}
+                            onFilterByName={(name) => setAvulsaTemplateSearch(name)}
+                          />
                           <Input
                             placeholder={t("searchTemplatePlaceholder")}
                             value={avulsaTemplateSearch}
@@ -10635,9 +11499,9 @@ export default function AtendimentoPage() {
                                     });
                                     return <p className="font-bold text-sm text-gray-900">{rendered}</p>;
                                   }
-                                  if (hdr.format === "IMAGE") return <div className="h-24 bg-gray-100 rounded flex items-center justify-center text-xs text-gray-500">[Imagem]</div>;
-                                  if (hdr.format === "VIDEO") return <div className="h-24 bg-gray-100 rounded flex items-center justify-center text-xs text-gray-500">[Vídeo]</div>;
-                                  if (hdr.format === "DOCUMENT") return <div className="h-12 bg-gray-100 rounded flex items-center justify-center text-xs text-gray-500">[Documento]</div>;
+                                  if (hdr.format === "IMAGE") return <div className="h-24 bg-gray-100 rounded flex items-center justify-center text-xs text-gray-500">[{tE("mediaImage")}]</div>;
+                                  if (hdr.format === "VIDEO") return <div className="h-24 bg-gray-100 rounded flex items-center justify-center text-xs text-gray-500">[{tE("mediaVideo")}]</div>;
+                                  if (hdr.format === "DOCUMENT") return <div className="h-12 bg-gray-100 rounded flex items-center justify-center text-xs text-gray-500">[{tE("mediaDocument")}]</div>;
                                   return null;
                                 })()}
                                 {avulsaSelectedTemplate.components?.find((c) => c.type === "BODY")?.text && (() => {
@@ -10711,11 +11575,14 @@ export default function AtendimentoPage() {
                     </div>
                   );
                 }
+                // O e-mail sai sem assinatura (handleSendAvulsa): a chave "Assinado" não aparece nele.
+                const showSignatureToggle = !AVULSA_EMAIL_CHANNEL_TYPES.includes(tpType) &&
+                  !!(user?.username || (typeof window !== "undefined" && localStorage.getItem("username")));
                 return (
                   <div className="space-y-2">
                     <div className="flex items-center justify-between gap-2">
-                      <Label>{t("messageLabel")}</Label>
-                      {(user?.username || (typeof window !== "undefined" && localStorage.getItem("username"))) && (
+                      <Label htmlFor="avulsa-message">{t("messageLabel")}</Label>
+                      {showSignatureToggle && (
                         <div className="flex items-center gap-1.5 shrink-0">
                           <Switch
                             id="avulsa-sig-toggle"
@@ -10733,12 +11600,22 @@ export default function AtendimentoPage() {
                         </div>
                       )}
                     </div>
-                    <Textarea
+                    {showSignatureToggle && forceSignature && (
+                      <p className="flex items-start gap-1 text-[11px] text-muted-foreground">
+                        <Info className="mt-0.5 h-3 w-3 shrink-0" aria-hidden="true" />
+                        <span>{tNC("signatureMandatoryHint")}</span>
+                      </p>
+                    )}
+                    <QuickReplyTextarea
+                      id="avulsa-message"
                       value={avulsaMessage}
-                      onChange={(e) => setAvulsaMessage(e.target.value)}
+                      onChange={setAvulsaMessage}
+                      quickReplies={avulsaQuickReplies}
+                      quickRepliesLoading={avulsaQuickRepliesLoading}
                       placeholder={t("typeMessageAvulsa")}
-                      rows={4}
+                      textareaRows={4}
                       className="resize-none"
+                      warnings={avulsaVarWarnings}
                     />
                   </div>
                 );
@@ -10907,7 +11784,7 @@ export default function AtendimentoPage() {
             </DialogHeader>
             <div className="overflow-y-auto max-h-72 space-y-3 text-sm">
               {[
-                { title: t("helpS0T"), items: [t("helpS0I0"), t("helpS0I1"), t("helpS0I2")] },
+                { title: t("helpS0T"), items: [t("helpS0I0"), t("helpS0I1"), t("helpS0I2"), t("helpS0I3"), t("helpS0I4")] },
                 { title: t("helpS1T"), items: [t("helpS1I0"), t("helpS1I1"), t("helpS1I2")] },
                 { title: t("helpS2T"), items: [t("helpS2I0"), t("helpS2I1"), t("helpS2I2")] },
                 { title: t("helpS3T"), items: [t("helpS3I0"), t("helpS3I1")] },

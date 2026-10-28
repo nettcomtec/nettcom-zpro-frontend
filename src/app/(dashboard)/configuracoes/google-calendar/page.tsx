@@ -290,7 +290,7 @@ export default function ConfigGoogleCalendarPage() {
   const duplicateConfig = (config: GoogleCalendarConfig) => {
     setEditingConfig({
       id: 0,
-      name: `${config.name} (cópia)`,
+      name: t("duplicateName", { name: config.name }),
       googleClientId: config.googleClientId,
       googleClientSecret: config.googleClientSecret,
       googleAccessToken: "",

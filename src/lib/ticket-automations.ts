@@ -58,13 +58,36 @@ export interface TicketAutomations {
   integrations: string[];
 }
 
+type AiAgentStateTicket = Pick<Ticket, "aiAgentId" | "chatgptStatus" | "botStopped">;
+
+// O agente arma aiAgentId + chatgptStatus juntos e só responde com os dois. Desligar
+// o ChatGPT à mão no ticket não limpa o aiAgentId — por isso exige o par. Com
+// agente, o chatgptStatus é dele: não aparece também como integração ChatGPT.
+// Backend antigo não manda aiAgentId: o ticket cai como integração ChatGPT.
+function isAiAgentResponding(ticket: Pick<Ticket, "aiAgentId" | "chatgptStatus">): boolean {
+  return ticket.chatgptStatus === "enabled" && Number(ticket.aiAgentId) > 0;
+}
+
+/**
+ * Agente de IA PAUSADO neste atendimento ("Pausar agente de IA" / "Bloquear chatbot
+ * neste atendimento"): continua no atendimento (aiAgentId) com o botStopped marcado —
+ * o mesmo critério do corte do motor, que cala o agente só pelo botStopped. A pausa
+ * normal também desliga a IA (fica fora do selo "Agente de IA ativo"); um botStopped
+ * antigo com a IA ligada (fora de par) também conta, para a tela oferecer "Retomar".
+ * Lista de backend anterior não traz botStopped: o pausado não aparece como pausado
+ * até a abertura do atendimento.
+ */
+export function isAiAgentPaused(ticket: AiAgentStateTicket): boolean {
+  return Number(ticket.aiAgentId) > 0 && ticket.botStopped === true;
+}
+
+/** Agente de IA respondendo OU pausado no atendimento (onde cabem Pausar/Retomar e Desligar). */
+export function isAiAgentActiveOrPaused(ticket: AiAgentStateTicket): boolean {
+  return isAiAgentResponding(ticket) || isAiAgentPaused(ticket);
+}
+
 export function getTicketAutomations(ticket: AutomationTicket): TicketAutomations {
-  const chatgptOn = ticket.chatgptStatus === "enabled";
-  // O agente arma aiAgentId + chatgptStatus juntos e só responde com os dois. Desligar
-  // o ChatGPT à mão no ticket não limpa o aiAgentId — por isso exige o par. Com
-  // agente, o chatgptStatus é dele: não aparece também como integração ChatGPT.
-  // Backend antigo não manda aiAgentId: o ticket cai como integração ChatGPT.
-  const aiAgent = chatgptOn && Number(ticket.aiAgentId) > 0;
+  const aiAgent = isAiAgentResponding(ticket);
   const integrations: string[] = [];
   for (const { field, label } of AI_INTEGRATIONS) {
     if (ticket[field] !== "enabled") continue;

@@ -5,14 +5,17 @@ import Link from "next/link";
 import { motion } from "framer-motion";
 import { useTranslations } from "next-intl";
 import { toast } from "sonner";
-import { Eye, EyeOff, User, CreditCard, Mail, Phone, Lock, Building, Globe, Moon, Sun, ShieldCheck } from "lucide-react";
+import { Eye, EyeOff, User, CreditCard, Mail, Lock, Building, Globe, Moon, Sun, ShieldCheck, CheckCircle2, ExternalLink, Gift, Clock, LogIn } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { PhoneInput } from "@/components/ui/phone-input";
+import { isCountryIso } from "@/lib/region";
 import { Label } from "@/components/ui/label";
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import api from "@/lib/api";
+import { getBackendErrorCode } from "@/lib/backend-error-code";
 import { useLocale } from "@/i18n/locale-provider";
 import { locales, localeNames, type Locale } from "@/i18n/config";
 import { useTheme } from "next-themes";
@@ -25,8 +28,10 @@ interface Plan {
   value: number;
   connections: number;
   users: number;
-  trial: boolean;
+  // O servidor manda texto ("enabled" | "disabled"); boolean fica pelo tipo antigo.
+  trial: boolean | string;
   trialPeriod?: number;
+  isPublic?: boolean;
 }
 
 function formatPlanLabel(plan: Plan, t: (key: string, values?: Record<string, string | number | Date>) => string) {
@@ -35,7 +40,9 @@ function formatPlanLabel(plan: Plan, t: (key: string, values?: Record<string, st
     value: plan.value,
     connections: plan.connections,
     users: plan.users,
-    trial: plan.trial ? " | Trial" : "",
+    // Comparação exata: "disabled" é texto não vazio (verdadeiro em JS) e o rótulo
+    // aparecia em todo plano.
+    trial: plan.trial === "enabled" || plan.trial === true ? " | Trial" : "",
   });
 }
 
@@ -90,6 +97,17 @@ function validateInternationalPhone(phone: string): boolean {
   return digits.length >= 6 && digits.length <= 15;
 }
 
+// O PhoneInput devolve só dígitos COM o DDI, sem "+" ("" = vazio). No modo br o
+// Asaas espera o celular NACIONAL (sem o 55), como sempre foi; no internacional vai
+// "+" + DDI + número. Número sem o 55 no modo br não é brasileiro: sai sem mexer
+// (o submit recusa antes de chegar aqui).
+function buildSignupPhone(value: string, format: SignupVariantConfig["phoneFormat"]): string {
+  const digits = String(value || "").replace(/\D/g, "");
+  if (!digits) return "";
+  if (format === "br") return digits.startsWith("55") ? digits.slice(2) : digits;
+  return `+${digits}`;
+}
+
 const DEFAULT_SIGNUP_CONFIG: SignupVariantConfig = {
   enabled: true,
   documentMode: "br",
@@ -100,6 +118,70 @@ const DEFAULT_SIGNUP_CONFIG: SignupVariantConfig = {
   defaultCountry: "BR",
   skipPaymentGateway: false,
 };
+
+// Resultado do cadastro mostrado no próprio cartão ("conta criada"). Os campos além do
+// `paymentUrl` são aditivos do backend novo; o antigo manda só a URL e a tela funciona igual.
+interface SignupDone {
+  paymentUrl?: string;
+  accessPendingPayment: boolean;
+  trialDays: number;
+  /**
+   * `authorize` = o link é a autorização da assinatura (Mercado Pago: o cliente cadastra a
+   * forma de pagamento e a cobrança sai sozinha, inclusive no fim do teste grátis). Ausente
+   * ou `pay` = fatura a pagar, como antes.
+   */
+  paymentAction: "pay" | "authorize";
+}
+
+function parseSignupDone(raw: unknown): SignupDone {
+  const res = (raw && typeof raw === "object" ? raw : {}) as {
+    paymentUrl?: unknown;
+    accessPendingPayment?: unknown;
+    trialDays?: unknown;
+    paymentAction?: unknown;
+  };
+  // Só link http(s) vira botão: a URL vem do gateway e entra num <a href>.
+  const paymentUrl =
+    typeof res.paymentUrl === "string" && /^https?:\/\//i.test(res.paymentUrl.trim())
+      ? res.paymentUrl.trim()
+      : undefined;
+  const trialDays =
+    typeof res.trialDays === "number" && Number.isFinite(res.trialDays) && res.trialDays > 0
+      ? Math.floor(res.trialDays)
+      : 0;
+  return {
+    paymentUrl,
+    accessPendingPayment: res.accessPendingPayment === true,
+    trialDays,
+    paymentAction: res.paymentAction === "authorize" ? "authorize" : "pay",
+  };
+}
+
+// Recusas do cadastro com texto próprio (o resto segue o motivo do servidor ou o genérico).
+const SIGNUP_ERROR_KEYS: Record<string, string> = {
+  ERR_GATEWAY_CUSTOMER_IN_USE: "errGatewayCustomerInUse",
+  ERR_PAYMENT_RETURN_URL_MISSING: "errPaymentReturnUrlMissing",
+};
+
+// Código cru do servidor (ERR_...) não é texto para quem se cadastra.
+const BACKEND_CODE_RE = /^ERR_[A-Z0-9_]+$/;
+
+// Motivo legível da recusa do cadastro: o servidor manda texto em `error` (validações
+// próprias) ou o código em `error` e o motivo em `message` (recusa do gateway, dado
+// inválido). O interceptor rejeita com o response, então o corpo vem em `err.data`.
+function readableSignupError(err: unknown, code: string): string {
+  if (code && !BACKEND_CODE_RE.test(code)) return code;
+  const e = (err && typeof err === "object" ? err : {}) as {
+    data?: { message?: unknown } | null;
+    response?: { data?: { message?: unknown } | null } | null;
+  };
+  for (const message of [e.data?.message, e.response?.data?.message]) {
+    if (typeof message === "string" && message.trim() && !BACKEND_CODE_RE.test(message.trim())) {
+      return message.trim();
+    }
+  }
+  return "";
+}
 
 // Nomes comerciais dos gateways (marca — não traduzível). Espelha payment-config.json (/planos).
 const GATEWAY_LABELS: Record<string, string> = {
@@ -123,6 +205,8 @@ export default function SignupPage() {
   const [selectedPlan, setSelectedPlan] = useState<Plan | null>(null);
   const [lockedPlanId, setLockedPlanId] = useState<number | null>(null);
   const [signupConfig, setSignupConfig] = useState<SignupVariantConfig>(DEFAULT_SIGNUP_CONFIG);
+  // Cadastro concluído: o cartão troca para a tela "conta criada".
+  const [done, setDone] = useState<SignupDone | null>(null);
   const [form, setForm] = useState({
     name: "",
     cpfCnpj: "",
@@ -159,7 +243,10 @@ export default function SignupPage() {
       return;
     }
     api.get("/plan/").then(({ data }) => {
-      const list: Plan[] = data?.plan || data || [];
+      // Só planos públicos (a mesma regra da vitrine /precos): o servidor recusa
+      // plano oculto no cadastro.
+      const raw: unknown = data?.plan || data || [];
+      const list: Plan[] = Array.isArray(raw) ? (raw as Plan[]).filter((p) => p.isPublic === true) : [];
       setPlans(list);
       // Plano travado vindo da pricing pública (?plano=<id>): pré-seleciona.
       if (lockedPlanId) {
@@ -191,9 +278,16 @@ export default function SignupPage() {
     ? t("cpfCnpjFormatHint")
     : t("documentPlaceholderInternational");
 
-  const phonePlaceholder = signupConfig.phoneFormat === "br"
-    ? t("phonePlaceholder")
-    : t("phonePlaceholderInternational");
+  // País do telefone: modo br = Brasil travado (o payload leva só o número nacional);
+  // internacional = país da Região padrão, que o GET público do signup já devolve
+  // em `defaultCountry` (sem request novo). O placeholder vem do próprio campo.
+  const isBrPhone = signupConfig.phoneFormat === "br";
+  const phoneCountry = isBrPhone
+    ? "BR"
+    : isCountryIso(signupConfig.defaultCountry)
+      ? signupConfig.defaultCountry.toUpperCase()
+      : "BR";
+  const phoneValue = buildSignupPhone(form.mobilePhone, signupConfig.phoneFormat);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -206,7 +300,7 @@ export default function SignupPage() {
       toast.error(t("errorRequiredFields"));
       return;
     }
-    if (signupConfig.phoneRequired && !form.mobilePhone.trim()) {
+    if (signupConfig.phoneRequired && !phoneValue) {
       toast.error(t("errorRequiredFields"));
       return;
     }
@@ -230,6 +324,13 @@ export default function SignupPage() {
       return;
     }
 
+    // Modo br: número de outro país (colado com "+…") não pode ir ao gateway como
+    // celular brasileiro (A1-12).
+    if (isBrPhone && phoneValue && !String(form.mobilePhone).replace(/\D/g, "").startsWith("55")) {
+      toast.error(t("errorInvalidPhone"));
+      return;
+    }
+
     if (!validatePassword(form.password)) {
       toast.error(t("errorPasswordLength"));
       return;
@@ -241,9 +342,7 @@ export default function SignupPage() {
       currentDate.setDate(currentDate.getDate() + 30);
       const nextDueDate = currentDate.toISOString().split("T")[0];
 
-      const cleanedPhone = signupConfig.phoneFormat === "br"
-        ? form.mobilePhone.replace(/[^\d]/g, "")
-        : form.mobilePhone.replace(/[^\d+]/g, "");
+      const cleanedPhone = phoneValue;
 
       const basePayload: Record<string, unknown> = {
         name: form.name,
@@ -281,24 +380,29 @@ export default function SignupPage() {
       }
 
       const { data: signupRes } = await api.post("/asaas/client", basePayload);
-      toast.success(t("successCreated"));
-      // Tela de pagamento logo após o cadastro: se o gateway retornou a URL do 1º
-      // boleto/fatura, leva o usuário direto ao pagamento; senão, segue para o login.
-      const paymentUrl = (signupRes as { paymentUrl?: string } | undefined)?.paymentUrl;
-      window.location.href = paymentUrl || "/login";
+      // Tela "conta criada" no próprio cartão, no lugar de ir direto à fatura na mesma
+      // aba: a fatura abre em NOVA aba por link (window.open depois do await é bloqueado
+      // no Safari/iOS) e "Acessar o sistema" leva ao login. Vale também para o cadastro
+      // sem gateway (sem fatura).
+      setDone(parseSignupDone(signupRes));
+      setForm((p) => ({ ...p, password: "" }));
     } catch (err: unknown) {
+      const errCode = getBackendErrorCode(err);
       // Licenca de empresa unica (ZPRO_1_TENANT): o servidor recusa o autocadastro,
       // porque a nova empresa nunca conseguiria entrar. Mensagem propria em vez do
-      // erro generico — o codigo pode vir no corpo cru ou dentro de `response`.
-      const errCode =
-        (err as { response?: { data?: { error?: string } } })?.response?.data?.error ??
-        (err as { data?: { error?: string } })?.data?.error;
-      if ((errCode ?? "") === "ERR_LICENSE_SINGLE_TENANT") {
+      // erro generico.
+      if (errCode === "ERR_LICENSE_SINGLE_TENANT") {
         toast.error(t("errorSingleTenantLicense"));
         return;
       }
-      const msg = (err as { response?: { data?: { message?: string } } })?.response?.data?.message;
-      toast.error(msg || t("errorGeneric"));
+      // Mercado Pago/Pagar.me: e-mail já ligado a outra empresa no gateway, ou a instalação
+      // sem o endereço de volta do pagamento. Nenhuma das duas cria nada no gateway.
+      const mappedKey = SIGNUP_ERROR_KEYS[errCode];
+      if (mappedKey) {
+        toast.error(t(mappedKey));
+        return;
+      }
+      toast.error(readableSignupError(err, errCode) || t("errorGeneric"));
     } finally {
       setLoading(false);
     }
@@ -330,10 +434,60 @@ export default function SignupPage() {
               Z
             </div>
           </div>
-          <CardTitle className="text-2xl font-bold">{t("create")}</CardTitle>
-          <CardDescription>{t("title")}</CardDescription>
+          {done ? (
+            <>
+              <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-emerald-100 text-emerald-600 dark:bg-emerald-950/50 dark:text-emerald-400">
+                <CheckCircle2 className="h-6 w-6" />
+              </div>
+              <CardTitle className="text-2xl font-bold">{t("doneTitle")}</CardTitle>
+              <CardDescription>{t("doneDesc")}</CardDescription>
+            </>
+          ) : (
+            <>
+              <CardTitle className="text-2xl font-bold">{t("create")}</CardTitle>
+              <CardDescription>{t("title")}</CardDescription>
+            </>
+          )}
         </CardHeader>
         <CardContent>
+          {done ? (
+            <div className="space-y-4">
+              {done.trialDays > 0 && (
+                <div className="flex items-center gap-2 rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-800 dark:border-emerald-900/50 dark:bg-emerald-950/30 dark:text-emerald-200">
+                  <Gift className="h-4 w-4 shrink-0" />
+                  <span>{t("doneTrial", { days: done.trialDays })}</span>
+                </div>
+              )}
+              {done.paymentUrl && (
+                <div className="space-y-2">
+                  <Button asChild className="w-full">
+                    <a href={done.paymentUrl} target="_blank" rel="noopener noreferrer">
+                      <CreditCard className="mr-2 h-4 w-4" />
+                      {done.paymentAction === "authorize" ? t("doneAuthorize") : t("donePayInvoice")}
+                      <ExternalLink className="ml-2 h-3.5 w-3.5" />
+                    </a>
+                  </Button>
+                  <p className="text-xs text-muted-foreground">
+                    {done.paymentAction === "authorize"
+                      ? t("doneAuthorizeNote", { days: done.trialDays })
+                      : t("donePayNote")}
+                  </p>
+                </div>
+              )}
+              {done.accessPendingPayment && (
+                <p className="flex items-start gap-1.5 text-xs text-amber-700 dark:text-amber-400">
+                  <Clock className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                  <span>{t("doneAccessPending")}</span>
+                </p>
+              )}
+              <Button asChild variant={done.paymentUrl ? "outline" : "default"} className="w-full">
+                <Link href="/login">
+                  <LogIn className="mr-2 h-4 w-4" />
+                  {t("doneAccess")}
+                </Link>
+              </Button>
+            </div>
+          ) : (
           <form onSubmit={handleSubmit} className="space-y-4">
             <div className="space-y-2">
               <Label>{t("nameLabel")} *</Label>
@@ -363,10 +517,12 @@ export default function SignupPage() {
 
             <div className="space-y-2">
               <Label>{t("phoneLabel")}{signupConfig.phoneRequired ? " *" : ""}</Label>
-              <div className="relative">
-                <Phone className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-                <Input className="pl-9" placeholder={phonePlaceholder} value={form.mobilePhone} onChange={set("mobilePhone")} />
-              </div>
+              <PhoneInput
+                value={form.mobilePhone}
+                onChange={(v) => setForm((p) => ({ ...p, mobilePhone: v }))}
+                defaultCountry={phoneCountry}
+                lockCountry={isBrPhone}
+              />
             </div>
 
             <div className="space-y-2">
@@ -424,12 +580,15 @@ export default function SignupPage() {
               {loading ? t("creating") : t("create")}
             </Button>
           </form>
+          )}
         </CardContent>
         <CardFooter className="flex flex-col gap-3">
-          <p className="text-center text-sm text-muted-foreground w-full">
-            {t("hasAccount")}{" "}
-            <Link href="/login" className="text-primary hover:underline font-medium">{t("loginLink")}</Link>
-          </p>
+          {!done && (
+            <p className="text-center text-sm text-muted-foreground w-full">
+              {t("hasAccount")}{" "}
+              <Link href="/login" className="text-primary hover:underline font-medium">{t("loginLink")}</Link>
+            </p>
+          )}
           <div className="flex items-center justify-center gap-1">
             <Button variant="ghost" size="sm" className="gap-2 text-muted-foreground" onClick={toggleTheme}>
               {isDark ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}

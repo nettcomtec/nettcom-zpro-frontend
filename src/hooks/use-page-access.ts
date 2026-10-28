@@ -3,7 +3,7 @@
 import { useAuthStore } from "@/stores/auth-store";
 import { safeJsonParse } from "@/lib/safe-json-parse";
 import { planAllowsRoute } from "@/lib/plan-capabilities";
-import { isMenuRouteHidden } from "@/lib/menu-visibility";
+import { isMenuRouteHidden, menuKeyAlias } from "@/lib/menu-visibility";
 
 /**
  * Equivalente ao padrão `pageAllowed` do front legado.
@@ -62,7 +62,11 @@ export function usePageAccess(
   // O PLANO é o teto: se a página pertence a uma capability não contratada, bloqueia
   // o acesso (a UI mostra upsell). Plano ausente => libera (grandfathering). Entra como
   // fator AND acima das regras de menuVisibility/menuPermissions/customProfile abaixo.
+  // O plano conhece a grafia kebab da rota (ex.: "instagram-comentarios"), e a página
+  // pode consultar a camelCase: sem o alias o plano sem a capability liberava a URL.
+  const planAliasKey = menuKeyAlias(permissionKey);
   if (!planAllowsRoute(planFeatures, permissionKey)) return false;
+  if (planAliasKey && !planAllowsRoute(planFeatures, planAliasKey)) return false;
 
   // Interruptor do WaVoIP no tenant (Tenant.wavoipEnabled), AND acima do plano.
   // Precisa ser explícito aqui porque as regras abaixo, para user/super/custom, leem

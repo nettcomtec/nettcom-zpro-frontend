@@ -14,7 +14,8 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { RatingStars } from "@/components/contact-crm/rating-stars";
 import { useLiveMode } from "@/hooks/use-live-mode";
-import { formatCurrencyBRL, formatDate, formatNumber } from "@/lib/format";
+import { useRegion } from "@/hooks/use-region";
+import { formatDate, formatNumber } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { loadContactCrmSummary, type ContactCrmLoadState } from "@/services/contact-crm";
 
@@ -47,6 +48,8 @@ function CardRow({ icon: Icon, label, children }: { icon: ElementType; label: st
 export function ContactCrmCard({ contactId, ticketId, className }: ContactCrmCardProps) {
   const t = useTranslations("contactCrm");
   const { isLiveMode } = useLiveMode();
+  // Valor das oportunidades = dinheiro da empresa: moeda e formato do país da Região.
+  const { formatMoney } = useRegion();
   const [state, setState] = useState<CardState>({ status: "loading" });
 
   useEffect(() => {
@@ -115,7 +118,7 @@ export function ContactCrmCard({ contactId, ticketId, className }: ContactCrmCar
             <CardRow icon={TrendingUp} label={t("sales")}>
               <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm leading-snug">
                 <span className={cn("font-medium tabular-nums", isLiveMode && "live-blur-text")}>
-                  {formatCurrencyBRL(toNumber(opp.wonValue))}
+                  {formatMoney(toNumber(opp.wonValue))}
                 </span>
                 {stars != null ? (
                   <RatingStars stars={stars} size="sm" label={t("rating")} />
@@ -128,7 +131,7 @@ export function ContactCrmCard({ contactId, ticketId, className }: ContactCrmCar
             <CardRow icon={Target} label={t("openOpportunities")}>
               <div className="flex flex-wrap items-baseline gap-x-2 text-sm leading-snug">
                 <span className={cn("font-medium tabular-nums", isLiveMode && "live-blur-text")}>
-                  {formatCurrencyBRL(toNumber(opp.openValue))}
+                  {formatMoney(toNumber(opp.openValue))}
                 </span>
                 <span className="text-xs text-muted-foreground">
                   {t("openCount", { count: toNumber(opp.open) })}

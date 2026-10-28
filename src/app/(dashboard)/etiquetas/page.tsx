@@ -132,8 +132,21 @@ export default function EtiquetasPage() {
       }
       setDialogOpen(false);
       load();
-    } catch {
-      toast.error(editing ? t("errorUpdate") : t("errorCreate"));
+    } catch (err: unknown) {
+      // 409 do AppError chega em `message`; os demais em `error`.
+      const e = err as {
+        data?: { error?: string; message?: string };
+        response?: { data?: { error?: string; message?: string } };
+      };
+      const data = e?.data ?? e?.response?.data;
+      const code = data?.error || data?.message;
+      if (code === "ERR_TAG_DUPLICATED") {
+        toast.error(t("errorDuplicated"));
+      } else if (code === "ERR_TAG_TOO_LONG") {
+        toast.error(t("errorTooLong"));
+      } else {
+        toast.error(editing ? t("errorUpdate") : t("errorCreate"));
+      }
     }
   };
 

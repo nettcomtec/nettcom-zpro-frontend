@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslations } from "next-intl";
-import { Bot, Plus, Trash2 } from "lucide-react";
+import { AlertTriangle, Bot, HelpCircle, Plus, Trash2 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -13,14 +13,16 @@ import { Textarea } from "@/components/ui/textarea";
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 
-import type {
-  AiAgentCloseReason,
-  AiAgentCloseRules,
-  AiAgentGraceDestinationType,
-  AiAgentGraceRule,
-  AiAgentRoutingTarget,
-  AiAgentRoutingTargetType,
+import {
+  AGENT_INACTIVITY_LIMITS,
+  type AiAgentCloseReason,
+  type AiAgentCloseRules,
+  type AiAgentGraceDestinationType,
+  type AiAgentGraceRule,
+  type AiAgentRoutingTarget,
+  type AiAgentRoutingTargetType,
 } from "@/services/ai-agents";
 import type { Queue } from "@/services/queues";
 import type { User } from "@/services/users";
@@ -65,6 +67,25 @@ type RoutingAiAgentOption = { id: number; name: string; isActive?: boolean };
 // vazio respeita o mesmo limite do que se digita.
 const MAX_TARGET_LABEL = 100;
 
+// A partir daqui o "Quando transferir" ganha o aviso de consumo: o texto entra
+// em toda resposta do agente.
+const LONG_TARGET_DESCRIPTION_NOTE_FROM = 200;
+
+// "Sem resposta do cliente" na forma da TELA: os minutos ficam como texto
+// (campo numérico em texto, como o atraso na resposta — `type="number"`
+// entrega "" em silêncio para "1,5"). Quem monta o `inactivityConfig` do save
+// é o editor.
+export interface AgentInactivityFormValue {
+  enabled: boolean;
+  warnEnabled: boolean;
+  warnMinutes: string;
+  warnMessage: string;
+  actAfterMinutes: string;
+  action: "close" | "transfer";
+  queueId: number | null;
+  message: string;
+}
+
 interface AgentRoutingTabProps {
   routingEnabled: boolean;
   onRoutingEnabledChange: (value: boolean) => void;
@@ -96,6 +117,15 @@ interface AgentRoutingTabProps {
   aiAgentsAvailable: boolean;
   currentAgentId: number | null;
   supportsAgentHandoff: boolean;
+  // Teto do "Quando transferir": 1.000 com o anúncio `longTargetDescription`,
+  // 200 (o que o servidor antigo grava) sem ele.
+  maxTargetDescription: number;
+  // "Sem resposta do cliente" — o bloco só aparece com o anúncio `inactivity`
+  // (engineFeatures.includes("inactivity")); sem ele o editor nem envia o
+  // campo e o servidor mantém o que está salvo.
+  supportsInactivity: boolean;
+  inactivity: AgentInactivityFormValue;
+  onInactivityChange: (value: AgentInactivityFormValue) => void;
 }
 
 export function AgentRoutingTab({
@@ -121,6 +151,10 @@ export function AgentRoutingTab({
   aiAgentsAvailable,
   currentAgentId,
   supportsAgentHandoff,
+  maxTargetDescription,
+  supportsInactivity,
+  inactivity,
+  onInactivityChange,
 }: AgentRoutingTabProps) {
   const t = useTranslations("aiAgents");
 
@@ -400,6 +434,22 @@ export function AgentRoutingTab({
   const graceFlowOptions = flowOptionsFor(graceRule?.chatFlowId);
   const canPickGraceFlow = canPickFlow || graceRule?.destinationType === "chatflow";
 
+  // ── "Sem resposta do cliente" ───────────────────────────────────────────
+  const patchInactivity = (patch: Partial<AgentInactivityFormValue>) =>
+    onInactivityChange({ ...inactivity, ...patch });
+
+  // Fila já gravada que saiu da lista (apagada ou desativada) continua visível
+  // pelo id: senão o seletor apareceria vazio com a fila ainda indo no save (no
+  // atendimento, fila que não existe cai na fila de emergência do agente).
+  const inactivityQueueOptions = useMemo(() => {
+    const list = queues.map(queue => ({ id: queue.id, name: queue.name }));
+    const selected = inactivity.queueId;
+    if (selected && !list.some(queue => queue.id === selected)) {
+      return [{ id: selected, name: `#${selected}` }, ...list];
+    }
+    return list;
+  }, [queues, inactivity.queueId]);
+
   return (
     <div className="space-y-5">
       <div className="space-y-1.5">
@@ -600,12 +650,21 @@ export function AgentRoutingTab({
                   {t("targetDescription")} <span className="text-destructive">*</span>
                 </Label>
                 <Textarea
-                  rows={2}
+                  rows={5}
                   value={target.description}
                   onChange={e => updateTarget(index, { description: e.target.value })}
                   placeholder={t("targetDescriptionPlaceholder")}
+                  maxLength={maxTargetDescription}
                 />
-                <p className="text-xs text-muted-foreground">{t("targetDescriptionHint")}</p>
+                <div className="flex items-start justify-between gap-3">
+                  <p className="text-xs text-muted-foreground">{t("targetDescriptionHint")}</p>
+                  <span className="shrink-0 text-xs tabular-nums text-muted-foreground">
+                    {target.description.length}/{maxTargetDescription}
+                  </span>
+                </div>
+                {target.description.length > LONG_TARGET_DESCRIPTION_NOTE_FROM && (
+                  <p className="text-xs text-muted-foreground">{t("targetDescriptionLongNote")}</p>
+                )}
               </div>
               {/* Para outro agente de IA não há despedida: quem responde, na
                   mesma mensagem, é o agente escolhido — o campo não vale ali. */}
@@ -880,6 +939,197 @@ export function AgentRoutingTab({
             )}
           </div>
         </>
+      )}
+
+      {/* ── Sem resposta do cliente ──────────────────────────────────────────
+          Fora do bloco do encerramento de propósito: a regra mora em campo
+          próprio (o `closeRules` vira null sem motivos nem carência) e vale
+          mesmo sem nenhum dos dois. */}
+      {supportsInactivity && (
+        <div className="space-y-2 border-t pt-4">
+          <div className="flex items-center gap-1.5">
+            <p className="text-sm font-medium">{t("inactivityTitle")}</p>
+            {/* Popover (não Tooltip): abre no toque, no celular */}
+            <Popover>
+              <PopoverTrigger asChild>
+                <button
+                  type="button"
+                  className="inline-flex h-5 w-5 items-center justify-center rounded-full text-muted-foreground hover:text-foreground"
+                  aria-label={t("inactivityTitle")}
+                >
+                  <HelpCircle className="h-4 w-4" />
+                </button>
+              </PopoverTrigger>
+              <PopoverContent
+                side="top"
+                align="start"
+                collisionPadding={16}
+                className="w-[380px] max-w-[calc(100vw-2rem)] overflow-y-auto text-xs"
+                style={{
+                  maxHeight: "var(--radix-popover-content-available-height, 70vh)",
+                }}
+              >
+                <div className="space-y-2">
+                  <p className="text-sm font-semibold">{t("inactivityTitle")}</p>
+                  <p className="whitespace-pre-line text-muted-foreground">
+                    {t("inactivityHelp")}
+                  </p>
+                </div>
+              </PopoverContent>
+            </Popover>
+          </div>
+          <div className="flex items-center justify-between gap-2">
+            <Label htmlFor="ai-agent-inactivity-enabled">{t("inactivityEnable")}</Label>
+            <Switch
+              id="ai-agent-inactivity-enabled"
+              checked={inactivity.enabled}
+              onCheckedChange={value => patchInactivity({ enabled: value })}
+            />
+          </div>
+
+          {inactivity.enabled && (
+            <div className="space-y-3 pt-1">
+              {/* Aviso antes de agir: opcional, com tempo próprio */}
+              <div className="space-y-3 rounded-md border p-3">
+                <div className="flex items-center justify-between gap-2">
+                  <Label htmlFor="ai-agent-inactivity-warn">
+                    {t("inactivityWarnEnable")}
+                  </Label>
+                  <Switch
+                    id="ai-agent-inactivity-warn"
+                    checked={inactivity.warnEnabled}
+                    onCheckedChange={value => patchInactivity({ warnEnabled: value })}
+                  />
+                </div>
+                {inactivity.warnEnabled && (
+                  <>
+                    <div className="space-y-1.5">
+                      <Label htmlFor="ai-agent-inactivity-warn-minutes">
+                        {t("inactivityWarnMinutes")}
+                      </Label>
+                      {/* Texto numérico, não type="number" (mesmo motivo do
+                          atraso na resposta: entrada inválida viraria "") */}
+                      <div className="flex items-center gap-2">
+                        <Input
+                          id="ai-agent-inactivity-warn-minutes"
+                          type="text"
+                          inputMode="numeric"
+                          maxLength={4}
+                          className="w-24"
+                          value={inactivity.warnMinutes}
+                          onChange={e => patchInactivity({ warnMinutes: e.target.value })}
+                          placeholder={String(AGENT_INACTIVITY_LIMITS.defaultWarnMinutes)}
+                        />
+                        <span className="text-sm text-muted-foreground">
+                          {t("inactivityMinutesSuffix")}
+                        </span>
+                      </div>
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label htmlFor="ai-agent-inactivity-warn-message">
+                        {t("inactivityWarnMessage")}{" "}
+                        <span className="text-destructive">*</span>
+                      </Label>
+                      <Textarea
+                        id="ai-agent-inactivity-warn-message"
+                        rows={2}
+                        maxLength={AGENT_INACTIVITY_LIMITS.maxText}
+                        value={inactivity.warnMessage}
+                        onChange={e => patchInactivity({ warnMessage: e.target.value })}
+                        placeholder={t("inactivityWarnMessagePlaceholder")}
+                      />
+                    </div>
+                  </>
+                )}
+              </div>
+
+              <div className="grid gap-3 sm:grid-cols-2">
+                <div className="space-y-1.5">
+                  <Label htmlFor="ai-agent-inactivity-act-after">
+                    {t("inactivityActAfter")}
+                  </Label>
+                  <div className="flex items-center gap-2">
+                    <Input
+                      id="ai-agent-inactivity-act-after"
+                      type="text"
+                      inputMode="numeric"
+                      maxLength={4}
+                      className="w-24"
+                      value={inactivity.actAfterMinutes}
+                      onChange={e => patchInactivity({ actAfterMinutes: e.target.value })}
+                      placeholder={String(AGENT_INACTIVITY_LIMITS.defaultActAfterMinutes)}
+                    />
+                    <span className="text-sm text-muted-foreground">
+                      {t("inactivityMinutesSuffix")}
+                    </span>
+                  </div>
+                </div>
+                <div className="space-y-1.5">
+                  <Label>{t("inactivityAction")}</Label>
+                  <Select
+                    value={inactivity.action}
+                    onValueChange={value =>
+                      patchInactivity({ action: value === "transfer" ? "transfer" : "close" })
+                    }
+                  >
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="close">{t("inactivityActionClose")}</SelectItem>
+                      <SelectItem value="transfer">{t("inactivityActionTransfer")}</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+              </div>
+              <p className="text-xs text-muted-foreground">{t("inactivityActAfterHint")}</p>
+
+              {inactivity.action === "transfer" && (
+                <div className="space-y-1.5">
+                  <Label>
+                    {t("inactivityQueue")} <span className="text-destructive">*</span>
+                  </Label>
+                  <Select
+                    value={inactivity.queueId ? String(inactivity.queueId) : ""}
+                    onValueChange={value => patchInactivity({ queueId: Number(value) || null })}
+                  >
+                    <SelectTrigger>
+                      <SelectValue placeholder={t("inactivityQueuePlaceholder")} />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {inactivityQueueOptions.map(queue => (
+                        <SelectItem key={queue.id} value={String(queue.id)}>
+                          {queue.name}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              )}
+
+              <div className="space-y-1.5">
+                <Label htmlFor="ai-agent-inactivity-message">{t("inactivityMessage")}</Label>
+                <Textarea
+                  id="ai-agent-inactivity-message"
+                  rows={2}
+                  maxLength={AGENT_INACTIVITY_LIMITS.maxText}
+                  value={inactivity.message}
+                  onChange={e => patchInactivity({ message: e.target.value })}
+                  placeholder={t("inactivityMessagePlaceholder")}
+                />
+              </div>
+
+              {/* Alertas visíveis: onde age sem mensagem e o que fica de fora */}
+              <div className="flex gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-xs">
+                <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600 dark:text-amber-500" />
+                <div className="min-w-0 space-y-1 text-amber-700 dark:text-amber-400">
+                  <p className="break-words">{t("inactivityChannelsNote")}</p>
+                  <p className="break-words">{t("inactivityScopeNote")}</p>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
       )}
     </div>
   );

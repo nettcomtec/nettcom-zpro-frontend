@@ -95,7 +95,8 @@ export interface ContactTimelineItem {
    * call: { direction?: string | null; status?: string | null; duration?: number | null };
    * system: {}
    * relationship (Fase 3): { typeName: string | null; typeColor: string | null; description: string (até 280); attachmentsCount: number }
-   * task (Fase 3, type task_created | task_completed): { name: string; status: string | null; limitDate: string | null }
+   * task (Fase 3, type task_created | task_completed): { name: string; status: string | null; limitDate: string | null; limitHasTime?: boolean }
+   *   (`limitHasTime` — PLANO_TAREFAS_ATENDIMENTO_LEMBRETES: true = prazo com hora; ausente/false = dia inteiro; backend antigo não manda)
    */
   data: Record<string, unknown> | null;
 }

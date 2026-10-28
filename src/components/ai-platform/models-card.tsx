@@ -1,14 +1,14 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { useTranslations } from "next-intl";
 import { toast } from "sonner";
 import {
-  AlertTriangle, Check, Loader2, MessageSquare, Mic, RefreshCw, Save, Search, Volume2,
+  AlertTriangle, Check, HelpCircle, Loader2, MessageSquare, Mic, RefreshCw, Save, Search, Volume2,
 } from "lucide-react";
 
 import { Alert, AlertDescription } from "@/components/ui/alert";
-import { Badge } from "@/components/ui/badge";
+import { Badge, badgeVariants } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -20,6 +20,9 @@ import {
 import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from "@/components/ui/table";
+import {
+  Tooltip, TooltipContent, TooltipProvider, TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 import type { AiPlatformModelKind } from "@/services/ai-credits";
 import {
@@ -106,6 +109,80 @@ function savedModelsOf(settings: AiPlatformSettings): AiPlatformCatalogModel[] {
   return Array.isArray(settings.models) ? settings.models : [];
 }
 
+// "Sem preço no serviço" (servidor próprio, como Open WebUI/Ollama, não publica preço)
+// pode ser vendido com o preço digitado aqui. Os outros motivos seguem travados — o PUT
+// recusa de novo roteador, alias e ":free", e preço zero de qualquer modelo.
+function isManualPrice(row: AiPlatformSyncedModel): boolean {
+  return !row.activatable && row.reason === "no_price";
+}
+
+function canSell(row: AiPlatformSyncedModel): boolean {
+  return row.activatable || isManualPrice(row);
+}
+
+// Rascunho de quem entra pelo preço digitado: o "0" do serviço não é preço, então o campo
+// nasce vazio — menos o preço já salvo (desmarcar e marcar de novo não pode apagá-lo) e os
+// campos por token de voz/transcrição, que não são a unidade principal do débito deles.
+function manualDraft(draft: SoldDraft): SoldDraft {
+  const keep = (value: string) => ((parseDecimalInput(value) ?? 0) > 0 ? value : "");
+  const tokenField = (value: string) => (draft.model.kind === "chat" ? keep(value) : keep(value) || "0");
+  return { ...draft, input: tokenField(draft.input), output: tokenField(draft.output), aux: keep(draft.aux) };
+}
+
+// Motivo vindo de um backend mais novo que esta tela cai no texto genérico, nunca na chave crua.
+const KNOWN_REASONS = new Set(["router", "alias", "free", "no_price", "variable_price"]);
+
+// Dica do selo "Preço em faixas": por tamanho da entrada, por horário ou os dois.
+// Faixa que esta tela não conhece não mostra selo.
+function priceTierTipKey(row: AiPlatformSyncedModel): string | null {
+  const tiers = Array.isArray(row.priceTiers) ? row.priceTiers : [];
+  const context = tiers.includes("context");
+  const schedule = tiers.includes("schedule");
+  if (context && schedule) return "priceTiers_both";
+  if (context) return "priceTiers_context";
+  if (schedule) return "priceTiers_schedule";
+  return null;
+}
+
+// Motivo do bloqueio numa dica. O Radix não abre tooltip por toque (ignora o ponteiro de
+// toque e fecha no clique), então o clique abre e tocar fora fecha. Com a dica já aberta
+// pelo mouse, o gatilho e a camada de fora fechariam no pointerdown e o clique reabriria.
+function ReasonBadge({ label, tip, variant }: { label: string; tip: string; variant: "warning-soft" | "info-soft" }) {
+  const [open, setOpen] = useState(false);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  return (
+    <TooltipProvider delayDuration={150}>
+      <Tooltip open={open} onOpenChange={setOpen}>
+        <TooltipTrigger asChild>
+          <button
+            ref={triggerRef}
+            type="button"
+            onPointerDown={(e) => e.preventDefault()}
+            onClick={(e) => {
+              e.preventDefault();
+              setOpen(true);
+            }}
+            className={cn(badgeVariants({ variant }), "h-4 cursor-help gap-1 px-1.5 py-0 text-[10px] font-normal")}
+          >
+            {label}
+            <HelpCircle className="h-2.5 w-2.5 shrink-0" aria-hidden />
+          </button>
+        </TooltipTrigger>
+        <TooltipContent
+          side="top"
+          collisionPadding={16}
+          className="max-w-[18rem] whitespace-normal leading-relaxed"
+          onPointerDownOutside={(e) => {
+            if (triggerRef.current?.contains(e.target as Node)) e.preventDefault();
+          }}
+        >
+          {tip}
+        </TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
+  );
+}
+
 export function ModelsCard({ settings, onSaved }: AiPlatformCardProps) {
   const t = useTranslations("aiPlatformPage");
   const tCredits = useTranslations("aiCreditsPage");
@@ -177,6 +254,7 @@ export function ModelsCard({ settings, onSaved }: AiPlatformCardProps) {
           ...d.model,
           activatable: liveModel ? liveModel.activatable : true,
           reason: liveModel?.reason,
+          priceTiers: liveModel?.priceTiers,
         };
       });
       setPool([...top, ...live.filter((m) => !soldIds.has(m.modelId))]);
@@ -192,8 +270,9 @@ export function ModelsCard({ settings, onSaved }: AiPlatformCardProps) {
   const toggleSold = (row: AiPlatformSyncedModel, checked: boolean) => {
     const id = row.modelId;
     if (checked) {
-      if (!row.activatable || soldById.has(id)) return;
-      setSold((prev) => [...prev, draftFrom(toCatalogModel(row))]);
+      if (!canSell(row) || soldById.has(id)) return;
+      const draft = draftFrom(toCatalogModel(row));
+      setSold((prev) => [...prev, isManualPrice(row) ? manualDraft(draft) : draft]);
       // Primeiro modelo do tipo já entra como escolhido — evita salvar sem modelo padrão.
       if (row.kind === "chat" && !defaultModelId) setDefaultModelId(id);
       if (row.kind === "transcription" && !transcriptionModelId) setTranscriptionModelId(id);
@@ -220,12 +299,15 @@ export function ModelsCard({ settings, onSaved }: AiPlatformCardProps) {
   const handleSave = async () => {
     if (saving) return;
     const errors = new Set<string>();
+    let missingPrice = false;
     const models: AiPlatformCatalogModel[] = sold.map((d) => {
       const id = d.model.modelId;
       const input = parseDecimalInput(d.input);
       const output = parseDecimalInput(d.output);
       if (input === null || input < 0) errors.add(`${id}:input`);
       if (output === null || output < 0) errors.add(`${id}:output`);
+      // Campo em branco é preço que falta (é como nasce o modelo sem preço no serviço).
+      if (!d.input.trim() || !d.output.trim()) missingPrice = true;
       const next: AiPlatformCatalogModel = {
         ...toCatalogModel(d.model),
         inputUsdPer1M: input ?? 0,
@@ -241,12 +323,35 @@ export function ModelsCard({ settings, onSaved }: AiPlatformCardProps) {
           else next.perMillionCharsUsd = aux;
         }
       }
+
+      // Espelho do PUT: sem preço na unidade que o débito usa, o modelo sairia de graça
+      // para o cliente — o servidor recusaria o salvar inteiro sem dizer qual linha.
+      const inputOk = !errors.has(`${id}:input`);
+      const outputOk = !errors.has(`${id}:output`);
+      const auxOk = !errors.has(`${id}:aux`);
+      if (inputOk && outputOk && auxOk) {
+        const byToken = next.inputUsdPer1M > 0 || next.outputUsdPer1M > 0;
+        const priced =
+          next.kind === "speech"
+            ? (next.perMillionCharsUsd ?? 0) > 0
+            : next.kind === "transcription"
+              ? (next.perMinuteUsd ?? 0) > 0 || byToken
+              : byToken;
+        if (!priced) {
+          missingPrice = true;
+          if (next.kind !== "chat") errors.add(`${id}:aux`);
+          if (next.kind !== "speech") {
+            errors.add(`${id}:input`);
+            errors.add(`${id}:output`);
+          }
+        }
+      }
       return next;
     });
 
     setInvalid(errors);
     if (errors.size > 0) {
-      toast.error(t("err_ERR_AI_PLATFORM_INVALID_SETTINGS"));
+      toast.error(t(missingPrice ? "priceRequired" : "err_ERR_AI_PLATFORM_INVALID_SETTINGS"));
       return;
     }
 
@@ -384,7 +489,9 @@ export function ModelsCard({ settings, onSaved }: AiPlatformCardProps) {
                     visible.map((row) => {
                       const draft = soldById.get(row.modelId) ?? null;
                       const isSold = draft !== null;
-                      const locked = !row.activatable && !isSold;
+                      const manualPrice = isManualPrice(row);
+                      const locked = !canSell(row) && !isSold;
+                      const tierTipKey = row.activatable ? priceTierTipKey(row) : null;
                       const auxCaption =
                         row.kind === "transcription"
                           ? tCredits("pricesPerMinute")
@@ -413,9 +520,14 @@ export function ModelsCard({ settings, onSaved }: AiPlatformCardProps) {
                                 {row.modelId}
                               </span>
                               {!row.activatable && (
-                                <Badge variant="warning-soft" className="h-4 px-1.5 py-0 text-[10px] font-normal">
-                                  {t("notActivatable")}
-                                </Badge>
+                                <ReasonBadge
+                                  variant={manualPrice ? "info-soft" : "warning-soft"}
+                                  label={t(manualPrice ? "noPriceBadge" : "notActivatable")}
+                                  tip={t(row.reason && KNOWN_REASONS.has(row.reason) ? `reason_${row.reason}` : "reason_unknown")}
+                                />
+                              )}
+                              {tierTipKey && (
+                                <ReasonBadge variant="info-soft" label={t("priceTiersBadge")} tip={t(tierTipKey)} />
                               )}
                             </div>
                           </TableCell>
@@ -431,7 +543,7 @@ export function ModelsCard({ settings, onSaved }: AiPlatformCardProps) {
                                 disabled={saving}
                               />
                             ) : (
-                              <span className="text-muted-foreground">{usdToInput(row.inputUsdPer1M) || "—"}</span>
+                              <span className="text-muted-foreground">{(!manualPrice && usdToInput(row.inputUsdPer1M)) || "—"}</span>
                             )}
                           </TableCell>
                           <TableCell>
@@ -446,7 +558,7 @@ export function ModelsCard({ settings, onSaved }: AiPlatformCardProps) {
                                 disabled={saving}
                               />
                             ) : (
-                              <span className="text-muted-foreground">{usdToInput(row.outputUsdPer1M) || "—"}</span>
+                              <span className="text-muted-foreground">{(!manualPrice && usdToInput(row.outputUsdPer1M)) || "—"}</span>
                             )}
                           </TableCell>
                           <TableCell>
@@ -464,7 +576,7 @@ export function ModelsCard({ settings, onSaved }: AiPlatformCardProps) {
                                     disabled={saving}
                                   />
                                 ) : (
-                                  <span className="text-muted-foreground">{usdToInput(auxValueOf(row)) || "—"}</span>
+                                  <span className="text-muted-foreground">{(!manualPrice && usdToInput(auxValueOf(row))) || "—"}</span>
                                 )}
                               </div>
                             )}

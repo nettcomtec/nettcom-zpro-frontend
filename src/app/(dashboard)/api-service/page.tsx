@@ -30,7 +30,7 @@ import {
   Globe, RefreshCw, Plus, Pencil, Trash2, Copy, Key,
   ExternalLink, Check, AlertTriangle, ChevronDown, ChevronRight,
   BookOpen, Play, Send, FlaskConical, Clock,
-  Layers2, ArrowDownAZ, Building2,
+  Layers2, ArrowDownAZ, Building2, ClipboardList,
 } from "lucide-react";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { oneDark, oneLight } from "react-syntax-highlighter/dist/esm/styles/prism";
@@ -140,7 +140,9 @@ interface ApiRoute {
 
 interface ApiRouteCategory {
   name: string;
-  emoji: string;
+  // Categorias antigas usam emoji; categoria nova usa ícone do lucide (sem emoji na tela).
+  emoji?: string;
+  icon?: React.ElementType;
   routes: ApiRoute[];
   channelTypes?: string[];
 }
@@ -154,7 +156,7 @@ const API_DOCS: ApiRouteCategory[] = [
     routes: [
       {
         method: "GET", path: "/params/", name: "SendMessageParams",
-        description: "Enviar mensagem via query params (GET). Útil para integrações simples sem body. É a única rota do catálogo que não aceita o token no header Authorization: o token vai obrigatoriamente no parâmetro bearertoken.",
+        description: "Enviar mensagem via query params (GET). Útil para integrações simples sem body. É a única rota do catálogo que não aceita o token no header Authorization: o token vai obrigatoriamente no parâmetro bearertoken. Nos canais whatsapp e baileys, número sem WhatsApp responde 424 ERR_WAPP_CONTACT_UNVERIFIED (número sem WhatsApp ou consulta ao WhatsApp indisponível no momento; pode tentar de novo); no baileys, canal aguardando a leitura do QR responde 400 ERR_CHANNEL_DISCONNECTED.",
         params: [
           { key: "body", desc: "Texto da mensagem", required: true, defaultValue: "Olá!" },
           { key: "number", desc: "Número do destinatário (5511999999999)", required: true, defaultValue: "5511999999999" },
@@ -164,7 +166,7 @@ const API_DOCS: ApiRouteCategory[] = [
       },
       {
         method: "POST", path: "/", name: "SendMessageAPIText",
-        description: "Enviar mensagem de texto. Abre ou reutiliza ticket existente. O campo number carrega o ID da plataforma do canal do token: telefone (família WhatsApp), IGSID (Instagram), PSID (Messenger), telegramId (Telegram). O canal e-mail também exige number (ou bsuid) e usa email como destinatário e subject como assunto. Aceita ticketId opcional — usado apenas quando consistente com o contato/canal do ticket.",
+        description: "Enviar mensagem de texto. Abre ou reutiliza ticket existente. O campo number carrega o ID da plataforma do canal do token: telefone (família WhatsApp), IGSID (Instagram), PSID (Messenger), telegramId (Telegram). O canal e-mail também exige number (ou bsuid) e usa email como destinatário e subject como assunto. Aceita ticketId opcional — usado apenas quando consistente com o contato/canal do ticket. body em número vira texto; objeto ou lista responde 400 ERR_INVALID_BODY. Nos canais whatsapp e baileys, número sem WhatsApp responde 424 ERR_WAPP_CONTACT_UNVERIFIED (número sem WhatsApp ou consulta ao WhatsApp indisponível no momento; pode tentar de novo); no baileys, canal aguardando a leitura do QR responde 400 ERR_CHANNEL_DISCONNECTED.",
         bodyType: "json",
         bodyExample: JSON.stringify({ body: "A mensagem desejada", number: "5511999999999", externalKey: "chave-001", isClosed: false }, null, 2),
       },
@@ -176,19 +178,19 @@ const API_DOCS: ApiRouteCategory[] = [
       },
       {
         method: "POST", path: "/url", name: "SendMessageAPIFileURL",
-        description: "Enviar mídia a partir de URL pública (imagem, documento).",
+        description: "Enviar mídia a partir de URL pública (imagem, documento). body (legenda) em número vira texto; objeto ou lista responde 400 ERR_INVALID_BODY. Nos canais whatsapp e baileys, número sem WhatsApp responde 424 ERR_WAPP_CONTACT_UNVERIFIED (número sem WhatsApp ou consulta ao WhatsApp indisponível no momento; pode tentar de novo); no baileys, canal aguardando a leitura do QR responde 400 ERR_CHANNEL_DISCONNECTED.",
         bodyType: "json",
         bodyExample: JSON.stringify({ mediaUrl: "https://exemplo.com/imagem.png", body: "A mensagem desejada", number: "5511999999999", externalKey: "chave-001", isClosed: false }, null, 2),
       },
       {
         method: "POST", path: "/voice", name: "SendMessageAPIVoice",
-        description: "Enviar áudio/mensagem de voz via URL pública (.ogg, .mp3).",
+        description: "Enviar áudio/mensagem de voz via URL pública (.ogg, .mp3). No baileys, número sem WhatsApp responde 424 ERR_WAPP_CONTACT_UNVERIFIED (número sem WhatsApp ou consulta ao WhatsApp indisponível no momento; pode tentar de novo) e canal aguardando a leitura do QR, 400 ERR_CHANNEL_DISCONNECTED.",
         bodyType: "json",
         bodyExample: JSON.stringify({ audio: "https://exemplo.com/audio.ogg", number: "5511999999999", externalKey: "chave-001", isClosed: false }, null, 2),
       },
       {
         method: "POST", path: "/base64", name: "SendMessageAPITextBase64",
-        description: "Enviar arquivo codificado em Base64 junto com mensagem.",
+        description: "Enviar arquivo codificado em Base64 junto com mensagem. body (legenda) em número vira texto; objeto ou lista responde 400 ERR_INVALID_BODY. Nos canais whatsapp e baileys, número sem WhatsApp responde 424 ERR_WAPP_CONTACT_UNVERIFIED (número sem WhatsApp ou consulta ao WhatsApp indisponível no momento; pode tentar de novo); no baileys, canal aguardando a leitura do QR responde 400 ERR_CHANNEL_DISCONNECTED.",
         bodyType: "json",
         bodyExample: JSON.stringify({ body: "A mensagem desejada", number: "5511999999999", base64Data: "iVBORw0KGgoAAAANSUhEUgAAAAUA...", mimeType: "image/png", fileName: "exemplo", isClosed: false }, null, 2),
       },
@@ -235,7 +237,7 @@ const API_DOCS: ApiRouteCategory[] = [
     routes: [
       {
         method: "POST", path: "/group", name: "SendGroupMessageAPIText",
-        description: "Enviar mensagem de texto para grupo do WhatsApp.",
+        description: "Enviar mensagem de texto para grupo do WhatsApp. Sem body (e sem arquivo) responde 400 ERR_MISSING_BODY_OR_MEDIA; body em número vira texto e objeto ou lista responde 400 ERR_INVALID_BODY. No baileys, canal aguardando a leitura do QR responde 400 ERR_CHANNEL_DISCONNECTED.",
         bodyType: "json",
         bodyExample: JSON.stringify({ body: "A mensagem desejada", number: "12356818915189153", externalKey: "chave-001", isClosed: false }, null, 2),
       },
@@ -259,19 +261,19 @@ const API_DOCS: ApiRouteCategory[] = [
     routes: [
       {
         method: "POST", path: "/template", name: "SendTemplateWaba",
-        description: "Enviar template aprovado do WhatsApp Business API (WABA). A resposta retorna o ticketId do atendimento criado/reutilizado.",
+        description: "Enviar template aprovado do WhatsApp Business API (WABA). A resposta retorna o ticketId do atendimento criado/reutilizado. templateData é objeto (texto JSON também é aceito) e template.components precisa ser lista: fora disso responde 400 ERR_INVALID_TEMPLATE_DATA ou ERR_INVALID_TEMPLATE_COMPONENTS. number é obrigatório (texto ou número): sem ele responde 400 ERR_MISSING_NUMBER_OR_BSUID. Rota pela categoria: template de marketing sai pela Marketing Messages API da Meta quando a conta aceitou os termos (senão, pelo envio comum); utilidade e autenticação saem pelo envio comum. Corpo e resposta são os mesmos.",
         bodyType: "json",
         bodyExample: JSON.stringify({ number: "5511999999999", isClosed: false, templateData: { messaging_product: "whatsapp", to: "5511999999999", type: "template", template: { name: "hello_world", language: { code: "pt_BR" } } } }, null, 2),
       },
       {
         method: "POST", path: "/templateBody", name: "SendTemplateWabaBody",
-        description: "Enviar template WABA com parâmetros de body personalizados. A resposta retorna o ticketId do atendimento criado/reutilizado.",
+        description: "Enviar template WABA com parâmetros de body personalizados. A resposta retorna o ticketId do atendimento criado/reutilizado. templateData é objeto (texto JSON também é aceito) e components precisa ser lista; text de parâmetro e variables em número viram texto, e objeto ou lista nesses campos responde 400 ERR_INVALID_TEMPLATE_PARAMETER. Fora do formato: 400 ERR_INVALID_TEMPLATE_DATA ou ERR_INVALID_TEMPLATE_COMPONENTS. number é obrigatório (texto ou número): sem ele responde 400 ERR_MISSING_NUMBER_OR_BSUID. Rota pela categoria: template de marketing sai pela Marketing Messages API da Meta quando a conta aceitou os termos (senão, pelo envio comum); utilidade e autenticação saem pelo envio comum. Corpo e resposta são os mesmos.",
         bodyType: "json",
         bodyExample: JSON.stringify({ number: "5511999999999", isClosed: false, templateData: { messaging_product: "whatsapp", to: "5511999999999", type: "template", template: { name: "hello_world", language: { code: "pt_BR" }, components: [{ type: "body", parameters: [{ type: "text", text: "valor1" }] }] } } }, null, 2),
       },
       {
         method: "POST", path: "/templateMarketingBody", name: "SendTemplateWabaMarketing",
-        description: "Enviar template de marketing WABA com componentes de header e body. A resposta retorna o ticketId do atendimento criado/reutilizado.",
+        description: "Enviar template de marketing WABA com componentes de header e body. A resposta retorna o ticketId do atendimento criado/reutilizado. templateData é objeto (texto JSON também é aceito) e components precisa ser lista; text de parâmetro e variables em número viram texto, e objeto ou lista nesses campos responde 400 ERR_INVALID_TEMPLATE_PARAMETER. Fora do formato: 400 ERR_INVALID_TEMPLATE_DATA ou ERR_INVALID_TEMPLATE_COMPONENTS. number é obrigatório (texto ou número): sem ele responde 400 ERR_MISSING_NUMBER_OR_BSUID. Rota pela categoria: template de marketing sai pela Marketing Messages API da Meta quando a conta aceitou os termos (senão, pelo envio comum); utilidade e autenticação saem pelo envio comum, então a rota também aceita template de utilidade. Corpo e resposta são os mesmos.",
         bodyType: "json",
         bodyExample: JSON.stringify({ number: "5511999999999", isClosed: false, templateData: { messaging_product: "whatsapp", to: "5511999999999", type: "template", template: { name: "nome_template_marketing", language: { code: "pt_BR" }, components: [{ type: "header", parameters: [{ type: "image", image: { link: "https://exemplo.com/img.png" } }] }, { type: "body", parameters: [{ type: "text", text: "valor1" }] }] } } }, null, 2),
       },
@@ -291,7 +293,7 @@ const API_DOCS: ApiRouteCategory[] = [
       },
       {
         method: "POST", path: "/sendListWABA", name: "SendListWABA",
-        description: "Enviar lista interativa com seções e itens selecionáveis via WABA. Exige canal do tipo WhatsApp Business API (waba): canais Dialog360 e Gupshup respondem 400 ERR_CHANNEL_WABA_REQUIRED.",
+        description: "Enviar lista interativa com seções e itens selecionáveis via WABA. Exige canal do tipo WhatsApp Business API (waba): canais Dialog360 e Gupshup respondem 400 ERR_CHANNEL_WABA_REQUIRED. Recusa da Meta (número inválido, fora da janela de 24 h, lista fora do formato) responde 400 { success: false, error: \"ERR_WABA_SEND_FAILED\", metaStatus, metaCode, metaSubcode, message } com o código e a mensagem da Meta.",
         bodyType: "json",
         channelTypes: ["waba"],
         bodyExample: JSON.stringify({ number: "5511999999999", header: "Menu Principal", body: "Escolha uma opção:", footer: "Selecione uma opção", button_text: "Ver opções", sections: [{ title: "Seção 1", rows: [{ id: "1", title: "Opção 1", description: "Desc 1" }, { id: "2", title: "Opção 2", description: "Desc 2" }] }], ticketId: 1262 }, null, 2),
@@ -304,7 +306,7 @@ const API_DOCS: ApiRouteCategory[] = [
     routes: [
       {
         method: "POST", path: "/createContact", name: "CreateContact",
-        description: "Criar um novo contato no sistema. Endereço opcional: cep (até 20 caracteres), logradouro (rua), numeroEndereco, complemento, bairro e cidade (até 255 cada) e estado (até 100). Os textos são aparados e o que passar do limite é cortado, sem erro; o estado é gravado como veio. A resposta traz o contato com os 7 campos de endereço (cep, logradouro, numeroEndereco, complemento, bairro, cidade, estado).",
+        description: "Criar um novo contato no sistema. number é obrigatório e precisa ter ao menos um dígito (400 ERR_MISSING_NUMBER_OR_BSUID). Número já cadastrado responde 409 ERR_CONTACT_EXISTS com existingContactId e existingNumber. Endereço opcional: cep (até 20 caracteres), logradouro (rua), numeroEndereco, complemento, bairro e cidade (até 255 cada) e estado (até 100). Os textos são aparados e o que passar do limite é cortado, sem erro; o estado é gravado como veio. A resposta traz o contato com os 7 campos de endereço (cep, logradouro, numeroEndereco, complemento, bairro, cidade, estado).",
         bodyType: "json",
         bodyExample: JSON.stringify({ name: "Nome Completo", number: "5511999999999", email: "contato@email.com", cpf: "000.000.000-00", firstName: "Nome", lastName: "Sobrenome", businessName: "Empresa", birthdayDate: "01/01/1990", cep: "01310-100", logradouro: "Avenida Paulista", numeroEndereco: "1000", complemento: "Sala 101", bairro: "Bela Vista", cidade: "São Paulo", estado: "SP" }, null, 2),
       },
@@ -319,6 +321,12 @@ const API_DOCS: ApiRouteCategory[] = [
         description: "Atualizar dados de um contato existente. Endereço: cep (até 20 caracteres), logradouro (rua), numeroEndereco, complemento, bairro e cidade (até 255 cada) e estado (até 100), aparados e cortados no limite, sem erro; o estado é gravado como veio. Em cada campo de endereço, \"\" ou null apaga o valor e campo ausente fica como está. A resposta traz o contato com os 7 campos de endereço.",
         bodyType: "json",
         bodyExample: JSON.stringify({ name: "Nome Atualizado", number: "5511999999999", email: "novo@email.com", cpf: "000.000.000-00", firstName: "Nome", lastName: "Sobrenome", businessName: "Empresa", birthdayDate: "01/01/1990", kanban: 2, cep: "01310-100", logradouro: "Avenida Paulista", numeroEndereco: "1000", complemento: "Sala 101", bairro: "Bela Vista", cidade: "São Paulo", estado: "SP" }, null, 2),
+      },
+      {
+        method: "POST", path: "/telegramInvite", name: "TelegramInvite",
+        description: "Gerar o link de convite do Telegram de um contato já cadastrado: quando a pessoa abre o link e toca em Iniciar, a conta do Telegram dela é ligada a esse contato e o atendimento pelo Telegram fica disponível para ele. O link vale 7 dias, é de uso único e só o mais recente de cada contato funciona (gerar de novo invalida o anterior); quem tiver o link consegue usá-lo. Informe contactId ou, no lugar dele, number (número de telefone do contato; número que corresponde a mais de um contato devolve 422 ERR_NUMBER_AMBIGUOUS com a lista candidates). whatsappId é o bot do Telegram: opcional quando o token é de uma sessão do Telegram (vale o bot do token; outro whatsappId responde 403 ERR_SESSION_NOT_AUTH_TOKEN) ou quando a empresa tem um só bot conectado. Resposta (em data): { link, expiresAt, contactId, whatsappId }. Erros: 400 ERR_CONTACT_OR_NUMBER_REQUIRED (sem contactId e sem number), 404 ERR_CONTACT_NOT_FOUND (contato inexistente ou mesclado), 409 ERR_TELEGRAM_ALREADY_LINKED (o contato já tem Telegram), 400 ERR_TELEGRAM_INVITE_GROUP (grupo), 409 ERR_TELEGRAM_BOT_NOT_FOUND (nenhum bot do Telegram conectado, ou whatsappId que não é um bot do Telegram da empresa), 400 ERR_TELEGRAM_BOT_REQUIRED (mais de um bot conectado: informe whatsappId), 409 ERR_TELEGRAM_BOT_OFFLINE (bot desconectado), 424 ERR_TELEGRAM_BOT_UNAVAILABLE (o Telegram não respondeu ao consultar o bot), 409 ERR_TELEGRAM_INVITE_DISABLED (recurso desligado no servidor), 409 ERR_TELEGRAM_INVITE_UNAVAILABLE (servidor ainda sem a atualização do banco).",
+        bodyType: "json",
+        bodyExample: JSON.stringify({ contactId: 123, whatsappId: 7 }, null, 2),
       },
       {
         method: "POST", path: "/blockContact", name: "BlockContact",
@@ -381,7 +389,7 @@ const API_DOCS: ApiRouteCategory[] = [
     routes: [
       {
         method: "POST", path: "/createTicket", name: "CreateTicket",
-        description: "Criar ticket de atendimento. Suporta WhatsApp e Webmail.",
+        description: "Criar ticket de atendimento. Suporta WhatsApp e Webmail. userId (atendente do ticket) é obrigatório: sem ele a rota responde 400 ERR_MISSING_FIELDS (com fields); usuário que não é da sua empresa responde 404 ERR_USER_NOT_FOUND.",
         bodyType: "json",
         bodyExample: JSON.stringify({ body: "Mensagem inicial", number: "5511999999999", externalKey: "chave-001", userId: 1, status: "pending", queueId: null, kanbanId: null, chatFlowId: null, reasonId: null, value: null }, null, 2),
       },
@@ -389,7 +397,7 @@ const API_DOCS: ApiRouteCategory[] = [
         method: "POST", path: "/createTicket", name: "CreateTicketWebmail",
         description: "Criar ticket via canal Webmail (email).",
         bodyType: "json",
-        bodyExample: JSON.stringify({ body: "Mensagem via email", email: "contato@exemplo.com", channelId: 17841443941506797, externalKey: "chave-001", userId: 1, status: "pending", name: "Nome do Contato" }, null, 2),
+        bodyExample: JSON.stringify({ body: "Mensagem via email", email: "contato@exemplo.com", channelId: 17, externalKey: "chave-001", userId: 1, status: "pending", name: "Nome do Contato" }, null, 2),
       },
       {
         method: "POST", path: "/createTicket", name: "CreateTicketFile",
@@ -399,19 +407,19 @@ const API_DOCS: ApiRouteCategory[] = [
       },
       {
         method: "POST", path: "/updatequeue", name: "SetQueue",
-        description: "Definir ou alterar a fila de atendimento de um ticket.",
+        description: "Definir ou alterar a fila de atendimento de um ticket. Só ticketId e queueId são lidos (para trocar atendente ou status use /updateticketinfo). ticketId é o id numérico do ticket (400 ERR_INVALID_TICKET_ID). queueId precisa ser uma fila da sua empresa (404 ERR_QUEUE_NOT_FOUND); null tira a fila. A resposta traz o ticket sem as chaves do canal. A troca de fila fica registrada no histórico do atendimento como mensagem de sistema (mediaType \"transfer\", dataJson.kind \"ticket_transfer\"), que nunca é enviada ao contato; atendimento encerrado, ainda sem mensagens ou que já estava na mesma fila não ganha o registro.",
         bodyType: "json",
         bodyExample: JSON.stringify({ ticketId: 4, queueId: 1 }, null, 2),
       },
       {
         method: "POST", path: "/updatetag", name: "SetTag",
-        description: "Substituir as tags do contato do ticket pela tag informada. Atenção: as demais tags do contato são removidas, e o efeito vale para todos os tickets desse contato. Para acrescentar sem remover, use /addTag.",
+        description: "Substituir as tags do contato do ticket pela tag informada. Atenção: as demais tags do contato são removidas, e o efeito vale para todos os tickets desse contato. Para acrescentar sem remover, use /addTag. ticketId e tag são ids numéricos (400 ERR_INVALID_TICKET_ID ou ERR_INVALID_FIELD com field). Ticket ou tag que não existe na sua empresa responde 404 ERR_TICKET_NOT_FOUND ou ERR_TAG_NOT_FOUND, sem alterar nada.",
         bodyType: "json",
         bodyExample: JSON.stringify({ ticketId: 4, tag: 1 }, null, 2),
       },
       {
         method: "POST", path: "/updateticketinfo", name: "SetTicketInfo",
-        description: "Atualizar informações completas de um ticket.",
+        description: "Atualizar informações completas de um ticket. ticketId é o id numérico do ticket (400 ERR_INVALID_TICKET_ID). status aceita open, pending ou closed (400 ERR_INVALID_STATUS). typebotStatus, lmStatus, chatgptStatus, dialogflowStatus, difyStatus e n8nStatus aceitam true/false (também \"enabled\"/\"disabled\" e 1/0; outro valor responde 400 ERR_INVALID_FIELD com o campo em field). queueId, userId e chatFlowId precisam existir na sua empresa (senão 404 ERR_QUEUE_NOT_FOUND, ERR_USER_NOT_FOUND ou ERR_CHATFLOW_NOT_FOUND); null limpa o campo. A troca de fila, atendente ou fluxo fica registrada no histórico do atendimento como mensagem de sistema (mediaType \"transfer\", dataJson.kind \"ticket_transfer\"), que nunca é enviada ao contato; atendimento encerrado (antes ou depois da chamada) ou ainda sem mensagens não ganha o registro.",
         bodyType: "json",
         bodyExample: JSON.stringify({ ticketId: 1262, userId: 1, status: "pending", queueId: null, typebotStatus: false, chatgptStatus: false, dialogflowStatus: false, difyStatus: false, n8nStatus: false, chatFlowId: null }, null, 2),
       },
@@ -435,19 +443,19 @@ const API_DOCS: ApiRouteCategory[] = [
       },
       {
         method: "POST", path: "/showAllMessages", name: "ShowAllMessages",
-        description: "Listar todas as mensagens de um ticket.",
+        description: "Listar todas as mensagens de um ticket. Informe o id em ticket (ou ticketId); sem ele responde 400 ERR_MISSING_TICKET. A lista traz também as mensagens de sistema, que nunca foram enviadas ao contato: notas internas (mediaType \"notes\" ou \"callNotes\") e divisórias de transferência (mediaType \"transfer\"). Nas divisórias novas, dataJson vem como texto JSON (kind \"ticket_transfer\") com origem, destino e autor; o autor vem nulo nas transferências automáticas, e as divisórias antigas vêm sem dataJson.",
         bodyType: "json",
         bodyExample: JSON.stringify({ ticket: "123" }, null, 2),
       },
       {
         method: "POST", path: "/updateTicketChannel", name: "UpdateTicketChannel",
-        description: "Alterar o canal (WhatsApp) de um ticket existente.",
+        description: "Alterar o canal (WhatsApp) de um ticket existente. O whatsappId precisa ser um canal da empresa do token (senão 404 ERR_NO_WAPP_FOUND); o tipo gravado no ticket sai do canal, e o campo channel continua obrigatório só por compatibilidade. A troca de canal fica registrada no histórico do atendimento como mensagem de sistema (mediaType \"transfer\", dataJson.kind \"ticket_transfer\"), que nunca é enviada ao contato; atendimento encerrado ou ainda sem mensagens não ganha o registro.",
         bodyType: "json",
         bodyExample: JSON.stringify({ ticketId: 1262, whatsappId: 1, channel: "whatsapp" }, null, 2),
       },
       {
         method: "POST", path: "/createNotes", name: "CreateNotes",
-        description: "Criar uma nota interna em um ticket.",
+        description: "Criar uma nota interna em um ticket. ticketId e notes (texto não vazio) são obrigatórios (400 ERR_MISSING_FIELDS); ticketId fora do formato numérico responde 400 ERR_INVALID_TICKET_ID. userId é opcional e precisa ser um usuário da sua empresa (404 ERR_USER_NOT_FOUND). idFront é opcional: quando informado, uma nota com o mesmo idFront não é criada de novo.",
         bodyType: "json",
         bodyExample: JSON.stringify({ notes: "Conteúdo da nota", ticketId: 1262, userId: 1, idFront: "ID_UNICA_NOTA_001" }, null, 2),
       },
@@ -488,7 +496,7 @@ const API_DOCS: ApiRouteCategory[] = [
       },
       {
         method: "POST", path: "/sendPresence", name: "SendPresence",
-        description: "Enviar estado de presença (digitando, gravando, etc).",
+        description: "Enviar estado de presença (digitando, gravando, etc). Nos canais oficiais (WhatsApp Business oficial e 360dialog) só typing funciona, e a Meta marca como lida a última mensagem recebida do contato; recording, paused e o canal Gupshup respondem 400 ERR_PRESENCE_NOT_SUPPORTED.",
         bodyType: "json",
         bodyExample: JSON.stringify({ ticketId: 1262, state: "typing" }, null, 2),
       },
@@ -500,7 +508,7 @@ const API_DOCS: ApiRouteCategory[] = [
     routes: [
       {
         method: "POST", path: "/createOpportunity", name: "CreateOpportunity",
-        description: "Criar nova oportunidade vinculada a um contato.",
+        description: "Criar nova oportunidade vinculada a um contato (number; contactName e email são usados só se o contato ainda não existir). Obrigatórios: number, name (até 255 caracteres), pipelineId, stageId (etapa desse funil) e responsibleId (usuário da empresa). Opcionais: value (número, ex.: 1500.50), status (open, win ou lose), description e closingForecast, aceito só como AAAA-MM-DD, DD/MM/AAAA ou data e hora ISO 8601 (ex.: 2024-12-31T18:00:00-03:00). Outros campos do corpo são ignorados. Erros (400): ERR_MISSING_FIELDS (com fields), ERR_INVALID_OPPORTUNITY_REFERENCE (com field: funil, etapa ou responsável inexistente ou de outra empresa), ERR_STAGE_NOT_IN_PIPELINE, ERR_INVALID_OPPORTUNITY_NAME, ERR_INVALID_VALUE, ERR_INVALID_STATUS, ERR_INVALID_DESCRIPTION e ERR_INVALID_CLOSING_FORECAST.",
         bodyType: "json",
         bodyExample: JSON.stringify({ number: "5511999999999", contactName: "Nome do Contato", email: "contato@email.com", name: "Nome da Oportunidade", value: 10000.00, status: "open", pipelineId: 16, stageId: 7, responsibleId: 1, closingForecast: "2024-12-31", description: "Descrição da oportunidade" }, null, 2),
       },
@@ -512,7 +520,7 @@ const API_DOCS: ApiRouteCategory[] = [
       },
       {
         method: "POST", path: "/updateOpportunity", name: "UpdateOpportunity",
-        description: "Atualizar dados de uma oportunidade existente.",
+        description: "Atualizar dados de uma oportunidade existente. Só opportunityId é obrigatório; campo ausente fica como está; nos demais, vazio ou null também fica como está, exceto description e closingForecast, em que vazio ou null limpam o valor. Mesmas regras do CreateOpportunity: pipelineId, stageId e responsibleId da empresa, etapa do funil da oportunidade (ou do pipelineId enviado; trocar de funil exige stageId desse funil), value numérico, status open, win ou lose e closingForecast em AAAA-MM-DD, DD/MM/AAAA ou data e hora ISO 8601. Erros: 404 ERR_OPPORTUNITY_NOT_FOUND; 400 ERR_INVALID_OPPORTUNITY_REFERENCE (com field), ERR_STAGE_NOT_IN_PIPELINE, ERR_INVALID_OPPORTUNITY_NAME, ERR_INVALID_VALUE, ERR_INVALID_STATUS, ERR_INVALID_DESCRIPTION e ERR_INVALID_CLOSING_FORECAST.",
         bodyType: "json",
         bodyExample: JSON.stringify({ opportunityId: 30, name: "Nome Atualizado", value: 500.00, status: "open", pipelineId: 16, stageId: 7, responsibleId: 1, closingForecast: "2024-12-31", description: "Descrição atualizada" }, null, 2),
       },
@@ -601,13 +609,13 @@ const API_DOCS: ApiRouteCategory[] = [
     routes: [
       {
         method: "POST", path: "/showChannel", name: "ShowChannelInformation",
-        description: "Buscar informações de um canal pelo número.",
+        description: "Buscar informações de um canal pelo número (sem number responde 400 ERR_NUMBER_REQUIRED). A resposta não traz tokens, senhas, chaves nem a sessão do canal.",
         bodyType: "json",
         bodyExample: JSON.stringify({ number: "5511999999999" }, null, 2),
       },
       {
         method: "POST", path: "/showChannelById", name: "ShowChannelInformationById",
-        description: "Buscar informações de um canal pelo ID.",
+        description: "Buscar informações de um canal pelo ID (id que não é da sua empresa responde 404 ERR_CHANNEL_NOT_FOUND). A resposta não traz tokens, senhas, chaves nem a sessão do canal.",
         bodyType: "json",
         bodyExample: JSON.stringify({ id: 43 }, null, 2),
       },
@@ -655,13 +663,13 @@ const API_DOCS: ApiRouteCategory[] = [
     routes: [
       {
         method: "POST", path: "/sendLocation", name: "SendLocation",
-        description: "Enviar localização geográfica para um contato. O destinatário vem de number; ticketId é opcional e só vincula a mensagem ao ticket.",
+        description: "Enviar localização geográfica para um contato. O destinatário vem de number; ticketId é obrigatório e é o atendimento em que a mensagem fica registrada (sem ele 400 ERR_MISSING_TICKET; atendimento que não é da sua empresa 404 ERR_TICKET_NOT_FOUND).",
         bodyType: "json",
         bodyExample: JSON.stringify({ number: "5511999999999", latitude: -23.5505, longitude: -46.6333, name: "São Paulo", address: "Av. Paulista, 1000", ticketId: 1262 }, null, 2),
       },
       {
         method: "POST", path: "/sendVcard", name: "SendVcard",
-        description: "Enviar contato (vCard). O destinatário vem de number; ticketId é opcional e só vincula a mensagem ao ticket. Dentro de contact, os campos fullName, wuid e phoneNumber são obrigatórios.",
+        description: "Enviar contato (vCard). O destinatário vem de number; ticketId é obrigatório e é o atendimento em que a mensagem fica registrada (sem ele 400 ERR_MISSING_TICKET; atendimento que não é da sua empresa 404 ERR_TICKET_NOT_FOUND). Dentro de contact, os campos fullName, wuid e phoneNumber são obrigatórios.",
         bodyType: "json",
         bodyExample: JSON.stringify({ number: "5511999999999", contact: { fullName: "Nome Contato", wuid: "5511888888888", phoneNumber: "5511888888888", organization: "Empresa Exemplo", email: "contato@email.com" }, ticketId: 1262 }, null, 2),
       },
@@ -706,13 +714,13 @@ const API_DOCS: ApiRouteCategory[] = [
     routes: [
       {
         method: "POST", path: "/createTag", name: "CreateTag",
-        description: "Criar uma nova tag. O nome da tag vai no campo tag. tag e color são obrigatórios.",
+        description: "Criar uma nova tag. O nome da tag vai no campo tag. tag e color são obrigatórios. Nome já usado na empresa responde 409 ERR_TAG_DUPLICATED; nome, cor ou palavras-gatilho acima de 255 caracteres respondem 400 ERR_TAG_TOO_LONG.",
         bodyType: "json",
         bodyExample: JSON.stringify({ tag: "Tag Nova", color: "#FF5733", isActive: true }, null, 2),
       },
       {
         method: "POST", path: "/updateTagData/:id", name: "UpdateTagData",
-        description: "Atualizar dados de uma tag existente. O nome da tag vai no campo tag.",
+        description: "Atualizar dados de uma tag existente. O nome da tag vai no campo tag. Nome de outra tag da empresa responde 409 ERR_TAG_DUPLICATED; nome, cor ou palavras-gatilho acima de 255 caracteres respondem 400 ERR_TAG_TOO_LONG.",
         bodyType: "json",
         bodyExample: JSON.stringify({ tag: "Tag Atualizada", color: "#33A1FF", isActive: true }, null, 2),
       },
@@ -1038,19 +1046,19 @@ const API_DOCS: ApiRouteCategory[] = [
     routes: [
       {
         method: "POST", path: "/appointment/create", name: "AppointmentCreate",
-        description: "Criar um novo agendamento. A data vai em startAt (obrigatória). Esta rota não define responsável: o agendamento nasce sem atendente vinculado.",
+        description: "Criar um novo agendamento. Obrigatórios: title (até 255 caracteres) e startAt. Datas (startAt e endAt) aceitas em: AAAA-MM-DD com ou sem hora (2025-01-15, 2025-01-15T14:30:00 ou 2025-01-15 14:30), com fuso opcional Z, ±HH:mm ou ±HHmm (2025-01-15T14:30:00-03:00, 2025-01-15T17:30:00.000Z), e DD/MM/AAAA com hora opcional HH:mm ou HH:mm:ss (15/01/2025 ou 15/01/2025 14:30). Com barra é sempre dia/mês/ano. Sem fuso, a hora vale no fuso horário do servidor (mande o fuso, ex.: -03:00, para não depender dele); só a data = 00:00. Número (timestamp) ou outro formato responde 400. endAt é opcional e não pode ser anterior a startAt. status: pending (padrão), confirmed, cancelled, completed ou no_show. contactId, whatsappId, userId (atendente responsável) e bookingProfessionalId (profissional da página de agendamento), quando enviados, precisam ser da empresa do token; sem userId o agendamento nasce sem atendente vinculado. Outros campos do corpo são ignorados (location, meetingLink e checkInStatus só pelo AppointmentUpdate). Erros: 400 ERR_MISSING_FIELDS (com fields), ERR_INVALID_APPOINTMENT_TITLE, ERR_INVALID_START_AT, ERR_INVALID_END_AT, ERR_END_AT_BEFORE_START_AT e ERR_INVALID_STATUS; 404 ERR_CONTACT_NOT_FOUND, ERR_CHANNEL_NOT_FOUND, ERR_USER_NOT_FOUND e ERR_BOOKING_PROFESSIONAL_NOT_FOUND.",
         bodyType: "json",
-        bodyExample: JSON.stringify({ title: "Reunião", description: "Alinhamento de projeto", contactId: 1, contactName: "João Silva", contactPhone: "5511999999999", whatsappId: 1, startAt: "2025-01-15T14:30:00", endAt: "2025-01-15T15:30:00", status: "pending", notes: "Detalhes do agendamento" }, null, 2),
+        bodyExample: JSON.stringify({ title: "Reunião", description: "Alinhamento de projeto", contactId: 1, contactName: "João Silva", contactPhone: "5511999999999", whatsappId: 1, userId: 1, bookingProfessionalId: 1, startAt: "2025-01-15T14:30:00", endAt: "2025-01-15T15:30:00", status: "pending", notes: "Detalhes do agendamento" }, null, 2),
       },
       {
         method: "GET", path: "/appointment/list", name: "AppointmentList",
-        description: "Listar agendamentos com filtros.",
+        description: "Listar agendamentos com filtros, em ordem de início (startAt). startFrom e startTo aceitam os mesmos formatos de data do AppointmentCreate (com barra é sempre DD/MM/AAAA; sem fuso vale o fuso horário do servidor). Só a data = 00:00 desse dia: para incluir o último dia inteiro, mande a hora em startTo (ex.: 31/01/2025 23:59:59). Data fora desses formatos responde 400 ERR_INVALID_FIELD com field (startFrom ou startTo).",
         params: [
           { key: "page", desc: "Número da página", required: false, defaultValue: "1" },
           { key: "limit", desc: "Itens por página", required: false, defaultValue: "20" },
-          { key: "status", desc: "pending, confirmed, cancelled ou completed (opcional)", required: false },
-          { key: "startFrom", desc: "Data inicial (YYYY-MM-DD)", required: false },
-          { key: "startTo", desc: "Data final (YYYY-MM-DD)", required: false },
+          { key: "status", desc: "pending, confirmed, cancelled, completed ou no_show (opcional)", required: false },
+          { key: "startFrom", desc: "Início a partir desta data, inclusive (ex.: 2025-01-01, 01/01/2025 ou 01/01/2025 08:00)", required: false },
+          { key: "startTo", desc: "Início até esta data, inclusive (ex.: 2025-01-31T23:59:59 ou 31/01/2025 23:59:59; só a data = 00:00 desse dia)", required: false },
           { key: "search", desc: "Busca no título e no nome do contato (opcional)", required: false },
         ],
       },
@@ -1060,9 +1068,9 @@ const API_DOCS: ApiRouteCategory[] = [
       },
       {
         method: "POST", path: "/appointment/update/:id", name: "AppointmentUpdate",
-        description: "Atualizar um agendamento existente. Para remarcar, use startAt (e endAt): campo com outro nome é descartado sem erro.",
+        description: "Atualizar um agendamento existente. Só os campos enviados mudam: title, description, startAt, endAt, status, checkInStatus, contactId, whatsappId, userId, bookingProfessionalId, contactName, contactPhone, notes, location e meetingLink (outros campos são ignorados). Para remarcar, use startAt (e endAt) nos mesmos formatos de data do AppointmentCreate (com barra é sempre DD/MM/AAAA); endAt null ou vazio apaga o término. userId (atendente responsável) e bookingProfessionalId (profissional da página de agendamento) precisam ser da sua empresa, como contactId e whatsappId; null ou vazio desvincula. checkInStatus: none, confirmed, on_the_way ou no_show (null ou vazio volta para none). Erros: 400 ERR_INVALID_APPOINTMENT_TITLE, ERR_INVALID_START_AT, ERR_INVALID_END_AT, ERR_END_AT_BEFORE_START_AT, ERR_INVALID_STATUS e ERR_INVALID_FIELD (com field, ex.: checkInStatus fora da lista); 404 ERR_APPOINTMENT_NOT_FOUND, ERR_CONTACT_NOT_FOUND, ERR_CHANNEL_NOT_FOUND, ERR_USER_NOT_FOUND e ERR_BOOKING_PROFESSIONAL_NOT_FOUND.",
         bodyType: "json",
-        bodyExample: JSON.stringify({ startAt: "2025-01-16T10:00:00", endAt: "2025-01-16T11:00:00", title: "Reunião Atualizada", status: "confirmed", notes: "Novos detalhes" }, null, 2),
+        bodyExample: JSON.stringify({ startAt: "16/01/2025 10:00", endAt: "16/01/2025 11:00", title: "Reunião Atualizada", status: "confirmed", checkInStatus: "confirmed", notes: "Novos detalhes" }, null, 2),
       },
       {
         method: "POST", path: "/appointment/delete/:id", name: "AppointmentDelete",
@@ -1072,7 +1080,7 @@ const API_DOCS: ApiRouteCategory[] = [
       },
       {
         method: "POST", path: "/scheduleReminder/create", name: "ScheduleReminderCreate",
-        description: "Criar um lembrete automático para agendamentos. O lembrete não tem data própria: ele dispara hoursBeforeEvent horas antes de cada agendamento. hoursBeforeEvent e messageType (message ou waba_template) são obrigatórios.",
+        description: "Criar um lembrete automático para agendamentos. O lembrete não tem data própria: ele dispara hoursBeforeEvent horas antes de cada agendamento. hoursBeforeEvent e messageType (message ou waba_template) são obrigatórios (400 ERR_MISSING_FIELDS com fields; valor fora do tipo responde 400 ERR_INVALID_FIELD com field). whatsappId é opcional e precisa ser um canal da sua empresa (404 ERR_NO_WAPP_FOUND).",
         bodyType: "json",
         bodyExample: JSON.stringify({ name: "Lembrete de consulta", description: "Aviso enviado antes do agendamento", hoursBeforeEvent: 24, messageType: "message", messageContent: "Lembrete: sua consulta é amanhã!", whatsappId: 1, active: true }, null, 2),
       },
@@ -1082,7 +1090,7 @@ const API_DOCS: ApiRouteCategory[] = [
       },
       {
         method: "POST", path: "/scheduleReminder/update/:id", name: "ScheduleReminderUpdate",
-        description: "Atualizar um lembrete agendado. Campos aceitos: name, description, hoursBeforeEvent, messageType, messageContent, whatsappId e active. Campo com outro nome é descartado sem erro.",
+        description: "Atualizar um lembrete agendado. Campos aceitos: name, description, hoursBeforeEvent, messageType, messageContent, whatsappId e active. Campo com outro nome é descartado sem erro. whatsappId precisa ser um canal da sua empresa (404 ERR_NO_WAPP_FOUND); null tira o canal. hoursBeforeEvent (número inteiro), messageType (message ou waba_template) e active (true/false) fora do tipo respondem 400 ERR_INVALID_FIELD com field. Lembrete inexistente responde 404 ERR_REMINDER_NOT_FOUND.",
         bodyType: "json",
         bodyExample: JSON.stringify({ name: "Lembrete de consulta", hoursBeforeEvent: 12, messageType: "message", messageContent: "Mensagem atualizada", whatsappId: 1, active: true }, null, 2),
       },
@@ -1097,6 +1105,18 @@ const API_DOCS: ApiRouteCategory[] = [
         description: "Alternar o estado de um lembrete: a cada chamada ele inverte entre ativo e inativo. Não recebe corpo e não é idempotente, então repetir a chamada volta ao estado anterior.",
         bodyType: "json",
         bodyExample: JSON.stringify({}, null, 2),
+      },
+    ],
+  },
+  {
+    name: "Formulários",
+    icon: ClipboardList,
+    routes: [
+      {
+        method: "POST", path: "/formSubmit", name: "FormSubmit",
+        description: "Enviar as respostas de um formulário da empresa do token, indicado por formId (número) ou slug (o endereço do link /f/<endereço>); os dois aparecem na aba Compartilhar do formulário, e formId vence slug quando vierem os dois. Faz o mesmo que o envio pela página do formulário: acha o contato só pela identidade do canal do formulário (o telefone em canal de WhatsApp, o e-mail em canal de e-mail) e completa só o que está vazio nele, ou cria o contato quando não acha, aplica as etiquetas, abre o atendimento no canal e no destino do formulário (com a oportunidade, se o formulário cria uma) ou entra no atendimento já aberto do contato nesse canal sem mudar fila nem responsável, e manda a confirmação ao contato quando o formulário tem. Não passa pelas travas contra robôs da página (campo-armadilha, tempo mínimo de preenchimento, limite por IP e teto diário) e não depende da opção \"Aceitar envios de outros sites\". As chaves de answers são as chaves dos campos mostradas na aba Compartilhar do formulário (campo oculto também vai pela chave). Valores: lista recebe o id da opção (o texto da opção também é aceito) e múltipla escolha recebe uma lista deles; caixa de confirmação recebe true ou false; data em AAAA-MM-DD; telefone com + e o código do país (sem o +, vale o país da Região da empresa). ref (opcional) é o endereço da página de origem, guardado só com origem e caminho. A resposta sai depois do processamento: { ok, submissionId, status, ticketId, contactId, errorCode }. status processed = atendimento aberto ou atualizado; failed = o envio fica em Respostas sem atendimento, errorCode diz o motivo (ex.: ERR_FORM_NO_CHANNEL) e dá para refazer pelo Tentar de novo; skipped = contato bloqueado (ERR_FORM_CONTACT_BLOCKED). Erros: 404 ERR_API_CONFIG_NOT_FOUND (apiId da URL inexistente nesta empresa); 404 ERR_FORM_NOT_FOUND (formulário inexistente, desativado, de outra empresa ou sem canal ativo); 400 ERR_FORM_ID_OR_SLUG_REQUIRED (sem formId e sem slug); 402 ERR_FEATURE_NOT_IN_PLAN (o plano da empresa não tem Formulários); 402 ERR_TENANT_PAYMENT_BLOCKED (empresa bloqueada por pagamento); 400 ERR_FORM_INVALID sem details (answers ausente ou fora do formato de objeto) ou com details.fields (um código por chave de campo: required, tooLong, invalidEmail, invalidPhone, invalidNumber, outOfRange, invalidDate, invalidOption ou mustAccept); 400 ERR_FORM_CONTACT_REQUIRED (faltou o telefone ou o e-mail que o formulário exige para achar o contato); 413 ERR_FORM_TOO_LARGE (respostas acima de 32 KB).",
+        bodyType: "json",
+        bodyExample: JSON.stringify({ formId: 12, answers: { f_nome: "Maria Souza", f_telefone: "+5511999998888", f_email: "maria@exemplo.com", f_assunto: "o_financeiro" } }, null, 2),
       },
     ],
   },
@@ -1217,19 +1237,19 @@ const API_DOCS: ApiRouteCategory[] = [
       { method: "GET", path: "/pipeline/show/:id", name: "PipelineShow", description: "Buscar detalhes de um pipeline pelo ID." },
       {
         method: "POST", path: "/pipeline/update/:id", name: "PipelineUpdate",
-        description: "Atualizar um pipeline existente. O pipeline só tem nome: não existe campo de descrição.",
+        description: "Atualizar um pipeline existente. O pipeline só tem nome: não existe campo de descrição. Pipeline que não existe na sua empresa responde 404 ERR_PIPELINE_NOT_FOUND.",
         bodyType: "json",
         bodyExample: JSON.stringify({ name: "Pipeline Atualizado" }, null, 2),
       },
       {
         method: "POST", path: "/pipeline/delete/:id", name: "PipelineDelete",
-        description: "Excluir um pipeline. Só é aceito quando o pipeline não tem nenhuma etapa, oportunidade ou ação vinculada; caso contrário a rota responde 500. Apague as etapas e oportunidades antes.",
+        description: "Excluir um pipeline. Só é aceito quando o pipeline não tem nenhuma etapa, oportunidade ou ação vinculada; caso contrário a rota responde 500. Apague as etapas e oportunidades antes. Pipeline que não existe na sua empresa responde 404 ERR_PIPELINE_NOT_FOUND.",
         bodyType: "json",
         bodyExample: JSON.stringify({}, null, 2),
       },
       {
         method: "POST", path: "/stage/create", name: "StageCreate",
-        description: "Criar uma etapa (stage) em um pipeline.",
+        description: "Criar uma etapa (stage) em um pipeline. Campos lidos: name, pipelineId, order, color e, opcionais, notifyUserId e notifyQueueId (usuário ou fila avisados quando uma oportunidade entra na etapa); outros campos são ignorados. pipelineId precisa ser um pipeline da sua empresa (404 ERR_PIPELINE_NOT_FOUND), e notifyUserId/notifyQueueId, um usuário/fila da sua empresa (404 ERR_USER_NOT_FOUND ou ERR_QUEUE_NOT_FOUND).",
         bodyType: "json",
         bodyExample: JSON.stringify({ name: "Prospecção", pipelineId: 1, order: 1, color: "#4A90E2" }, null, 2),
       },
@@ -1237,13 +1257,13 @@ const API_DOCS: ApiRouteCategory[] = [
       { method: "GET", path: "/stage/show/:id", name: "StageShow", description: "Buscar detalhes de uma etapa pelo ID." },
       {
         method: "POST", path: "/stage/update/:id", name: "StageUpdate",
-        description: "Atualizar uma etapa existente.",
+        description: "Atualizar uma etapa existente. Só os campos enviados mudam: name, order, color, pipelineId, notifyUserId e notifyQueueId (outros campos são ignorados). pipelineId precisa ser um pipeline da sua empresa (404 ERR_PIPELINE_NOT_FOUND), e notifyUserId/notifyQueueId, um usuário/fila da sua empresa (404 ERR_USER_NOT_FOUND ou ERR_QUEUE_NOT_FOUND; null tira o aviso). Etapa que não existe na sua empresa responde 404 ERR_STAGE_NOT_FOUND.",
         bodyType: "json",
         bodyExample: JSON.stringify({ name: "Negociação", order: 2, color: "#E24A4A" }, null, 2),
       },
       {
         method: "POST", path: "/stage/delete/:id", name: "StageDelete",
-        description: "Excluir uma etapa de pipeline. Só é aceito quando a etapa não tem oportunidade nem ação apontando para ela; caso contrário a rota responde 500. Mova as oportunidades antes.",
+        description: "Excluir uma etapa de pipeline. Só é aceito quando a etapa não tem oportunidade nem ação apontando para ela; caso contrário a rota responde 500. Mova as oportunidades antes. Etapa que não existe na sua empresa responde 404 ERR_STAGE_NOT_FOUND.",
         bodyType: "json",
         bodyExample: JSON.stringify({}, null, 2),
       },
@@ -1261,13 +1281,13 @@ const API_DOCS: ApiRouteCategory[] = [
       },
       {
         method: "POST", path: "/ticket/pause/start/:ticketId", name: "StartTicketPause",
-        description: "Iniciar pausa em um ticket (para controle de SLA).",
+        description: "Iniciar pausa em um ticket (para controle de SLA). Ticket já pausado responde 409 ERR_TICKET_ALREADY_PAUSED; ticket inexistente, 404 ERR_NO_TICKET_FOUND.",
         bodyType: "json",
         bodyExample: JSON.stringify({ pauseReason: "Aguardando retorno do cliente" }, null, 2),
       },
       {
         method: "POST", path: "/ticket/pause/end/:ticketId", name: "EndTicketPause",
-        description: "Encerrar pausa de um ticket.",
+        description: "Encerrar pausa de um ticket. Ticket que não está em pausa responde 409 ERR_TICKET_NOT_PAUSED; ticket inexistente, 404 ERR_NO_TICKET_FOUND.",
         bodyType: "json",
         bodyExample: JSON.stringify({}, null, 2),
       },
@@ -1281,7 +1301,7 @@ const API_DOCS: ApiRouteCategory[] = [
         params: [
           { key: "page", desc: "Número da página", required: false, defaultValue: "1" },
           { key: "limit", desc: "Itens por página", required: false, defaultValue: "20" },
-          { key: "search", desc: "Busca textual (opcional)", required: false },
+          { key: "search", desc: "Busca pelo nome ou número do contato (opcional)", required: false },
           { key: "startDate", desc: "Data inicial (opcional)", required: false },
           { key: "endDate", desc: "Data final (opcional)", required: false },
           { key: "evaluation", desc: "Filtrar por nota (opcional)", required: false },
@@ -1311,19 +1331,19 @@ const API_DOCS: ApiRouteCategory[] = [
     routes: [
       {
         method: "POST", path: "/todo/create", name: "TodoCreate",
-        description: "Criar uma nova tarefa no to-do list.",
+        description: "Criar uma nova tarefa no to-do list. limitDate (opcional): só a data em AAAA-MM-DD (recomendado) = tarefa para o dia, que fica atrasada só quando o dia acaba; com hora (AAAA-MM-DD HH:mm, ou ISO 8601 com fuso, ex.: 2026-06-15T14:30:00-03:00) = tarefa com horário, que atrasa no horário (sem fuso vale o fuso horário do servidor). O formato que a própria API devolve para tarefa do dia (ex.: 2026-06-15T00:00:00.000Z) continua sendo tarefa para o dia, e todo prazo exatamente na meia-noite (00:00, com ou sem fuso) também vira tarefa para o dia (para uma tarefa às 00:00 use 00:01). Outros formatos são lidos como antes, pelo Date do JavaScript (com barra é MM/DD/AAAA); data ilegível responde 400 ERR_INVALID_FIELD com field limitDate. reminderMinutes (opcional): lembrete ao responsável 0 (na hora), 10, 30 ou 60 minutos antes do horário; só vale para tarefa com hora (sem hora é ignorado) e só é enviado quando a tarefa tem ownerId (sem responsável não há a quem avisar — o exemplo abaixo não tem ownerId: acrescente o id de um usuário para receber o lembrete); outro valor responde 400 ERR_INVALID_FIELD com field reminderMinutes. ownerId (opcional): id de um usuário da sua empresa (veja /listUsers), que é quem recebe o lembrete e vê a tarefa no sino; owner é o nome exibido. 0, vazio ou ausente = sem responsável; id que não é usuário da sua empresa cria a tarefa sem responsável e a resposta traz ownerIgnored: true. contactId e ticketId (opcionais) ligam a tarefa ao contato e ao atendimento: precisam existir na sua empresa e o ticket tem de ser do mesmo contato (só ticketId liga também o contato do ticket); senão 400 ERR_INVALID_FIELD com field. A tarefa devolvida traz limitHasTime (true = prazo com horário), reminderMinutes e reminderAt.",
         bodyType: "json",
-        bodyExample: JSON.stringify({ name: "Ligar para o cliente", description: "Retornar sobre a proposta enviada", limitDate: "2026-06-15", owner: "João Silva", ownerId: 1, status: "pending", priority: "high", comments: "Cliente pediu retorno pela manhã" }, null, 2),
+        bodyExample: JSON.stringify({ name: "Ligar para o cliente", description: "Retornar sobre a proposta enviada", limitDate: "2026-06-15 14:30", reminderMinutes: 30, owner: "João Silva", status: "pending", priority: "high", comments: "Cliente pediu retorno pela manhã" }, null, 2),
       },
       {
         method: "GET", path: "/todo/list", name: "TodoList",
-        description: "Listar todas as tarefas do to-do list do tenant (mais recentes primeiro). Não aceita filtros — retorna todas.",
+        description: "Listar todas as tarefas do to-do list do tenant (mais recentes primeiro). Não aceita filtros — retorna todas. Cada tarefa traz limitHasTime (true = prazo com horário; false = tarefa para o dia), reminderMinutes e reminderAt.",
       },
       {
         method: "POST", path: "/todo/update/:id", name: "TodoUpdate",
-        description: "Atualizar uma tarefa existente.",
+        description: "Atualizar uma tarefa existente. Só mudam os campos enviados: name, description, limitDate, reminderMinutes, owner, ownerId, status, priority, comments, contactId e ticketId (outros campos do corpo são ignorados). limitDate, reminderMinutes e ownerId seguem as regras do TodoCreate (ownerId que não é usuário da sua empresa deixa a tarefa sem responsável e a resposta traz ownerIgnored: true). Reenviar só o mesmo dia (sem hora) de uma tarefa com horário mantém o horário, e reenviar o limitDate devolvido pela API não muda nada. Mudar o prazo para uma data ainda não vencida troca o status delayed por pending. contactId e ticketId: null desvincula; o ticket tem de ser do mesmo contato (ao trocar o contato, mande também o ticketId novo ou null); vínculo inválido responde 400 ERR_INVALID_FIELD com field.",
         bodyType: "json",
-        bodyExample: JSON.stringify({ name: "Tarefa atualizada", status: "finished", priority: "medium" }, null, 2),
+        bodyExample: JSON.stringify({ name: "Tarefa atualizada", limitDate: "2026-06-16 09:00", reminderMinutes: 10, status: "pending", priority: "medium" }, null, 2),
       },
       {
         method: "POST", path: "/todo/delete/:id", name: "TodoDelete",
@@ -1343,24 +1363,32 @@ const API_DOCS: ApiRouteCategory[] = [
     routes: [
       {
         method: "GET", path: "/gallery/list", name: "GalleryList",
-        description: "Listar arquivos da galeria do tenant, com paginação fixa de 20 itens por página.",
+        description: "Listar arquivos da galeria do tenant, com paginação fixa de 20 itens por página. folderId (opcional) filtra por pasta: \"none\" = só os arquivos sem pasta; o id de uma pasta (veja /gallery/folders) = só os dessa pasta; vazio, \"all\" ou ausente = todos. Pasta inexistente ou de outra empresa responde 400 ERR_GALLERY_FOLDER_NOT_FOUND; id de pasta numa instalação sem pastas ativas, 409 ERR_GALLERY_FOLDERS_UNAVAILABLE. A resposta traz folderFilter ao lado de pagination: o filtro de pasta entendido (\"all\", \"none\" ou o id). Se a resposta não traz folderFilter, a instalação ainda não tem pastas e o folderId foi ignorado (vieram todos os arquivos). Com pastas, cada arquivo traz folderId (null = sem pasta).",
         params: [
           { key: "pageNumber", desc: "Número da página", required: false, defaultValue: "1" },
           { key: "searchParam", desc: "Busca por nome do arquivo ou descrição (opcional)", required: false },
           { key: "fileType", desc: "image, pdf, video, audio, document, archive ou other — aceita lista separada por vírgula (opcional)", required: false },
+          { key: "folderId", desc: "Pasta: \"none\" = sem pasta; id da pasta = só ela; vazio ou ausente = todos (opcional)", required: false },
         ],
       },
       {
         method: "POST", path: "/gallery/upload", name: "GalleryUpload",
-        description: "Fazer upload de arquivo(s) para a galeria (máx. 10 arquivos, 500MB).",
+        description: "Fazer upload de arquivo(s) para a galeria (máx. 10 arquivos, 500MB). description (opcional) vale para todos os arquivos do envio. folderId (opcional) é o id de uma pasta (veja /gallery/folders); vazio, \"none\" ou ausente = sem pasta. Pasta inexistente ou de outra empresa responde 400 ERR_GALLERY_FOLDER_NOT_FOUND e instalação sem pastas ativas, 409 ERR_GALLERY_FOLDERS_UNAVAILABLE: nos dois casos nenhum arquivo é salvo. Se a pasta for excluída durante o envio, os arquivos já salvos ficam sem pasta e os demais não são salvos (400 ERR_GALLERY_FOLDER_NOT_FOUND). Cota da galeria estourada responde 413 ERR_GALLERY_QUOTA_EXCEEDED e nenhum arquivo é salvo. Em versão anterior às pastas o folderId é ignorado e os arquivos vão sem pasta.",
         bodyType: "formdata",
-        bodyExample: "Campos (form-data):\n  files → arquivo(s) (tipo: file, até 10 arquivos)",
+        bodyExample: "Campos (form-data):\n  files       → arquivo(s) (tipo: file, até 10 arquivos)\n  description → descrição opcional (vale para todos os arquivos)\n  folderId    → id da pasta (opcional; vazio = sem pasta)",
       },
       {
         method: "POST", path: "/gallery/delete/:id", name: "GalleryDelete",
         description: "Excluir um arquivo da galeria pelo ID.",
         bodyType: "json",
         bodyExample: JSON.stringify({}, null, 2),
+      },
+      {
+        method: "GET", path: "/gallery/folders", name: "GalleryFolders",
+        description: "Listar as pastas da galeria do tenant em ordem alfabética, com a quantidade de arquivos de cada uma. Resposta (em data): { available, folders: [{ id, name, count }], unfiledCount, totalCount }, em que unfiledCount = arquivos sem pasta e totalCount = todos os arquivos. fileType (opcional, mesmo formato do /gallery/list) faz as quantidades contarem só esses tipos. available: false = a instalação ainda não tem pastas ativas (listas vazias e quantidades 0). Em versão anterior às pastas esta rota não existe.",
+        params: [
+          { key: "fileType", desc: "image, pdf, video, audio, document, archive ou other — aceita lista separada por vírgula (opcional)", required: false },
+        ],
       },
     ],
   },
@@ -2267,13 +2295,18 @@ function ApiDocsSection({ apis, sessions }: { apis: ApiConfig[]; sessions: Whats
 
   const renderCategory = (category: ApiRouteCategory) => {
     const isOpen = openCategories.has(category.name);
+    const CategoryIcon = category.icon;
     return (
       <div key={category.name} className="border rounded-lg overflow-hidden">
         <button
           className="w-full flex items-center gap-2 p-3 text-left hover:bg-accent/50 transition-colors font-medium text-sm"
           onClick={() => toggleCategory(category.name)}
         >
-          <span>{category.emoji}</span>
+          {CategoryIcon ? (
+            <CategoryIcon aria-hidden className="h-4 w-4 shrink-0 text-muted-foreground" />
+          ) : (
+            <span>{category.emoji}</span>
+          )}
           <span className="flex-1">{category.name}</span>
           {category.channelTypes && !sandboxChannelType && (
             <Badge variant="outline" className="text-[10px] border-amber-400 text-amber-600 dark:text-amber-400">

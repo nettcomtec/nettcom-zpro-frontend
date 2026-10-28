@@ -532,7 +532,7 @@ export default function TenantApiPage() {
   }
 
   async function handleDelete(a: TenantApi) {
-    if (!confirm(`${t("deleteSuccess")} #${a.id}?`)) return;
+    if (!confirm(t("deleteConfirm", { id: a.id }))) return;
     try { await deleteTenantApi(a.id); toast.success(t("deleteSuccess")); load(); }
     catch { toast.error(t("deleteError")); }
   }

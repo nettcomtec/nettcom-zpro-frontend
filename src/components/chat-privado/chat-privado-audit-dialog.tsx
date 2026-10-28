@@ -242,30 +242,63 @@ export function ChatPrivadoAuditDialog({
       });
     };
 
+    // Id da mensagem é BIGINT: a lista pode trazê-lo em texto e o evento em número.
     const onDelete = (evt: { action: string; data: { id?: number } }) => {
       if (evt.data?.id == null) return;
-      setMessages((prev) => prev.filter((m) => m.id !== evt.data.id));
+      const id = Number(evt.data.id);
+      setMessages((prev) => prev.filter((m) => Number(m.id) !== id));
     };
 
     const onUpdate = (evt: { action: string; data: { id?: number; text?: string } }) => {
       if (evt.data?.id == null) return;
-      setMessages((prev) => prev.map((m) => (m.id === evt.data.id ? { ...m, text: evt.data.text ?? m.text } : m)));
+      const id = Number(evt.data.id);
+      setMessages((prev) => prev.map((m) => (Number(m.id) === id ? { ...m, text: evt.data.text ?? m.text } : m)));
     };
 
     const onReaction = (evt: { action: string; data: { id?: number; react?: string | null; reactFromMe?: string | null } }) => {
       if (evt.data?.id == null) return;
-      setMessages((prev) => prev.map((m) => (m.id === evt.data.id ? { ...m, react: evt.data.react ?? null, reactFromMe: evt.data.reactFromMe ?? null } : m)));
+      const id = Number(evt.data.id);
+      setMessages((prev) => prev.map((m) => (Number(m.id) === id ? { ...m, react: evt.data.react ?? null, reactFromMe: evt.data.reactFromMe ?? null } : m)));
+    };
+
+    // Leitura: `readerId` leu as mensagens de `senderId` até `upToId` (1 a 1), ou leu tudo
+    // (`allRead`, com `upToId` por remetente em `authors`).
+    const onRead = (evt: {
+      action?: string;
+      data?: { allRead?: boolean; readerId?: number; receiverId?: number; senderId?: number; isGroup?: boolean | string; upToId?: number | null; authors?: { senderId: number; upToId: number }[] };
+    }) => {
+      const d = evt?.data;
+      if (evt?.action !== "update" || !d || target.type === "team") return;
+      const readerId = Number(d.readerId ?? d.receiverId);
+      if (readerId !== target.userA && readerId !== target.userB) return;
+      const authorId = readerId === target.userA ? target.userB : target.userA;
+      let upToId: number | null;
+      if (d.allRead) {
+        if (d.readerId == null) return;
+        const author = Array.isArray(d.authors) ? d.authors.find((a) => Number(a?.senderId) === authorId) : undefined;
+        if (!author) return;
+        upToId = Number(author.upToId) || null;
+      } else {
+        if (d.isGroup === true || d.isGroup === "true" || Number(d.senderId) !== authorId) return;
+        upToId = d.upToId != null ? Number(d.upToId) : null;
+      }
+      const hits = (m: PrivateMessage) =>
+        !m.read && m.groupId == null && Number(m.senderId) === authorId && Number(m.receiverId) === readerId &&
+        (upToId == null || Number(m.id) <= upToId);
+      setMessages((prev) => (prev.some(hits) ? prev.map((m) => (hits(m) ? { ...m, read: true } : m)) : prev));
     };
 
     socket.on(`${tenantId}:msg-private-msg`, onCreate);
     socket.on(`${tenantId}:msg-private-msg-delete`, onDelete);
     socket.on(`${tenantId}:msg-private-msg-update`, onUpdate);
     socket.on(`${tenantId}:msg-private-msg-reaction`, onReaction);
+    socket.on(`${tenantId}:unread-msg-private-msg`, onRead);
     return () => {
       socket.off(`${tenantId}:msg-private-msg`, onCreate);
       socket.off(`${tenantId}:msg-private-msg-delete`, onDelete);
       socket.off(`${tenantId}:msg-private-msg-update`, onUpdate);
       socket.off(`${tenantId}:msg-private-msg-reaction`, onReaction);
+      socket.off(`${tenantId}:unread-msg-private-msg`, onRead);
     };
   }, [open, target, tenantId]);
 

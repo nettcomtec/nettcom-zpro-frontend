@@ -4,7 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslations } from "next-intl";
 import { toast } from "sonner";
 import {
-  BookOpen, Bot, KeyRound, Loader2, Split, Webhook, Zap,
+  AlertTriangle, BookOpen, Bot, HelpCircle, KeyRound, Loader2, Split, Webhook, Zap,
 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -16,6 +16,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle,
 } from "@/components/ui/dialog";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 
 import { OpenAIBaseUrlField } from "@/components/copilot/openai-base-url-field";
 import {
@@ -35,22 +36,35 @@ import {
   type BookingEventType, type BookingPage,
 } from "@/services/booking";
 import {
-  AI_AGENT_ACTION_TYPES_V5, AI_AGENT_EDITOR_VERSION,
-  createAiAgent, fetchAiAgent, fetchAiAgentChatFlows, fetchAiAgents, updateAiAgent,
+  AGENT_INACTIVITY_LIMITS,
+  AI_AGENT_ACTION_TYPES_V5, AI_AGENT_EDITOR_VERSION, MAX_AI_AGENT_REPLY_DELAY_SECONDS,
+  MAX_AI_AGENT_TARGET_DESCRIPTION, LEGACY_AI_AGENT_TARGET_DESCRIPTION,
+  MAX_AI_AGENT_SHARED_KB,
+  createAiAgent, fetchAiAgent, fetchAiAgentChatFlows, fetchAiAgentUsage, fetchAiAgents,
+  updateAiAgent,
   type AiAgentAction, type AiAgentActionType, type AiAgentChatFlowOption,
   type AiAgentCloseRules, type AiAgentEngineFeature, type AiAgentExternalTool,
-  type AiAgentMemoryField, type AiAgentNativeTools, type AiAgentPayload,
-  type AiAgentRoutingTarget, type AiAgentSummary,
+  type AiAgentInactivityConfig,
+  type AiAgentMcpToolsEntry, type AiAgentMemoryField, type AiAgentNativeTools,
+  type AiAgentPayload, type AiAgentRoutingTarget, type AiAgentSummary,
+  type AiAgentUsage, type AiAgentUsageRef,
 } from "@/services/ai-agents";
+import {
+  MAX_MCP_SERVERS_PER_AGENT, MAX_MCP_TOOLS_PER_AGENT, listAiMcpServers,
+  type McpServerView,
+} from "@/services/ai-mcp-servers";
 
 import { AgentKnowledgeTab } from "./agent-knowledge-tab";
-import { AgentRoutingTab, generateTargetKey } from "./agent-routing-tab";
+import {
+  AgentRoutingTab, generateTargetKey, type AgentInactivityFormValue,
+} from "./agent-routing-tab";
 import {
   AgentActionsTab, generateActionKey, isValidMemoryFieldName,
   normalizeMemoryFieldName,
 } from "./agent-actions-tab";
 import {
-  AgentToolsTab, generateConsultRowKey, generateToolKey, type AiAgentConsultRow,
+  AgentToolsTab, generateConsultRowKey, generateMcpRowKey, generateToolKey,
+  type AgentExternalToolRow, type AgentMcpRow, type AiAgentConsultRow,
 } from "./agent-tools-tab";
 import { aiAgentErrorKey } from "./agent-error";
 
@@ -79,7 +93,12 @@ interface AgentForm {
   autoSummaryEnabled: boolean;
   fallbackQueueId: number | null;
   transferMessage: string;
-  externalTools: AiAgentExternalTool[];
+  // v8 (D13-1) — com `toolSecretMask` a senha salva nunca vem: o campo fica
+  // vazio, `hasSecret`/`savedUrl` contam o que está gravado
+  externalTools: AgentExternalToolRow[];
+  // v8 — servidores MCP e ferramentas aprovadas que o agente usa (aba
+  // Ferramentas). Servidor antigo não devolve o campo: ausente = lista vazia.
+  mcpTools: AgentMcpRow[];
   // v4 — qualificação: etiquetar/mover no funil e anotar dados na ficha
   actions: AiAgentAction[];
   actionMessage: string;
@@ -94,10 +113,88 @@ interface AgentForm {
   // v6 — especialistas que o agente consulta antes de responder (aba
   // Ferramentas). Servidor antigo não devolve o campo: ausente = lista vazia.
   consultAgents: AiAgentConsultRow[];
+  // v7 — agente "só base de conhecimento": não atende, fica sempre inativo e
+  // só guarda conhecimento para outros agentes. `savedKbOnly` é como ele está
+  // gravado (o interruptor continua visível para quem já é "só base").
+  kbOnly: boolean;
+  savedKbOnly: boolean;
+  // v7 — agentes cuja base este também consulta (aba Conhecimento). `0` é a
+  // linha recém-adicionada sem agente escolhido: rascunho, fica fora do save.
+  sharedKbAgents: number[];
+  // Atraso na resposta, em segundos (texto do campo). Os dois vazios = responde
+  // na hora; só um preenchido = tempo fixo (o servidor completa o outro).
+  replyDelayMin: string;
+  replyDelayMax: string;
+  // "Sem resposta do cliente" (aba Roteamento). Servidor antigo não devolve o
+  // campo: ausente = regra desligada com os tempos padrão.
+  inactivity: AgentInactivityFormValue;
+  // Passada de qualificação (aba Ações): etiquetas e funil decididos depois
+  // de cada mensagem do cliente. Nasce ligada.
+  qualifyPassEnabled: boolean;
   // Vazio = usa o padrão do servidor (20 mensagens / temperatura do modelo)
   maxHistoryMessages: string;
   temperature: string;
 }
+
+// Regra nasce DESLIGADA (D4), sem aviso, com os tempos padrão do servidor
+const EMPTY_INACTIVITY_FORM: AgentInactivityFormValue = {
+  enabled: false,
+  warnEnabled: false,
+  warnMinutes: String(AGENT_INACTIVITY_LIMITS.defaultWarnMinutes),
+  warnMessage: "",
+  actAfterMinutes: String(AGENT_INACTIVITY_LIMITS.defaultActAfterMinutes),
+  action: "close",
+  queueId: null,
+  message: "",
+};
+
+// Valor gravado → formulário. Tolerante a JSON parcial ou de outra versão:
+// tempo ilegível volta ao padrão, ação desconhecida vira "Encerrar".
+const toInactivityForm = (raw: unknown): AgentInactivityFormValue => {
+  let value: unknown = raw;
+  if (typeof value === "string") {
+    try {
+      value = JSON.parse(value);
+    } catch {
+      return EMPTY_INACTIVITY_FORM;
+    }
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return EMPTY_INACTIVITY_FORM;
+  }
+  const cfg = value as Partial<AiAgentInactivityConfig>;
+  const warning =
+    cfg.warning && typeof cfg.warning === "object" ? cfg.warning : null;
+  const minutesText = (minutes: unknown, fallback: number): string => {
+    const n = Number(minutes);
+    return Number.isInteger(n) && n > 0 ? String(n) : String(fallback);
+  };
+  const queueId = Number(cfg.queueId);
+  return {
+    enabled: cfg.enabled === true,
+    warnEnabled: warning?.enabled === true,
+    warnMinutes: minutesText(warning?.minutes, AGENT_INACTIVITY_LIMITS.defaultWarnMinutes),
+    warnMessage: warning && typeof warning.message === "string" ? warning.message : "",
+    actAfterMinutes: minutesText(
+      cfg.actAfterMinutes,
+      AGENT_INACTIVITY_LIMITS.defaultActAfterMinutes
+    ),
+    action: cfg.action === "transfer" ? "transfer" : "close",
+    queueId: Number.isInteger(queueId) && queueId > 0 ? queueId : null,
+    message: typeof cfg.message === "string" ? cfg.message : "",
+  };
+};
+
+// Minutos inteiros dentro dos limites do servidor; `null` = vazio ou inválido
+const parseInactivityMinutes = (raw: string): number | null => {
+  const text = raw.trim();
+  if (!/^\d+$/.test(text)) return null;
+  const value = Number(text);
+  return value >= AGENT_INACTIVITY_LIMITS.minMinutes &&
+    value <= AGENT_INACTIVITY_LIMITS.maxMinutes
+    ? value
+    : null;
+};
 
 const EMPTY_FORM: AgentForm = {
   name: "",
@@ -119,6 +216,7 @@ const EMPTY_FORM: AgentForm = {
   fallbackQueueId: null,
   transferMessage: "",
   externalTools: [],
+  mcpTools: [],
   actions: [],
   actionMessage: "",
   memoryEnabled: false,
@@ -127,6 +225,13 @@ const EMPTY_FORM: AgentForm = {
   nativeTools: null,
   timezone: "",
   consultAgents: [],
+  kbOnly: false,
+  savedKbOnly: false,
+  sharedKbAgents: [],
+  replyDelayMin: "",
+  replyDelayMax: "",
+  inactivity: EMPTY_INACTIVITY_FORM,
+  qualifyPassEnabled: true,
   maxHistoryMessages: "",
   temperature: "",
 };
@@ -141,11 +246,22 @@ const EMPTY_FORM: AgentForm = {
 const KNOWN_ENGINE_FEATURES: AiAgentEngineFeature[] = [
   "actionsV5", "routingV5", "booking", "scheduleMessage",
   "kbJsonMd", "agentHandoff", "agentConsult",
+  "kbShared", "kbOnly", "agentTemplates", "replyDelay",
+  // v8 — servidores MCP e senha das ferramentas externas escondida. NUNCA no
+  // fallback da sonda abaixo: servidor antigo "ganharia" os dois
+  "mcp", "toolSecretMask",
+  "longTargetDescription",
+  // "Sem resposta do cliente". NUNCA no fallback da sonda abaixo: servidor
+  // antigo "ganharia" o bloco e ignoraria o campo no save
+  "inactivity",
+  // Passada de qualificação. NUNCA no fallback da sonda abaixo: servidor
+  // antigo "ganharia" o interruptor e ignoraria o campo no save
+  "qualifyPass",
 ];
 
 // Fallback da descoberta na CRIAÇÃO sem nenhum agente na empresa: a sonda da
-// rota de fluxos só prova a geração v5. Os recursos v6 dependem de interruptor
-// do servidor e NUNCA entram por aqui — um servidor v5 que responde a sonda
+// rota de fluxos só prova a geração v5. Os recursos v6 e v7 dependem do
+// servidor e NUNCA entram por aqui — um servidor v5 que responde a sonda
 // passaria a oferecer o que não executa.
 const PROBE_FALLBACK_FEATURES: AiAgentEngineFeature[] = [
   "actionsV5", "routingV5", "booking", "scheduleMessage",
@@ -156,6 +272,21 @@ const normalizeEngineFeatures = (raw: unknown): AiAgentEngineFeature[] => {
   const announced = raw as unknown[];
   return KNOWN_ENGINE_FEATURES.filter(feature => announced.includes(feature));
 };
+
+// Recursos que a página descobriu pela rota própria (empresa sem agente). Só
+// vale array NÃO vazio: `null` (desconhecido) e `[]` seguem para a sonda de
+// fluxos, exatamente como antes.
+const usableFallbackFeatures = (raw: unknown): AiAgentEngineFeature[] | null => {
+  if (!Array.isArray(raw) || raw.length === 0) return null;
+  const features = normalizeEngineFeatures(raw);
+  return features.length > 0 ? features : null;
+};
+
+// Abas que não existem para o agente "só base" (ele não atende ninguém)
+const KB_ONLY_HIDDEN_TABS = ["routing", "actions", "tools"];
+
+// Até 5 nomes por linha do aviso de uso; o resto vira "e mais N"
+const USAGE_NAMES_SHOWN = 5;
 
 // A listagem enxuta de agentes leva o mesmo anúncio de recursos do Show — é a
 // única forma de descobrir o que o servidor executa ANTES do 1º save
@@ -279,9 +410,15 @@ interface AgentEditorDialogProps {
   // null = criação; number = edição (aba Conhecimento só na edição)
   agentId: number | null;
   onSaved: () => void;
+  // v7 — recursos que a página obteve da rota própria quando a listagem veio
+  // vazia. Usado SÓ na criação e só como array não vazio: vale depois do
+  // anúncio da listagem e antes da sonda de fluxos.
+  fallbackFeatures?: AiAgentEngineFeature[] | null;
 }
 
-export function AgentEditorDialog({ open, onOpenChange, agentId, onSaved }: AgentEditorDialogProps) {
+export function AgentEditorDialog({
+  open, onOpenChange, agentId, onSaved, fallbackFeatures,
+}: AgentEditorDialogProps) {
   const t = useTranslations("aiAgents");
 
   const [tab, setTab] = useState("profile");
@@ -310,6 +447,20 @@ export function AgentEditorDialog({ open, onOpenChange, agentId, onSaved }: Agen
   // agente gravado como "removido".
   const [aiAgentOptions, setAiAgentOptions] = useState<AiAgentSummary[]>([]);
   const [aiAgentOptionsLoaded, setAiAgentOptionsLoaded] = useState(false);
+  // v7 — quem usa este agente, consultado ao LIGAR o "só base" num agente já
+  // salvo. `null` = sem consulta ou falha (fica só a nota fixa do interruptor).
+  const [kbOnlyUsage, setKbOnlyUsage] = useState<AiAgentUsage | null>(null);
+  const [kbOnlyUsageLoading, setKbOnlyUsageLoading] = useState(false);
+  // Descarta a resposta de uma consulta que ficou velha (desligou e ligou de
+  // novo, ou fechou o editor no meio)
+  const kbOnlyUsageRequestRef = useRef(0);
+  // v8 — servidores MCP da empresa, carregados aqui UMA vez por abertura (a aba
+  // Ferramentas recebe pronto). `null` = não carregou (erro ou sem acesso): a
+  // seção fica somente leitura e o save NÃO envia `mcpTools` (o servidor
+  // mantém o vínculo salvo). Recarga que falha mantém a lista que já havia.
+  const [mcpServers, setMcpServers] = useState<McpServerView[] | null>(null);
+  const [mcpServersLoading, setMcpServersLoading] = useState(false);
+  const mcpServersRequestRef = useRef(0);
 
   // A aba Ferramentas recebe a forma enxuta: a pagina de agendamento chama o
   // nome de "title", e "servico com pergunta obrigatoria" (que a v5 nao
@@ -343,6 +494,14 @@ export function AgentEditorDialog({ open, onOpenChange, agentId, onSaved }: Agen
   // Recursos do servidor descobertos na criação: resolvidos uma vez por sessão
   // da tela (só em caso de sucesso — falha volta a sondar na próxima abertura)
   const createFeaturesRef = useRef<AiAgentEngineFeature[] | null>(null);
+  // Valor mais recente de `fallbackFeatures` (a página pode recebê-lo depois de
+  // o editor abrir) e se a listagem desta abertura já anunciou os recursos —
+  // o anúncio da listagem sempre vence o da página.
+  const fallbackFeaturesRef = useRef<AiAgentEngineFeature[] | null | undefined>(
+    fallbackFeatures
+  );
+  fallbackFeaturesRef.current = fallbackFeatures;
+  const createListAnnouncedRef = useRef(false);
 
   // O que ESTE servidor anuncia saber executar (A11). Vazio = servidor v4: a
   // tela fica exatamente como era antes das interações novas.
@@ -352,7 +511,28 @@ export function AgentEditorDialog({ open, onOpenChange, agentId, onSaved }: Agen
   const supportsBooking = engineFeatures.includes("booking");
   const supportsScheduleMessage = engineFeatures.includes("scheduleMessage");
   const supportsAgentHandoff = engineFeatures.includes("agentHandoff");
+  const supportsLongTargetDescription = engineFeatures.includes("longTargetDescription");
   const supportsAgentConsult = engineFeatures.includes("agentConsult");
+  const supportsKbShared = engineFeatures.includes("kbShared");
+  const supportsKbOnly = engineFeatures.includes("kbOnly");
+  // Atraso na resposta: sem o anúncio o campo some e não vai no save (o
+  // servidor mantém o que está gravado)
+  const supportsReplyDelay = engineFeatures.includes("replyDelay");
+  // v8 — sem `mcp` a seção não aparece e o campo não vai no save; sem
+  // `toolSecretMask` a senha das ferramentas externas segue como sempre (o
+  // servidor antigo devolve a senha e substitui a lista inteira no save)
+  const supportsMcp = engineFeatures.includes("mcp");
+  const supportsToolSecretMask = engineFeatures.includes("toolSecretMask");
+  // "Sem resposta do cliente": sem o anúncio o bloco some da aba Roteamento e
+  // o campo não vai no save (o servidor mantém o que está gravado)
+  const supportsInactivity = engineFeatures.includes("inactivity");
+  // Passada de qualificação: sem o anúncio o interruptor some da aba Ações e
+  // o campo não vai no save (o servidor mantém o que está gravado)
+  const supportsQualifyPass = engineFeatures.includes("qualifyPass");
+  // O servidor devolveu o valor do interruptor para ESTE agente (agente novo
+  // sempre conta). Banco sem a coluna não devolve o campo: o interruptor
+  // fica escondido e nada vai no save
+  const [qualifyPassKnown, setQualifyPassKnown] = useState(false);
 
   // Funil e Página de Agendamento são capacidades de PLANO. Sem o pré-check, só
   // abrir a aba viraria 402 + toast global de "recurso fora do plano" sem o
@@ -363,6 +543,61 @@ export function AgentEditorDialog({ open, onOpenChange, agentId, onSaved }: Agen
 
   const setField = <K extends keyof AgentForm>(key: K, value: AgentForm[K]) =>
     setForm(prev => ({ ...prev, [key]: value }));
+
+  // v7 — o interruptor "só base" aparece quando o servidor anuncia o recurso OU
+  // quando o agente já é "só base" (nunca esconder o que está gravado). As
+  // travas e notas seguem `form.kbOnly`, nunca o anúncio.
+  const kbOnlySwitchVisible = supportsKbOnly || form.savedKbOnly || form.kbOnly;
+  // Interruptor da passada de qualificação na aba Ações (e no save)
+  const showQualifyPass = supportsQualifyPass && qualifyPassKnown && !form.kbOnly;
+  // Aba escondida para o agente "só base" nunca fica aberta: sem isto um erro
+  // de save que leva a ela mostraria uma área vazia
+  const visibleTab =
+    form.kbOnly && KB_ONLY_HIDDEN_TABS.includes(tab) ? "profile" : tab;
+
+  useEffect(() => {
+    if (form.kbOnly && KB_ONLY_HIDDEN_TABS.includes(tab)) setTab("profile");
+  }, [form.kbOnly, tab]);
+
+  const handleKbOnlyChange = (next: boolean) => {
+    setField("kbOnly", next);
+    const requestId = ++kbOnlyUsageRequestRef.current;
+    setKbOnlyUsage(null);
+    setKbOnlyUsageLoading(false);
+    // Só ao LIGAR num agente já salvo, e que não estava gravado como "só base"
+    // (voltar ao estado gravado não muda nada para quem o usa)
+    if (!next || !agentId || form.savedKbOnly) return;
+    setKbOnlyUsageLoading(true);
+    void fetchAiAgentUsage(agentId).then(usage => {
+      if (kbOnlyUsageRequestRef.current !== requestId) return;
+      setKbOnlyUsage(usage);
+      setKbOnlyUsageLoading(false);
+    });
+  };
+
+  // "A, B, C, D, E e mais 3" — os nomes vêm do servidor, a junção é da tela
+  const formatUsageNames = (refs: AiAgentUsageRef[]): string => {
+    const shown = refs.slice(0, USAGE_NAMES_SHOWN).map(ref => ref.name).join(", ");
+    const rest = refs.length - USAGE_NAMES_SHOWN;
+    return rest > 0 ? `${shown} ${t("usageMore", { count: rest })}` : shown;
+  };
+
+  const kbOnlyUsageLines: string[] = kbOnlyUsage
+    ? [
+        kbOnlyUsage.sharedKbBy.length > 0
+          ? t("usageSharedKb", { names: formatUsageNames(kbOnlyUsage.sharedKbBy) })
+          : "",
+        kbOnlyUsage.transferFrom.length > 0
+          ? t("usageTransfer", { names: formatUsageNames(kbOnlyUsage.transferFrom) })
+          : "",
+        kbOnlyUsage.consultedBy.length > 0
+          ? t("usageConsult", { names: formatUsageNames(kbOnlyUsage.consultedBy) })
+          : "",
+        kbOnlyUsage.channels.length > 0
+          ? t("usageChannels", { names: formatUsageNames(kbOnlyUsage.channels) })
+          : "",
+      ].filter(line => line.length > 0)
+    : [];
 
   // IA da plataforma. Sem o recurso liberado na empresa o seletor não aparece e
   // `platformMode` é SEMPRE falso: a aba Provedor e o payload ficam como sempre
@@ -449,11 +684,41 @@ export function AgentEditorDialog({ open, onOpenChange, agentId, onSaved }: Agen
     }
   };
 
+  // v8 — (re)carrega a lista de servidores MCP. Chamada silenciosa: `null` só
+  // fica quando NENHUMA carga desta abertura deu certo. Com `prune` (ao fechar o
+  // "Gerenciar servidores") o servidor que sumiu do cadastro sai do formulário
+  // (A3/B6); a 1ª carga não poda, para a aba mostrar "(servidor removido)".
+  const loadMcpServers = async (prune: boolean) => {
+    const requestId = ++mcpServersRequestRef.current;
+    setMcpServersLoading(true);
+    const list = await listAiMcpServers();
+    if (mcpServersRequestRef.current !== requestId) return;
+    setMcpServersLoading(false);
+    if (!list) return;
+    setMcpServers(list);
+    if (!prune) return;
+    const existing = new Set(list.map(server => server.id));
+    setForm(prev => {
+      const kept = prev.mcpTools.filter(
+        row => !row.serverId || existing.has(row.serverId)
+      );
+      return kept.length === prev.mcpTools.length ? prev : { ...prev, mcpTools: kept };
+    });
+  };
+
   // Carrega o agente completo (edição) e reseta o formulário (criação)
   useEffect(() => {
     if (!open) return;
     setTab("profile");
     let cancelled = false;
+    kbOnlyUsageRequestRef.current += 1;
+    setKbOnlyUsage(null);
+    setKbOnlyUsageLoading(false);
+    // v8 — a lista de servidores MCP é refeita a cada abertura (efeito abaixo);
+    // a resposta de uma abertura anterior é descartada
+    mcpServersRequestRef.current += 1;
+    setMcpServers(null);
+    setMcpServersLoading(false);
 
     // v6 — UMA chamada da listagem enxuta por abertura do editor: alimenta os
     // seletores de agente das abas Roteamento e Ferramentas e, na criação, é
@@ -473,30 +738,50 @@ export function AgentEditorDialog({ open, onOpenChange, agentId, onSaved }: Agen
             id: Number(item.id),
             name: item.name || `#${item.id}`,
             isActive: item.isActive !== false,
+            // v7 — marca "(só base)" na aba Conhecimento (ausente em servidor
+            // antigo = agente comum)
+            kbOnly: item.kbOnly === true,
           }))
       );
       setAiAgentOptionsLoaded(true);
     });
+
+    // Agente novo sempre conhece o interruptor (nasce ligado); na edição só
+    // depois de o servidor devolver o campo
+    setQualifyPassKnown(!agentId);
 
     if (!agentId) {
       setForm(EMPTY_FORM);
       // Fechar o editor no meio de uma carga cancela o `finally` que desliga o
       // indicador: sem isto a criação seguinte abriria travada no carregando
       setLoading(false);
-      setEngineFeatures(createFeaturesRef.current || []);
+      createListAnnouncedRef.current = false;
+      setEngineFeatures(
+        usableFallbackFeatures(fallbackFeaturesRef.current) ||
+          createFeaturesRef.current ||
+          []
+      );
       // Na criação não existe Show para consultar: a LISTAGEM enxuta devolve o
       // mesmo `engineFeatures` em cada item — e como ela é refeita a cada
       // abertura, o anúncio dela sempre vence o que foi memorizado antes.
-      // Empresa sem nenhum agente ainda cai na sonda da rota de fluxos — 404
-      // ali significa servidor antigo.
+      // Empresa sem nenhum agente usa o que a página obteve da rota própria
+      // (v7) e, sem ele, cai na sonda da rota de fluxos — 404 ali significa
+      // servidor antigo.
       (async () => {
         const list = await agentListPromise;
         if (cancelled) return;
         const announced = list?.find(item => Array.isArray(item?.engineFeatures));
         if (announced) {
+          createListAnnouncedRef.current = true;
           const features = normalizeEngineFeatures(announced.engineFeatures);
           createFeaturesRef.current = features;
           setEngineFeatures(features);
+          return;
+        }
+        const fromRoute = usableFallbackFeatures(fallbackFeaturesRef.current);
+        if (fromRoute) {
+          createFeaturesRef.current = fromRoute;
+          setEngineFeatures(fromRoute);
           return;
         }
         if (createFeaturesRef.current) return;
@@ -505,6 +790,8 @@ export function AgentEditorDialog({ open, onOpenChange, agentId, onSaved }: Agen
         // memoizada — a próxima abertura sonda de novo.
         const answered = await loadChatFlows();
         if (cancelled || !answered) return;
+        // O anúncio da página pode ter chegado durante a sonda: ele vence
+        if (usableFallbackFeatures(fallbackFeaturesRef.current)) return;
         createFeaturesRef.current = PROBE_FALLBACK_FEATURES;
         setEngineFeatures(PROBE_FALLBACK_FEATURES);
       })();
@@ -516,7 +803,10 @@ export function AgentEditorDialog({ open, onOpenChange, agentId, onSaved }: Agen
       try {
         const agent = await fetchAiAgent(agentId);
         if (cancelled) return;
-        setEngineFeatures(normalizeEngineFeatures(agent.engineFeatures));
+        const announcedFeatures = normalizeEngineFeatures(agent.engineFeatures);
+        setEngineFeatures(announcedFeatures);
+        // v8 (D13-1) — servidor que esconde a senha das ferramentas externas
+        const maskToolSecrets = announcedFeatures.includes("toolSecretMask");
         // Agente gravado no modo plataforma: a "chave" salva é só o marcador
         // desse modo — nunca vai para o campo de chave
         const onPlatformAi = isPlatformKey(agent.apiKey);
@@ -556,12 +846,19 @@ export function AgentEditorDialog({ open, onOpenChange, agentId, onSaved }: Agen
           transferMessage: agent.transferMessage || "",
           // Servidor antigo não devolve o campo: lista vazia mantém a tela
           // funcionando e o save não apaga nada (só envia o que existe).
+          // v8 (D13-1) — com `toolSecretMask` a senha NUNCA vai para o campo
+          // (o servidor manda "" e marca `hasSecret`; vazio no save = manter).
+          // Sem o anúncio (servidor antigo) ela vem e é reenviada como sempre:
+          // ele substitui a lista inteira no save e apagaria a senha.
           externalTools: (agent.externalTools || []).map(tool => ({
             key: tool.key || generateToolKey(),
             label: tool.label || "",
             description: tool.description || "",
             url: tool.url || "",
-            secret: tool.secret || "",
+            secret: maskToolSecrets ? "" : tool.secret || "",
+            ...(maskToolSecrets
+              ? { hasSecret: tool.hasSecret === true, savedUrl: tool.url || "" }
+              : {}),
             timeoutMs: tool.timeoutMs ?? null,
             params: (tool.params || []).map(param => ({
               name: param.name || "",
@@ -569,6 +866,17 @@ export function AgentEditorDialog({ open, onOpenChange, agentId, onSaved }: Agen
               required: !!param.required,
             })),
           })),
+          // v8 — servidor antigo não devolve o campo: lista vazia (e sem `mcp`
+          // anunciado o campo nem vai no save)
+          mcpTools: (Array.isArray(agent.mcpTools) ? agent.mcpTools : [])
+            .filter(entry => Number(entry?.serverId) > 0 && Array.isArray(entry?.tools))
+            .map(entry => ({
+              rowKey: generateMcpRowKey(),
+              serverId: Number(entry.serverId),
+              tools: entry.tools.filter(
+                (name): name is string => typeof name === "string" && name.length > 0
+              ),
+            })),
           // Mesma tolerância das ferramentas: servidor antigo não devolve os
           // campos da qualificação, e lista vazia mantém a tela funcionando.
           // Todo campo dos tipos novos é copiado — o que não viesse para o
@@ -610,10 +918,27 @@ export function AgentEditorDialog({ open, onOpenChange, agentId, onSaved }: Agen
               aiAgentId: Number(entry.aiAgentId),
               description: entry.description || "",
             })),
+          // v7 — servidor antigo não devolve os campos: agente comum, sem
+          // bases compartilhadas (e sem `kbShared` o campo nem vai no save)
+          kbOnly: agent.kbOnly === true,
+          savedKbOnly: agent.kbOnly === true,
+          sharedKbAgents: (Array.isArray(agent.sharedKbAgents) ? agent.sharedKbAgents : [])
+            .map(entry => Number(entry?.aiAgentId))
+            .filter(id => Number.isInteger(id) && id > 0),
+          // Servidor antigo não devolve os campos: vazio (responde na hora)
+          replyDelayMin: agent.replyDelayMin != null ? String(agent.replyDelayMin) : "",
+          replyDelayMax: agent.replyDelayMax != null ? String(agent.replyDelayMax) : "",
+          // Servidor antigo não devolve o campo: regra desligada (e sem
+          // `inactivity` anunciado o campo nem vai no save)
+          inactivity: toInactivityForm(agent.inactivityConfig),
+          // Passada de qualificação: ausente = ligada (o interruptor só
+          // aparece quando o servidor devolveu o campo, abaixo)
+          qualifyPassEnabled: agent.qualifyPassEnabled !== false,
           maxHistoryMessages:
             agent.maxHistoryMessages != null ? String(agent.maxHistoryMessages) : "",
           temperature: agent.temperature != null ? String(agent.temperature) : "",
         });
+        setQualifyPassKnown(typeof agent.qualifyPassEnabled === "boolean");
       } catch (err: unknown) {
         if (cancelled) return;
         const key = aiAgentErrorKey(err);
@@ -626,6 +951,27 @@ export function AgentEditorDialog({ open, onOpenChange, agentId, onSaved }: Agen
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, agentId]);
+
+  // v8 — lista de servidores MCP: uma carga por abertura, só com `mcp`
+  // anunciado (servidor antigo nem recebe o pedido). Fica DEPOIS do efeito de
+  // carga de propósito: ele zera a lista ao abrir e este dispara a nova.
+  useEffect(() => {
+    if (!open || !supportsMcp) return;
+    void loadMcpServers(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, agentId, supportsMcp]);
+
+  // v7 — o anúncio da página chegou com o editor de criação já aberto (clique
+  // antes de a rota de recursos responder): vale na hora, salvo se a listagem
+  // desta abertura já anunciou (ela sempre vence).
+  useEffect(() => {
+    if (!open || agentId || createListAnnouncedRef.current) return;
+    const fromRoute = usableFallbackFeatures(fallbackFeatures);
+    if (!fromRoute) return;
+    createFeaturesRef.current = fromRoute;
+    setEngineFeatures(fromRoute);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fallbackFeatures]);
 
   // Filas, atendentes, etiquetas e raias do funil para os selects (services
   // existentes; carrega uma única vez, best-effort — cada um em try/catch
@@ -778,7 +1124,16 @@ export function AgentEditorDialog({ open, onOpenChange, agentId, onSaved }: Agen
         ? !!target.aiAgentId
         : !!target.chatFlowId);
 
-    if (form.routingEnabled && form.routingTargets.some(target => !isTargetComplete(target))) {
+    // v7 — agente "só base": as abas Roteamento, Ações e Ferramentas estão
+    // escondidas e os campos delas NÃO vão no save (o servidor preserva o que
+    // está gravado). Validar o que ele não enxerga travaria o save sem saída.
+    const skipHiddenTabs = form.kbOnly;
+
+    if (
+      !skipHiddenTabs &&
+      form.routingEnabled &&
+      form.routingTargets.some(target => !isTargetComplete(target))
+    ) {
       toast.error(t("targetsIncomplete"));
       return;
     }
@@ -788,7 +1143,7 @@ export function AgentEditorDialog({ open, onOpenChange, agentId, onSaved }: Agen
       tool.description.trim().length > 0 &&
       /^https?:\/\//i.test(tool.url.trim());
 
-    if (form.externalTools.some(tool => !isToolComplete(tool))) {
+    if (!skipHiddenTabs && form.externalTools.some(tool => !isToolComplete(tool))) {
       toast.error(t("toolsIncomplete"));
       return;
     }
@@ -820,7 +1175,7 @@ export function AgentEditorDialog({ open, onOpenChange, agentId, onSaved }: Agen
       }
     };
 
-    if (form.actions.some(action => !isActionComplete(action))) {
+    if (!skipHiddenTabs && form.actions.some(action => !isActionComplete(action))) {
       toast.error(t("actionsIncomplete"));
       return;
     }
@@ -830,6 +1185,7 @@ export function AgentEditorDialog({ open, onOpenChange, agentId, onSaved }: Agen
     // a carência simplesmente não existia. Mesmo critério de `isTargetComplete`.
     const grace = form.closeRules?.grace;
     if (
+      !skipHiddenTabs &&
       grace?.enabled &&
       ((grace.destinationType === "queue" && !grace.queueId) ||
         (grace.destinationType === "user" && !grace.userId) ||
@@ -841,11 +1197,46 @@ export function AgentEditorDialog({ open, onOpenChange, agentId, onSaved }: Agen
       return;
     }
 
+    // "Sem resposta do cliente": só com o bloco na tela (servidor que anuncia o
+    // recurso e agente que não é "só base"). Com a regra LIGADA o servidor
+    // recusaria o save inteiro com o mesmo critério; desligada, o rascunho vai
+    // como está (o servidor guarda sem conferir)
+    const sendInactivity = supportsInactivity && !skipHiddenTabs;
+    const inactivityForm = form.inactivity;
+    const inactivityWarnMinutes = parseInactivityMinutes(inactivityForm.warnMinutes);
+    const inactivityActAfterMinutes = parseInactivityMinutes(inactivityForm.actAfterMinutes);
+    if (sendInactivity && inactivityForm.enabled) {
+      if (
+        inactivityActAfterMinutes === null ||
+        (inactivityForm.warnEnabled && inactivityWarnMinutes === null)
+      ) {
+        toast.error(
+          t("inactivityMinutesInvalid", {
+            min: AGENT_INACTIVITY_LIMITS.minMinutes,
+            max: AGENT_INACTIVITY_LIMITS.maxMinutes,
+          })
+        );
+        setTab("routing");
+        return;
+      }
+      if (inactivityForm.warnEnabled && !inactivityForm.warnMessage.trim()) {
+        toast.error(t("inactivityWarnMessageRequired"));
+        setTab("routing");
+        return;
+      }
+      if (inactivityForm.action === "transfer" && !inactivityForm.queueId) {
+        toast.error(t("inactivityQueueRequired"));
+        setTab("routing");
+        return;
+      }
+    }
+
     // Mesma armadilha do lado da agenda: página sem serviço (ou serviço sem
     // página) é descartado pelo sanitizador do servidor e a seção voltava
     // desligada depois de um save "bem-sucedido".
     const booking = form.nativeTools?.booking;
     if (
+      !skipHiddenTabs &&
       booking?.enabled &&
       (!booking.bookingPageId || (booking.eventTypes || []).length === 0)
     ) {
@@ -856,7 +1247,11 @@ export function AgentEditorDialog({ open, onOpenChange, agentId, onSaved }: Agen
 
     // A ação que para a IA manda o atendimento para a fila de emergência: sem
     // ela escolhida o servidor recusa o save inteiro com 400
-    if (!form.fallbackQueueId && form.actions.some(action => action.type === "block")) {
+    if (
+      !skipHiddenTabs &&
+      !form.fallbackQueueId &&
+      form.actions.some(action => action.type === "block")
+    ) {
       toast.error(t("errBlockNeedsFallback"));
       setTab("routing");
       return;
@@ -865,6 +1260,7 @@ export function AgentEditorDialog({ open, onOpenChange, agentId, onSaved }: Agen
     // Linha sem nome é rascunho (sai do payload); nome preenchido tem de estar
     // no formato aceito pelo servidor, senão o campo sumiria sem explicação
     if (
+      !skipHiddenTabs &&
       form.memoryEnabled &&
       form.memoryFields.some(
         field =>
@@ -873,6 +1269,32 @@ export function AgentEditorDialog({ open, onOpenChange, agentId, onSaved }: Agen
     ) {
       toast.error(t("memoryFieldsIncomplete"));
       return;
+    }
+
+    // Atraso na resposta: segundos inteiros de 0 ao teto, e o mínimo não passa
+    // do máximo (o servidor trocaria os dois de lugar sem avisar). `undefined`
+    // = valor inválido; `null` = campo vazio
+    const parseReplyDelayField = (raw: string): number | null | undefined => {
+      const text = raw.trim();
+      if (!text) return null;
+      if (!/^\d+$/.test(text)) return undefined;
+      const value = Number(text);
+      return value <= MAX_AI_AGENT_REPLY_DELAY_SECONDS ? value : undefined;
+    };
+    const sendReplyDelay = supportsReplyDelay && !skipHiddenTabs;
+    const replyDelayMin = parseReplyDelayField(form.replyDelayMin);
+    const replyDelayMax = parseReplyDelayField(form.replyDelayMax);
+    if (sendReplyDelay) {
+      if (replyDelayMin === undefined || replyDelayMax === undefined) {
+        toast.error(t("replyDelayInvalid", { max: MAX_AI_AGENT_REPLY_DELAY_SECONDS }));
+        setTab("profile");
+        return;
+      }
+      if (replyDelayMin !== null && replyDelayMax !== null && replyDelayMin > replyDelayMax) {
+        toast.error(t("replyDelayOrder"));
+        setTab("profile");
+        return;
+      }
     }
 
     // Com roteamento desligado os destinos ficam ocultos na UI: envia só os
@@ -897,22 +1319,32 @@ export function AgentEditorDialog({ open, onOpenChange, agentId, onSaved }: Agen
             : (target.transferMessage || "").trim() || null,
       }));
 
-    const cleanedTools = form.externalTools.filter(isToolComplete).map(tool => ({
-      key: tool.key || generateToolKey(),
-      label: tool.label.trim(),
-      description: tool.description.trim(),
-      url: tool.url.trim(),
-      secret: (tool.secret || "").trim() || null,
-      // Parâmetro sem nome é rascunho: sai do payload (o servidor descartaria
-      // do mesmo jeito e o campo some da tela no próximo carregamento)
-      params: (tool.params || [])
-        .filter(param => param.name.trim().length > 0)
-        .map(param => ({
-          name: param.name.trim(),
-          description: (param.description || "").trim() || null,
-          required: !!param.required,
-        })),
-    }));
+    const cleanedTools = form.externalTools.filter(isToolComplete).map(tool => {
+      const typedSecret = (tool.secret || "").trim();
+      return {
+        key: tool.key || generateToolKey(),
+        label: tool.label.trim(),
+        description: tool.description.trim(),
+        url: tool.url.trim(),
+        // Sem `toolSecretMask` é a senha de sempre (veio do servidor e volta);
+        // com ele só a digitada vai, e vazio = o servidor mantém a salva
+        secret: typedSecret || null,
+        // v8 (D13-1) — "Remover senha" só vale sem senha nova digitada, e só
+        // com o servidor que entende o pedido
+        ...(supportsToolSecretMask && tool.secretClear && !typedSecret
+          ? { secretClear: true }
+          : {}),
+        // Parâmetro sem nome é rascunho: sai do payload (o servidor descartaria
+        // do mesmo jeito e o campo some da tela no próximo carregamento)
+        params: (tool.params || [])
+          .filter(param => param.name.trim().length > 0)
+          .map(param => ({
+            name: param.name.trim(),
+            description: (param.description || "").trim() || null,
+            required: !!param.required,
+          })),
+      };
+    });
 
     // O rótulo é o que a IA enxerga: em etiqueta e funil vem do nome do destino,
     // na oportunidade vem do nome da ETAPA escolhida (sem a lista carregada vale
@@ -1002,7 +1434,7 @@ export function AgentEditorDialog({ open, onOpenChange, agentId, onSaved }: Agen
     // ignoraria o campo em silêncio. Linha sem agente escolhido é rascunho e
     // fica de fora; lista vazia limpa o que estava salvo. O próprio agente e
     // id repetido também ficam de fora (o servidor recusaria o save inteiro).
-    if (supportsAgentConsult) {
+    if (supportsAgentConsult && !skipHiddenTabs) {
       const seenConsultIds = new Set<number>();
       payload.consultAgents = form.consultAgents
         .filter(row => {
@@ -1017,6 +1449,116 @@ export function AgentEditorDialog({ open, onOpenChange, agentId, onSaved }: Agen
           description: row.description.trim() || null,
         }));
     }
+    // v8 — só com `mcp` anunciado E a lista de servidores carregada (molde da
+    // consulta): sem a lista a seção fica só leitura e o campo NÃO vai (o
+    // servidor mantém o vínculo salvo). Rascunho (sem servidor), servidor sem
+    // ferramenta marcada e servidor que saiu do cadastro ficam de fora (o
+    // servidor ignoraria os dois últimos do mesmo jeito); os tetos repetem os do
+    // servidor, que acima deles recusaria o save inteiro. Ferramenta pausada
+    // segue marcada: volta a valer quando for aprovada de novo. Nada marcado =
+    // sem MCP. O "só base" não envia (a aba fica escondida).
+    if (supportsMcp && mcpServers !== null && !skipHiddenTabs) {
+      const knownServerIds = new Set(mcpServers.map(server => server.id));
+      const seenServerIds = new Set<number>();
+      const mcpEntries: AiAgentMcpToolsEntry[] = [];
+      let mcpToolTotal = 0;
+      for (const row of form.mcpTools) {
+        const serverId = Number(row.serverId);
+        if (!Number.isInteger(serverId) || serverId <= 0) continue;
+        if (!knownServerIds.has(serverId) || seenServerIds.has(serverId)) continue;
+        if (mcpEntries.length >= MAX_MCP_SERVERS_PER_AGENT) break;
+        const toolNames = Array.from(
+          new Set(row.tools.filter(name => typeof name === "string" && name.length > 0))
+        ).slice(0, Math.max(0, MAX_MCP_TOOLS_PER_AGENT - mcpToolTotal));
+        if (toolNames.length === 0) continue;
+        seenServerIds.add(serverId);
+        mcpToolTotal += toolNames.length;
+        mcpEntries.push({ serverId, tools: toolNames });
+      }
+      payload.mcpTools = mcpEntries.length > 0 ? mcpEntries : null;
+    }
+    // v7 — agente "só base": os campos das abas escondidas saem do payload
+    // (ausente = o servidor mantém o que está gravado) e ele vai sempre
+    // inativo. Sem o "só base" nada muda aqui.
+    if (skipHiddenTabs) {
+      delete payload.routingEnabled;
+      delete payload.routingTargets;
+      delete payload.fallbackQueueId;
+      delete payload.transferMessage;
+      delete payload.autoSummaryEnabled;
+      delete payload.closeRules;
+      delete payload.actions;
+      delete payload.actionMessage;
+      delete payload.memoryEnabled;
+      delete payload.memoryFields;
+      delete payload.externalTools;
+      delete payload.nativeTools;
+      payload.isActive = false;
+    }
+    // v7 — só vai quando o servidor anuncia as bases compartilhadas (mesmo
+    // molde da consulta: sem rascunho, sem o próprio agente, sem repetição e
+    // no teto). Com o "só base" a seção fica escondida e o salvo é mantido.
+    if (supportsKbShared && !skipHiddenTabs) {
+      const seenSharedKbIds = new Set<number>();
+      payload.sharedKbAgents = form.sharedKbAgents
+        .filter(rawId => {
+          const id = Number(rawId);
+          if (!Number.isInteger(id) || id <= 0) return false;
+          if (id === agentId || seenSharedKbIds.has(id)) return false;
+          seenSharedKbIds.add(id);
+          return true;
+        })
+        .slice(0, MAX_AI_AGENT_SHARED_KB)
+        .map(id => ({ aiAgentId: Number(id) }));
+    }
+    // v7 — só com o interruptor na tela (servidor que anuncia o recurso, ou
+    // agente que já é "só base")
+    if (kbOnlySwitchVisible) payload.kbOnly = form.kbOnly;
+    // Atraso na resposta — só com o campo na tela; vazio nos dois = na hora
+    if (sendReplyDelay) {
+      payload.replyDelayMin = replyDelayMin ?? null;
+      payload.replyDelayMax = replyDelayMax ?? null;
+    }
+    // Passada de qualificação — só com o interruptor na tela (servidor que
+    // anuncia, agente cujo valor veio do servidor e que não é "só base")
+    if (showQualifyPass) payload.qualifyPassEnabled = form.qualifyPassEnabled;
+    // "Sem resposta do cliente" — só com o bloco na tela (o "só base" não
+    // envia: ausente = o servidor mantém o salvo). Regra desligada e nada
+    // preenchido vai `null` (agente que nunca configurou segue sem a coluna);
+    // desligada com rascunho guarda o rascunho, para religar sem redigitar.
+    // A fila só vai com "Transferir".
+    if (sendInactivity) {
+      const warnMessage = inactivityForm.warnMessage.trim();
+      const message = inactivityForm.message.trim();
+      const warnMinutes =
+        inactivityWarnMinutes ?? AGENT_INACTIVITY_LIMITS.defaultWarnMinutes;
+      const actAfterMinutes =
+        inactivityActAfterMinutes ?? AGENT_INACTIVITY_LIMITS.defaultActAfterMinutes;
+      const untouched =
+        !inactivityForm.enabled &&
+        !inactivityForm.warnEnabled &&
+        !warnMessage &&
+        !message &&
+        !inactivityForm.queueId &&
+        inactivityForm.action === "close" &&
+        warnMinutes === AGENT_INACTIVITY_LIMITS.defaultWarnMinutes &&
+        actAfterMinutes === AGENT_INACTIVITY_LIMITS.defaultActAfterMinutes;
+      payload.inactivityConfig = untouched
+        ? null
+        : {
+            enabled: inactivityForm.enabled,
+            warning: {
+              enabled: inactivityForm.warnEnabled,
+              minutes: warnMinutes,
+              message: warnMessage,
+            },
+            actAfterMinutes,
+            action: inactivityForm.action,
+            queueId:
+              inactivityForm.action === "transfer" ? inactivityForm.queueId : null,
+            message,
+          };
+    }
 
     setSaving(true);
     try {
@@ -1027,10 +1569,13 @@ export function AgentEditorDialog({ open, onOpenChange, agentId, onSaved }: Agen
       // Rede de segurança do anúncio de recursos: servidor antigo aceita o save
       // e IGNORA as novidades, sem erro nenhum — só a resposta denuncia. O save
       // em si valeu, por isso é aviso depois do sucesso e não bloqueia.
+      // Com o "só base" ações, memória e destinos nem foram enviados: não há o
+      // que conferir na resposta
       const sentNovelty =
-        cleanedActions.length > 0 ||
-        cleanedMemoryFields.length > 0 ||
-        form.memoryEnabled;
+        !skipHiddenTabs &&
+        (cleanedActions.length > 0 ||
+          cleanedMemoryFields.length > 0 ||
+          form.memoryEnabled);
       const backendKnowsNovelty =
         saved?.actions !== undefined ||
         saved?.memoryFields !== undefined ||
@@ -1041,9 +1586,11 @@ export function AgentEditorDialog({ open, onOpenChange, agentId, onSaved }: Agen
       // O servidor conhece os campos, mas pode ter descartado o que não executa:
       // compara QUANTIDADE e TIPO do que foi enviado com o que voltou
       const savedActions = saved?.actions;
-      const sentV5Actions = cleanedActions.filter(action =>
-        AI_AGENT_ACTION_TYPES_V5.includes(action.type)
-      );
+      const sentV5Actions: typeof cleanedActions = skipHiddenTabs
+        ? []
+        : cleanedActions.filter(action =>
+            AI_AGENT_ACTION_TYPES_V5.includes(action.type)
+          );
       if (
         sentV5Actions.length > 0 &&
         Array.isArray(savedActions) &&
@@ -1063,6 +1610,7 @@ export function AgentEditorDialog({ open, onOpenChange, agentId, onSaved }: Agen
       // pela falta do outro.
       const savedTargets = saved?.routingTargets;
       const targetTypeIgnored = (type: AiAgentRoutingTarget["type"]) => {
+        if (skipHiddenTabs) return false;
         const sentOfType = cleanedTargets.filter(target => target.type === type);
         return (
           sentOfType.length > 0 &&
@@ -1098,7 +1646,10 @@ export function AgentEditorDialog({ open, onOpenChange, agentId, onSaved }: Agen
         key === "errInvalidCloseRules" ||
         // Destinos recusados — na v6 inclui "Outro agente de IA" excluído entre
         // abrir e salvar a tela
-        key === "errInvalidTargets"
+        key === "errInvalidTargets" ||
+        // "Sem resposta do cliente" recusado (tempo, aviso sem mensagem, fila
+        // ausente ou que não existe mais)
+        key === "errInvalidInactivity"
       ) {
         setTab("routing");
       } else if (key === "errInvalidActions" || key === "errInvalidMemoryFields") {
@@ -1106,9 +1657,15 @@ export function AgentEditorDialog({ open, onOpenChange, agentId, onSaved }: Agen
       } else if (
         key === "errInvalidNativeTools" ||
         key === "errInvalidTools" ||
-        key === "errInvalidConsult"
+        key === "errInvalidConsult" ||
+        // v8 — vínculo com servidores MCP recusado (formato ou teto)
+        key === "errInvalidMcp"
       ) {
         setTab("tools");
+      } else if (key === "errInvalidSharedKb" && agentId) {
+        // v7 — base compartilhada recusada. Na criação a aba Conhecimento está
+        // bloqueada: o erro fica só no aviso
+        setTab("knowledge");
       }
     } finally {
       setSaving(false);
@@ -1131,7 +1688,7 @@ export function AgentEditorDialog({ open, onOpenChange, agentId, onSaved }: Agen
               <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
             </div>
           ) : (
-            <Tabs value={tab} onValueChange={setTab}>
+            <Tabs value={visibleTab} onValueChange={setTab}>
               <TabsList className="mb-4 h-auto w-full flex-wrap justify-start gap-1">
                 <TabsTrigger value="profile" className="gap-1.5">
                   <Bot className="h-4 w-4" />
@@ -1145,18 +1702,24 @@ export function AgentEditorDialog({ open, onOpenChange, agentId, onSaved }: Agen
                   <BookOpen className="h-4 w-4" />
                   {t("tabKnowledge")}
                 </TabsTrigger>
-                <TabsTrigger value="routing" className="gap-1.5">
-                  <Split className="h-4 w-4" />
-                  {t("tabRouting")}
-                </TabsTrigger>
-                <TabsTrigger value="actions" className="gap-1.5">
-                  <Zap className="h-4 w-4" />
-                  {t("tabActions")}
-                </TabsTrigger>
-                <TabsTrigger value="tools" className="gap-1.5">
-                  <Webhook className="h-4 w-4" />
-                  {t("tabTools")}
-                </TabsTrigger>
+                {/* v7 — o agente "só base" não atende: sem roteamento, ações
+                    nem ferramentas */}
+                {!form.kbOnly && (
+                  <>
+                    <TabsTrigger value="routing" className="gap-1.5">
+                      <Split className="h-4 w-4" />
+                      {t("tabRouting")}
+                    </TabsTrigger>
+                    <TabsTrigger value="actions" className="gap-1.5">
+                      <Zap className="h-4 w-4" />
+                      {t("tabActions")}
+                    </TabsTrigger>
+                    <TabsTrigger value="tools" className="gap-1.5">
+                      <Webhook className="h-4 w-4" />
+                      {t("tabTools")}
+                    </TabsTrigger>
+                  </>
+                )}
               </TabsList>
 
               {!agentId && (
@@ -1179,14 +1742,57 @@ export function AgentEditorDialog({ open, onOpenChange, agentId, onSaved }: Agen
                   <div className="space-y-1.5">
                     <Label htmlFor="ai-agent-active">{t("fieldActive")}</Label>
                     <div className="flex h-9 items-center">
+                      {/* Agente "só base" fica sempre inativo: o interruptor
+                          aparece desligado e travado (o valor anterior volta
+                          se o "só base" for desmarcado) */}
                       <Switch
                         id="ai-agent-active"
-                        checked={form.isActive}
+                        checked={form.kbOnly ? false : form.isActive}
                         onCheckedChange={v => setField("isActive", v)}
+                        disabled={form.kbOnly}
                       />
                     </div>
+                    {form.kbOnly && (
+                      <p className="text-xs text-muted-foreground">
+                        {t("kbOnlyActiveLocked")}
+                      </p>
+                    )}
                   </div>
                 </div>
+
+                {/* v7 — agente que só guarda conhecimento para outros agentes */}
+                {kbOnlySwitchVisible && (
+                  <div className="space-y-2 rounded-md border p-3">
+                    <div className="flex items-center justify-between gap-2">
+                      <Label htmlFor="ai-agent-kb-only" className="flex items-center gap-1.5">
+                        {t("kbOnlyLabel")}
+                        {kbOnlyUsageLoading && (
+                          <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
+                        )}
+                      </Label>
+                      <Switch
+                        id="ai-agent-kb-only"
+                        checked={form.kbOnly}
+                        onCheckedChange={handleKbOnlyChange}
+                      />
+                    </div>
+                    <p className="text-xs text-muted-foreground">{t("kbOnlyHint")}</p>
+                    {form.kbOnly && kbOnlyUsageLines.length > 0 && (
+                      <div className="flex gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-xs">
+                        <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600 dark:text-amber-500" />
+                        <div className="min-w-0 space-y-1 text-amber-700 dark:text-amber-400">
+                          <p className="font-medium">{t("kbOnlyUsageTitle")}</p>
+                          <ul className="space-y-0.5">
+                            {kbOnlyUsageLines.map(line => (
+                              <li key={line} className="break-words">{line}</li>
+                            ))}
+                          </ul>
+                          <p>{t("kbOnlyUsageFlows")}</p>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
 
                 <div className="space-y-1.5">
                   <Label>{t("fieldDescription")}</Label>
@@ -1218,6 +1824,100 @@ export function AgentEditorDialog({ open, onOpenChange, agentId, onSaved }: Agen
                   />
                   <p className="text-xs text-muted-foreground">{t("exitKeywordHint")}</p>
                 </div>
+
+                {/* Atraso na resposta: só com o servidor que executa e nunca no
+                    agente "só base", que não atende */}
+                {supportsReplyDelay && !form.kbOnly && (
+                  <div className="space-y-1.5">
+                    <div className="flex items-center gap-1.5">
+                      <Label>{t("replyDelayLabel")}</Label>
+                      <Popover>
+                        <PopoverTrigger asChild>
+                          <button
+                            type="button"
+                            className="inline-flex h-5 w-5 items-center justify-center rounded-full text-muted-foreground hover:text-foreground"
+                            aria-label={t("replyDelayHelpTitle")}
+                          >
+                            <HelpCircle className="h-4 w-4" />
+                          </button>
+                        </PopoverTrigger>
+                        {/* Altura presa à área visível (rolagem interna): em
+                            tela baixa o fim dos alertas ficava cortado */}
+                        <PopoverContent
+                          side="top"
+                          align="start"
+                          collisionPadding={16}
+                          className="w-[380px] max-w-[calc(100vw-2rem)] overflow-y-auto text-xs"
+                          style={{
+                            maxHeight: "var(--radix-popover-content-available-height, 70vh)",
+                          }}
+                        >
+                          <div className="space-y-3">
+                            <p className="text-sm font-semibold">{t("replyDelayHelpTitle")}</p>
+                            <ul className="list-disc space-y-1 pl-4 text-muted-foreground">
+                              <li>{t("replyDelayHelpHow")}</li>
+                              <li>{t("replyDelayHelpFixed")}</li>
+                              <li>{t("replyDelayHelpTyping")}</li>
+                            </ul>
+                            <div>
+                              <p className="mb-1 flex items-center gap-1 font-medium text-amber-600 dark:text-amber-400">
+                                <AlertTriangle className="h-3.5 w-3.5" />
+                                {t("replyDelayHelpAlertsTitle")}
+                              </p>
+                              <ul className="list-disc space-y-1 pl-4 text-muted-foreground">
+                                <li>{t("replyDelayHelpAlertWaitOn")}</li>
+                                <li>{t("replyDelayHelpAlertWaitOff")}</li>
+                                <li>{t("replyDelayHelpAlertTakeover")}</li>
+                                <li>{t("replyDelayHelpAlertRead")}</li>
+                                <li>
+                                  {t("replyDelayHelpAlertLong", {
+                                    max: MAX_AI_AGENT_REPLY_DELAY_SECONDS,
+                                  })}
+                                </li>
+                              </ul>
+                            </div>
+                          </div>
+                        </PopoverContent>
+                      </Popover>
+                    </div>
+                    {/* Texto numérico, não type="number": com entrada inválida
+                        ("1,5", "5e") o campo numérico entrega "" em silêncio e o
+                        save gravaria "responde na hora" sem erro */}
+                    <div className="grid grid-cols-2 gap-3 sm:max-w-sm">
+                      <div className="space-y-1">
+                        <Label htmlFor="ai-agent-reply-delay-min" className="text-xs font-normal text-muted-foreground">
+                          {t("replyDelayMinLabel")}
+                        </Label>
+                        <Input
+                          id="ai-agent-reply-delay-min"
+                          type="text"
+                          inputMode="numeric"
+                          maxLength={3}
+                          value={form.replyDelayMin}
+                          onChange={e => setField("replyDelayMin", e.target.value)}
+                          placeholder="0"
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <Label htmlFor="ai-agent-reply-delay-max" className="text-xs font-normal text-muted-foreground">
+                          {t("replyDelayMaxLabel")}
+                        </Label>
+                        <Input
+                          id="ai-agent-reply-delay-max"
+                          type="text"
+                          inputMode="numeric"
+                          maxLength={3}
+                          value={form.replyDelayMax}
+                          onChange={e => setField("replyDelayMax", e.target.value)}
+                          placeholder="0"
+                        />
+                      </div>
+                    </div>
+                    <p className="text-xs text-muted-foreground">
+                      {t("replyDelayHint", { max: MAX_AI_AGENT_REPLY_DELAY_SECONDS })}
+                    </p>
+                  </div>
+                )}
 
                 {/* Só aparece quando o servidor executa agenda ou mensagem
                     agendada: é o fuso em que a IA fala de horário com o cliente */}
@@ -1271,7 +1971,7 @@ export function AgentEditorDialog({ open, onOpenChange, agentId, onSaved }: Agen
                     <OpenAIBaseUrlField
                       value={form.baseUrl}
                       onChange={v => setField("baseUrl", v)}
-                      context="channel"
+                      context="agent"
                     />
 
                     <div className="space-y-1.5">
@@ -1331,6 +2031,11 @@ export function AgentEditorDialog({ open, onOpenChange, agentId, onSaved }: Agen
                     semanticEnabled={form.semanticEnabled}
                     onSemanticEnabledChange={v => setField("semanticEnabled", v)}
                     engineFeatures={engineFeatures}
+                    sharedKbAgents={form.sharedKbAgents}
+                    onSharedKbAgentsChange={ids => setField("sharedKbAgents", ids)}
+                    kbOnly={form.kbOnly}
+                    agentOptions={aiAgentOptions}
+                    aiAgentsAvailable={aiAgentOptionsLoaded}
                   />
                 ) : (
                   <p className="text-sm text-muted-foreground">{t("knowledgeSaveFirst")}</p>
@@ -1338,6 +2043,8 @@ export function AgentEditorDialog({ open, onOpenChange, agentId, onSaved }: Agen
               </TabsContent>
 
               {/* ── Roteamento ─────────────────────────────────────────── */}
+              {/* Com o "só base" as três abas abaixo nunca ficam ativas
+                  (`visibleTab`), então nem são montadas */}
               <TabsContent value="routing">
                 <AgentRoutingTab
                   routingEnabled={form.routingEnabled}
@@ -1362,6 +2069,14 @@ export function AgentEditorDialog({ open, onOpenChange, agentId, onSaved }: Agen
                   aiAgentsAvailable={aiAgentOptionsLoaded}
                   currentAgentId={agentId}
                   supportsAgentHandoff={supportsAgentHandoff}
+                  maxTargetDescription={
+                    supportsLongTargetDescription
+                      ? MAX_AI_AGENT_TARGET_DESCRIPTION
+                      : LEGACY_AI_AGENT_TARGET_DESCRIPTION
+                  }
+                  supportsInactivity={supportsInactivity}
+                  inactivity={form.inactivity}
+                  onInactivityChange={value => setField("inactivity", value)}
                 />
               </TabsContent>
 
@@ -1385,6 +2100,9 @@ export function AgentEditorDialog({ open, onOpenChange, agentId, onSaved }: Agen
                   onPipelineSelected={loadStages}
                   hasFallbackQueue={!!form.fallbackQueueId}
                   supportsV5={supportsV5}
+                  showQualifyPass={showQualifyPass}
+                  qualifyPassEnabled={form.qualifyPassEnabled}
+                  onQualifyPassChange={v => setField("qualifyPassEnabled", v)}
                 />
               </TabsContent>
 
@@ -1393,6 +2111,7 @@ export function AgentEditorDialog({ open, onOpenChange, agentId, onSaved }: Agen
                 <AgentToolsTab
                   tools={form.externalTools}
                   onToolsChange={tools => setField("externalTools", tools)}
+                  supportsToolSecretMask={supportsToolSecretMask}
                   nativeTools={form.nativeTools}
                   onNativeToolsChange={native => setField("nativeTools", native)}
                   bookingPages={bookingPagesForTab}
@@ -1409,6 +2128,12 @@ export function AgentEditorDialog({ open, onOpenChange, agentId, onSaved }: Agen
                   aiAgentsAvailable={aiAgentOptionsLoaded}
                   currentAgentId={agentId}
                   supportsAgentConsult={supportsAgentConsult}
+                  supportsMcp={supportsMcp}
+                  mcpTools={form.mcpTools}
+                  onMcpToolsChange={rows => setField("mcpTools", rows)}
+                  mcpServers={mcpServers}
+                  mcpServersLoading={mcpServersLoading}
+                  onMcpServersReload={prune => void loadMcpServers(prune)}
                 />
               </TabsContent>
             </Tabs>

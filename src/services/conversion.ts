@@ -149,3 +149,24 @@ export async function retryBulkAdReferralConversion(params: {
   const res = await api.post<BulkRetryResult>("/ad-referral/retry-bulk", params);
   return res.data;
 }
+
+// ─── Contatos vindos de anúncio (etiqueta automática) ───────────────────────────
+// docs/PLANO_ANUNCIO_ORIGEM_CONVERSA.md (D9/T7). GET 404 = backend anterior ao recurso.
+
+export interface AdReferralSettings {
+  /** false = banco do servidor ainda sem a coluna (atualização pendente). */
+  available: boolean;
+  /** Etiqueta aplicada ao contato que chega por anúncio; null = desligado. */
+  tagId: number | null;
+}
+
+export async function getAdReferralSettings(): Promise<AdReferralSettings> {
+  const res = await api.get<AdReferralSettings>("/conversion/ad-referral-settings");
+  return res.data;
+}
+
+/** Erros: 400 ERR_AD_REFERRAL_TAG_NOT_FOUND, 409 ERR_AD_REFERRAL_SETTINGS_UNAVAILABLE. */
+export async function updateAdReferralSettings(tagId: number | null): Promise<AdReferralSettings> {
+  const res = await api.put<AdReferralSettings>("/conversion/ad-referral-settings", { tagId });
+  return res.data;
+}

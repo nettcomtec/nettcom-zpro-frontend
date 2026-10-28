@@ -1,5 +1,7 @@
 import type { AxiosError } from "axios";
+import { uiT } from "@/lib/ui-t";
 
+// Português de antes = reserva; o texto da tela sai de bulkSendErrors.<CODIGO> na hora.
 const BACKEND_ERROR_LABELS: Record<string, string> = {
   ERR_DUPLICATED_CONTACT: "Contato já cadastrado",
   ERR_NO_CONTACT_FOUND: "Contato não encontrado",
@@ -16,7 +18,8 @@ const BACKEND_ERROR_LABELS: Record<string, string> = {
 };
 
 function translateKnownCode(value: string): string {
-  return BACKEND_ERROR_LABELS[value] || value;
+  if (!Object.prototype.hasOwnProperty.call(BACKEND_ERROR_LABELS, value)) return value;
+  return uiT(`bulkSendErrors.${value}`, undefined, BACKEND_ERROR_LABELS[value]);
 }
 
 /**
@@ -29,7 +32,7 @@ function translateKnownCode(value: string): string {
  * - Error: `err.message`
  */
 export function formatBulkSendError(err: unknown): string {
-  if (err == null) return "Erro desconhecido";
+  if (err == null) return uiT("bulkSendErrors.unknown", undefined, "Erro desconhecido");
   if (typeof err === "string") return translateKnownCode(err);
 
   const ax = err as AxiosError<unknown> & { data?: unknown; status?: number };
@@ -53,7 +56,7 @@ export function formatBulkSendError(err: unknown): string {
   try {
     return JSON.stringify(err);
   } catch {
-    return "Erro desconhecido";
+    return uiT("bulkSendErrors.unknown", undefined, "Erro desconhecido");
   }
 }
 

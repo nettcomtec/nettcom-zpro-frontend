@@ -6,6 +6,7 @@ import { useAuthStore } from "@/stores/auth-store";
 import { toast } from "sonner";
 import { useTranslations } from "next-intl";
 import { isMenuRouteHidden } from "@/lib/menu-visibility";
+import { PANEL_APP_VIEW_ROUTE } from "@/lib/panel-apps";
 
 const PUBLIC_ROUTES = ["/login", "/signup", "/reset", "/masterkey", "/validate-a2f"];
 
@@ -66,8 +67,15 @@ const PATHNAME_TO_ROUTE_NAME: Record<string, string> = {
   "/catalogo": "catalogo",
   "/cobrancas": "cobrancas",
   "/agendamento-publico": "agendamento-publico",
+  // Formulários (gestão). /formularios/<id> cai aqui pelo prefixo; a página pública /f/<endereço>
+  // fica fora do (dashboard) e não passa por este guard.
+  "/formularios": "formularios",
   "/chat-interno-rc": "chat-interno-rc",
   "/creditos-ia": "creditos-ia",
+  // Aplicativos personalizados. Entrada exata vence o fallback por prefixo (que não tem
+  // fronteira): sem a 2ª linha, /aplicativos-globais casaria a chave "aplicativos".
+  "/aplicativos": "aplicativos",
+  "/aplicativos-globais": "aplicativosGlobais",
 };
 
 /**
@@ -117,6 +125,7 @@ const SUPERADMIN_ONLY_ROUTES = [
   "/app-nuvemshop",
   "/app-youtube",
   "/ia-plataforma",
+  "/aplicativos-globais",
 ];
 
 /**
@@ -175,6 +184,10 @@ const TENANT_ONLY_ROUTES = [
   "/nuvemshop",
   "/google-calendar",
   "/creditos-ia",
+  // Gestão das apps da empresa (o visualizador /ferramentas/<id> fica fora: o
+  // superadmin abre por ele as apps do provedor marcadas "no meu menu").
+  "/aplicativos",
+  "/formularios",
 ];
 
 export function useAuthGuard() {
@@ -269,15 +282,25 @@ export function useAuthGuard() {
       // subrota /agendamento-publico/x casaria "/agenda" (chave de outra feature).
       // Perfil do contato (/contatos/<id>) fica fora do menu e do teto do tenant:
       // quem decide o acesso é o backend (carteira ou atendimento que o usuário abre).
-      const routeName = CONTACT_PROFILE_ROUTE.test(pathname)
+      // App personalizada aberta (/ferramentas/<id>, PANEL_APP_VIEW_ROUTE): idem, para todos os
+      // perfis (o superadmin nem passa por aqui e não tem /ferramentas nas rotas de tenant).
+      // Quem vê cada app é o /panel-apps/mine + seletor único; fora da lista, a própria
+      // página mostra "aplicativo indisponível".
+      const routeName = CONTACT_PROFILE_ROUTE.test(pathname) || PANEL_APP_VIEW_ROUTE.test(pathname)
         ? undefined
         : PATHNAME_TO_ROUTE_NAME[pathname] ??
           Object.entries(PATHNAME_TO_ROUTE_NAME)
             .sort(([a], [b]) => b.length - a.length)
             .find(([path]) => pathname.startsWith(path))?.[1];
 
+      // Link de aviso de tarefa (/tarefas?taskId= ou ?from=reminder) de quem não abre a página:
+      // a própria página manda o pedido para o sino (D23 do PLANO_TAREFAS_ATENDIMENTO_LEMBRETES);
+      // o "Acesso negado" junto seria um aviso falso.
+      const taskReminderLink =
+        routeName === "tarefas" && typeof window !== "undefined" && /[?&](taskId|from)=/.test(window.location.search);
+
       if (routeName && isMenuRouteHidden(menuVisibility, routeName)) {
-        toast.error(t("accessDenied"));
+        if (!taskReminderLink) toast.error(t("accessDenied"));
         router.replace("/");
         return;
       }
@@ -286,7 +309,7 @@ export function useAuthGuard() {
       // menuPermissions do próprio usuário (sobrescrito no boot/refresh do
       // layout) — o que o superadmin desligou em /tenants só vive neste mapa.
       if (routeName && isMenuRouteHidden(tenantMenuVisibility || {}, routeName)) {
-        toast.error(t("accessDenied"));
+        if (!taskReminderLink) toast.error(t("accessDenied"));
         router.replace("/");
         return;
       }

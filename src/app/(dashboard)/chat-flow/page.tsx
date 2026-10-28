@@ -75,11 +75,17 @@ import {
   type AudienceValue,
 } from "@/components/chat-flow/audience-fields";
 
+// A checagem de acesso fica fora do componente com os hooks: se a permissão mudar com a
+// página aberta, trocar o componente inteiro não quebra a ordem dos hooks.
 export default function ChatFlowPage() {
-  const t = useTranslations("chatFlowPage");
-  const tAud = useTranslations("chatFlowAudience");
   const allowed = usePageAccess("chat-flow", { adminSuperOnly: true });
   if (!allowed) return <AccessDenied />;
+  return <ChatFlowPageContent />;
+}
+
+function ChatFlowPageContent() {
+  const t = useTranslations("chatFlowPage");
+  const tAud = useTranslations("chatFlowAudience");
   const [loading, setLoading] = useState(true);
   const [flows, setFlows] = useState<ChatFlowRecord[]>([]);
   const [search, setSearch] = useState("");
@@ -290,7 +296,7 @@ export default function ChatFlowPage() {
 
   const handleDuplicate = async (flow: ChatFlowRecord) => {
     try {
-      await duplicateChatFlow(flow.id, `${flow.name} (cópia)`);
+      await duplicateChatFlow(flow.id, `${flow.name} ${t("copySuffix")}`);
       loadFlows();
       toast.success(t("duplicateSuccess"));
     } catch {

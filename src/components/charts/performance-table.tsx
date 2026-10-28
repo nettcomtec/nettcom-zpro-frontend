@@ -8,7 +8,8 @@ import { useSortable } from "@/hooks/use-sortable";
 import { SortableTableHead } from "@/components/ui/sortable-table-head";
 import { Badge } from "@/components/ui/badge";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
-import { Star } from "lucide-react";
+import { Lock, Star } from "lucide-react";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { getInitials } from "@/lib/utils";
 import { formatDuration } from "@/services/dashboard";
 import type { RawUserDetail } from "@/services/dashboard";
@@ -35,6 +36,34 @@ function AnimatedNumber({ value, delay = 0, decimals = 0, enabled }: { value: nu
     return () => cancelAnimationFrame(raf);
   }, [enabled, value, delay, decimals]);
   return <>{decimals > 0 ? display.toFixed(decimals) : display}</>;
+}
+
+// Célula de avaliação sem nota: a dica abre no hover e também no toque (celular),
+// onde o tooltip do Radix sozinho não abre. O clique só ABRE: fechar é tocar fora.
+function RatingHint({ hint, children }: { hint: string; children: React.ReactNode }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <TooltipProvider>
+      <Tooltip open={open} onOpenChange={setOpen} delayDuration={100}>
+        <TooltipTrigger asChild>
+          <button
+            type="button"
+            aria-label={hint}
+            className="inline-flex items-center justify-center text-muted-foreground"
+            onClick={(e) => {
+              e.preventDefault();
+              setOpen(true);
+            }}
+          >
+            {children}
+          </button>
+        </TooltipTrigger>
+        <TooltipContent side="top" className="max-w-[260px] text-center font-normal">
+          {hint}
+        </TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
+  );
 }
 
 interface PerformanceTableProps {
@@ -65,7 +94,8 @@ export function PerformanceTable({ title, users }: PerformanceTableProps) {
 
   // Linhas decoradas para ordenação por qualquer coluna. Sem chave inicial:
   // a ordem recebida (default atual) é preservada até o primeiro clique.
-  // Durações/avaliação nulas ordenam como 0, espelhando o que a célula exibe.
+  // Durações nulas ordenam como 0, espelhando o que a célula exibe; avaliação
+  // sem nota (oculta ou inexistente) fica abaixo de qualquer nota, inclusive 0.
   const sortableRows = useMemo(
     () =>
       users.map((user) => ({
@@ -75,7 +105,7 @@ export function PerformanceTable({ title, users }: PerformanceTableProps) {
         emAtendimento: Number(user.qtd_em_atendimento ?? 0),
         resolvidos: Number(user.qtd_resolvidos ?? 0),
         total: Number(user.qtd_por_usuario ?? 0),
-        avaliacao: Math.round(Number(user.media_avaliacao ?? 0) * 10),
+        avaliacao: user.media_avaliacao != null ? Math.round(Number(user.media_avaliacao) * 10) : -1,
         tme: toMinutes(user.tme) ?? 0,
         tma: toMinutes(user.tma) ?? 0,
         tpr: toMinutes(user.tpr) ?? 0,
@@ -123,6 +153,7 @@ export function PerformanceTable({ title, users }: PerformanceTableProps) {
       resolvidos,
       total,
       ratingAvg: avg(rating),
+      ratingHidden: users.length > 0 && users.every((u) => u.avaliacao_oculta === true),
       tmeAvg: avg(tme),
       tmaAvg: avg(tma),
       tprAvg: avg(tpr),
@@ -191,12 +222,22 @@ export function PerformanceTable({ title, users }: PerformanceTableProps) {
                     </span>
                   </TableCell>
                   <TableCell className="text-center">
-                    <div className="flex items-center justify-center gap-0.5">
-                      <Star className="h-3 w-3 fill-yellow-400 text-yellow-400" />
-                      <span className="text-sm tabular-nums">
-                        <AnimatedNumber value={Number(user.media_avaliacao ?? 0)} delay={idx} decimals={1} enabled={inView} />
-                      </span>
-                    </div>
+                    {user.media_avaliacao != null ? (
+                      <div className="flex items-center justify-center gap-0.5">
+                        <Star className="h-3 w-3 fill-yellow-400 text-yellow-400" />
+                        <span className="text-sm tabular-nums">
+                          <AnimatedNumber value={Number(user.media_avaliacao)} delay={idx} decimals={1} enabled={inView} />
+                        </span>
+                      </div>
+                    ) : user.avaliacao_oculta === true ? (
+                      <RatingHint hint={t("ratingHidden")}>
+                        <Lock className="h-3.5 w-3.5" />
+                      </RatingHint>
+                    ) : (
+                      <RatingHint hint={user.avaliacao_oculta === false ? t("ratingNone") : t("ratingUnknown")}>
+                        <span className="text-sm">—</span>
+                      </RatingHint>
+                    )}
                   </TableCell>
                   <TableCell className="text-center text-sm text-muted-foreground">{formatDuration(user.tme)}</TableCell>
                   <TableCell className="text-center text-sm text-muted-foreground">{formatDuration(user.tma)}</TableCell>
@@ -214,7 +255,15 @@ export function PerformanceTable({ title, users }: PerformanceTableProps) {
                 <TableCell className="text-center tabular-nums">{totals.total}</TableCell>
                 <TableCell className="text-center tabular-nums">
                   <span className="block text-[10px] font-normal text-muted-foreground">{t("footerAvg")}</span>
-                  {totals.ratingAvg !== null ? totals.ratingAvg.toFixed(1) : "—"}
+                  {totals.ratingAvg !== null ? (
+                    totals.ratingAvg.toFixed(1)
+                  ) : totals.ratingHidden ? (
+                    <RatingHint hint={t("ratingHidden")}>
+                      <Lock className="h-3.5 w-3.5" />
+                    </RatingHint>
+                  ) : (
+                    "—"
+                  )}
                 </TableCell>
                 <TableCell className="text-center text-sm">
                   <span className="block text-[10px] font-normal text-muted-foreground">{t("footerAvg")}</span>

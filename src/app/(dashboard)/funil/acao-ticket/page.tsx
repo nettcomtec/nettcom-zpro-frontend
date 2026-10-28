@@ -2,6 +2,7 @@
 
 import React, { useState, useEffect, useCallback, useRef } from "react";
 import { isValidHttpUrl } from "@/lib/utils";
+import { isMetaTokenUnauthorized, metaRateLimitedMessage } from "@/lib/backend-error-code";
 import {
   isOrderDetailsTemplate,
   emptyOrderDetails,
@@ -64,13 +65,13 @@ import { AccessDenied } from "@/components/layout/access-denied";
 type ActionTypeValue = "message" | "media" | "add_tag" | "add_wallet" | "flow" | "waba_template";
 
 // Channels that support WhatsApp messaging
-const WA_CHANNEL_TYPES = ["waba", "waba_oauth", "whatsapp", "baileys", "zapo", "evo", "evogo", "zapi", "uazapi", "wuzapi"];
+const WA_CHANNEL_TYPES = ["waba", "waba_oauth", "whatsapp", "baileys", "zapo", "evo", "evogo", "zapi", "uazapi", "meow"];
 // Channels that support WABA templates
 // BSPs (gupshup, dialog360) também suportam templates — incluídos no select.
 const WABA_ONLY_TYPES = ["waba", "waba_oauth", "gupshup", "dialog360"];
 // Canais de sessao que entregam midia (MediaField) de forma confiavel fora de janela.
 // WABA/BSP ficam de fora: midia so dentro de 24h (acoes disparam apos horas, normalmente >24h).
-const MEDIA_CHANNEL_TYPES = ["whatsapp", "baileys", "zapo", "evo", "evogo", "zapi", "uazapi"];
+const MEDIA_CHANNEL_TYPES = ["whatsapp", "baileys", "zapo", "evo", "evogo", "zapi", "uazapi", "meow"];
 
 interface WhatsappOption {
   id: number;
@@ -231,6 +232,7 @@ export default function FunilAcaoTicketPage() {
 function FunilAcaoTicketPageContent() {
   const t = useTranslations("funilAcaoTicketPage");
   const tErrors = useTranslations("errors");
+  const tCommon = useTranslations("common");
   const tOrder = useTranslations("orderDetails");
 
   const ACTION_TYPES: { value: ActionTypeValue; label: string }[] = [
@@ -366,7 +368,7 @@ function FunilAcaoTicketPageContent() {
           if (found) setSelectedTemplate(found);
         }
       })
-      .catch(() => { toast.error(tErrors("loadFailed")); })
+      .catch((err) => { toast.error(metaRateLimitedMessage(err, tCommon) ?? (isMetaTokenUnauthorized(err) ? tCommon("metaTokenInvalidReconnect") : tErrors("loadFailed"))); })
       .finally(() => setLoadingTemplates(false));
   }, [form.actionType, form.whatsappId]);
 
@@ -818,7 +820,7 @@ function FunilAcaoTicketPageContent() {
                     onValueChange={(v) => setForm((f) => ({ ...f, whatsappId: v ? Number(v) : undefined }))}
                   >
                     <SelectTrigger>
-                      <SelectValue placeholder="Selecione" />
+                      <SelectValue placeholder={t("selectPlaceholder")} />
                     </SelectTrigger>
                     <SelectContent>
                       {waWhatsapps.map((w) => (
@@ -871,7 +873,7 @@ function FunilAcaoTicketPageContent() {
                     onValueChange={(v) => setForm((f) => ({ ...f, whatsappId: v ? Number(v) : undefined }))}
                   >
                     <SelectTrigger>
-                      <SelectValue placeholder="Selecione" />
+                      <SelectValue placeholder={t("selectPlaceholder")} />
                     </SelectTrigger>
                     <SelectContent>
                       {mediaWhatsapps.map((w) => (
@@ -899,7 +901,7 @@ function FunilAcaoTicketPageContent() {
                     }}
                   >
                     <SelectTrigger>
-                      <SelectValue placeholder="Selecione" />
+                      <SelectValue placeholder={t("selectPlaceholder")} />
                     </SelectTrigger>
                     <SelectContent>
                       {wabaWhatsapps.map((w) => (
@@ -934,7 +936,7 @@ function FunilAcaoTicketPageContent() {
                         }}
                       >
                         <SelectTrigger>
-                          <SelectValue placeholder="Selecione" />
+                          <SelectValue placeholder={t("selectPlaceholder")} />
                         </SelectTrigger>
                         <SelectContent>
                           {templates.map((tpl) => (
@@ -999,7 +1001,7 @@ function FunilAcaoTicketPageContent() {
                   onValueChange={(v) => setForm((f) => ({ ...f, tagId: v ? Number(v) : undefined }))}
                 >
                   <SelectTrigger>
-                    <SelectValue placeholder="Selecione" />
+                    <SelectValue placeholder={t("selectPlaceholder")} />
                   </SelectTrigger>
                   <SelectContent>
                     {tags.map((tag) => (
@@ -1019,7 +1021,7 @@ function FunilAcaoTicketPageContent() {
                   onValueChange={(v) => setForm((f) => ({ ...f, walletId: v ? Number(v) : undefined }))}
                 >
                   <SelectTrigger>
-                    <SelectValue placeholder="Selecione" />
+                    <SelectValue placeholder={t("selectPlaceholder")} />
                   </SelectTrigger>
                   <SelectContent>
                     {users.map((u) => (

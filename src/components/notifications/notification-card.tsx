@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useEffect, useRef, useState, useMemo } from "react";
+import { useTranslations } from "next-intl";
 import { Pencil, Trash2, Users } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -104,6 +105,7 @@ function NotificationPreview({ message }: { message: string }) {
 }
 
 export function NotificationCard({ notification, onEdit, onDelete }: NotificationCardProps) {
+  const t = useTranslations("notificacaoPage");
   const unread = notification.totalCount - notification.readCount;
   const displayUsers = notification.users.slice(0, 3);
   const remaining = notification.users.length - displayUsers.length;
@@ -117,10 +119,10 @@ export function NotificationCard({ notification, onEdit, onDelete }: Notificatio
       <div className="flex items-center justify-between gap-2 px-3 py-2 border-b bg-muted/40">
         <div className="flex items-center gap-2 min-w-0">
           <Users className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
-          <span className="text-xs text-muted-foreground">{notification.totalCount} usuários</span>
+          <span className="text-xs text-muted-foreground">{t("cardUsersCount", { count: notification.totalCount })}</span>
           {unread > 0 && (
             <Badge variant="warning" className="text-[10px] px-1.5 py-0">
-              {unread} não lidas
+              {t("cardUnreadCount", { count: unread })}
             </Badge>
           )}
           {notification.firstNotification.source === "chatflow" && (

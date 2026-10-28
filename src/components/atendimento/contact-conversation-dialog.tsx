@@ -28,6 +28,7 @@ import { fetchContact, updateContactTags } from "@/services/contacts";
 import { fetchTags, type Tag } from "@/services/tags";
 import { useAuthStore } from "@/stores/auth-store";
 import { isTicketAccessDenied } from "@/lib/ticket-access-denied";
+import { isTagNotFound } from "@/lib/backend-error-code";
 
 export interface ConversationContact {
   id: number;
@@ -68,17 +69,22 @@ export function ContactConversationDialog({
   const tCrm = useTranslations("contactCrm");
   // "Você não tem acesso a este atendimento" — mesma mensagem do guard de acesso da tela
   const tAtdChat = useTranslations("atendimentoChat");
+  const tCommon = useTranslations("common");
   const { user, isRestrictedUser } = useAuthStore();
 
   const handleError = useCallback(() => {
     // Mantém o dialog aberto: as abas de etiquetas/notificação funcionam sem histórico
   }, []);
 
-  const { messages, loading, loadingMore, hasMore, loadPrevious, lastTicket, appendMessage } = useSpyMessages(
+  const { messages, loading, loadingMore, hasMore, loadPrevious, lastTicket: visibleLastTicket, appendMessage, hiddenActiveTicket } = useSpyMessages(
     open,
     contact?.id ?? null,
     handleError
   );
+  // Atendimento ativo de outro atendente escondido ("não ver atendimentos de outros"):
+  // responder/transferir pelo último atendimento VISÍVEL sairia pelo canal enquanto o colega
+  // atende — antes isso voltava 403. Trava as duas ações e mostra o motivo.
+  const lastTicket = hiddenActiveTicket ? null : visibleLastTicket;
 
   // Ticket completo (canal + tokenAPI) para envio em canais Meta
   const [ticketInfo, setTicketInfo] = useState<TicketInfo | null>(null);
@@ -106,7 +112,7 @@ export function ContactConversationDialog({
     const body = replyText.trim();
     if (!body || sending) return;
     if (!lastTicket?.id) {
-      toast.error(t("noTicketToReply"));
+      toast.error(hiddenActiveTicket ? tAtdChat("noTicketAccess") : t("noTicketToReply"));
       return;
     }
     setSending(true);
@@ -253,9 +259,9 @@ export function ContactConversationDialog({
     try {
       await updateContactTags(contact.id, next.map((tg) => tg.id));
       onChanged?.();
-    } catch {
+    } catch (err) {
       setContactTags(prev);
-      toast.error(t("tagsError"));
+      toast.error(isTagNotFound(err) ? tCommon("tagNotFoundReload") : t("tagsError"));
     } finally {
       setTagsBusy(false);
     }
@@ -335,7 +341,7 @@ export function ContactConversationDialog({
                     void handleSendReply();
                   }
                 }}
-                placeholder={lastTicket ? t("replyPlaceholder") : t("noTicketToReply")}
+                placeholder={lastTicket ? t("replyPlaceholder") : hiddenActiveTicket ? tAtdChat("noTicketAccess") : t("noTicketToReply")}
                 rows={1}
                 disabled={!lastTicket || sending}
                 className="resize-none min-h-[38px] max-h-28"
@@ -348,7 +354,7 @@ export function ContactConversationDialog({
 
           <TabsContent value="transferir" className="mt-0 p-4 space-y-4 data-[state=inactive]:hidden">
             {!lastTicket ? (
-              <p className="text-sm text-muted-foreground">{t("noTicketToReply")}</p>
+              <p className="text-sm text-muted-foreground">{hiddenActiveTicket ? tAtdChat("noTicketAccess") : t("noTicketToReply")}</p>
             ) : (
               <>
                 <div className="space-y-2">

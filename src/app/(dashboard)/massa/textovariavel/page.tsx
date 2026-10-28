@@ -614,11 +614,11 @@ export default function MassaTextoVariavelPage() {
           </div>
           <div className="md:col-span-1 space-y-2">
             <Label>{t("minSeconds")}</Label>
-            <Input placeholder="Ex: 1" value={minDelay} onChange={(e) => setMinDelay(e.target.value)} />
+            <Input placeholder={t("minSecondsPlaceholder")} value={minDelay} onChange={(e) => setMinDelay(e.target.value)} />
           </div>
           <div className="md:col-span-1 space-y-2">
             <Label>{t("maxSeconds")}</Label>
-            <Input placeholder="Ex: 3" value={maxDelay} onChange={(e) => setMaxDelay(e.target.value)} />
+            <Input placeholder={t("maxSecondsPlaceholder")} value={maxDelay} onChange={(e) => setMaxDelay(e.target.value)} />
           </div>
         </div>
 
@@ -905,10 +905,10 @@ export default function MassaTextoVariavelPage() {
           {includeText && (
             <div className="space-y-1">
               <p className="text-xs text-muted-foreground">
-                {t.raw("varHint") as string}
+                {t("varHint")}
               </p>
               <Textarea
-                placeholder={"Olá {{var1}}, seu produto {{var2}} está disponível!"}
+                placeholder={t.raw("messageVarExample") as string}
                 value={message}
                 onChange={(e) => setMessage(e.target.value)}
                 rows={4}

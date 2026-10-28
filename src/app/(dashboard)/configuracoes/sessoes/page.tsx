@@ -4,7 +4,15 @@ import React, { useState, useEffect, useCallback, useRef } from "react";
 import { useTranslations } from "next-intl";
 import { getProxyBaseUrl, OAUTH_PROXY_URL } from "@/config/oauth-proxy";
 import { useOAuthProxyDomain } from "@/hooks/use-oauth-proxy-domain";
-import { channelCreateErrorKey } from "@/lib/channel-create-error";
+import { channelCreateErrorKey, channelCreateErrorDetail } from "@/lib/channel-create-error";
+import { getBackendErrorCode } from "@/lib/backend-error-code";
+import {
+  metaProxySuccessHasPhone,
+  readMetaProxyOnboardingUpdate,
+  describeMetaProxyOnboardingUpdate,
+  type MetaProxySuccessPayload,
+} from "@/hooks/use-meta-proxy-popup";
+import { invalidateWabaPinPendingCache } from "@/hooks/use-waba-pin-pending";
 import { PageHeader } from "@/components/layout/page-header";
 import { Card, CardContent, CardHeader, CardTitle, CardFooter } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -20,7 +28,7 @@ import {
 import {
   Wifi, WifiOff, Loader2, QrCode, Star, Trash2, RefreshCw, TriangleAlert,
   Plus, MessageCircle, Instagram, Facebook, Download,
-  ArrowDownAZ, Tag, Layers2, Building2, Signal,
+  ArrowDownAZ, Tag, Layers2, Building2, Signal, Lock,
 } from "lucide-react";
 import { toast } from "sonner";
 import { format, parseISO } from "date-fns";
@@ -32,7 +40,7 @@ import {
   setDefaultWhatsapp,
   resetBaileysConnection,
 } from "@/services/whatsapp";
-import { listActiveAppWabas, exchangeEmbeddedSignupCode, type AppWaba } from "@/services/waba-meta";
+import { listActiveAppWabas, type AppWaba } from "@/services/waba-meta";
 import { useWhatsappStore, type WhatsApp as Whatsapp } from "@/stores/whatsapp-store";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Label } from "@/components/ui/label";
@@ -305,16 +313,24 @@ export default function ConfigSessoesPage() {
   const [appWabaList, setAppWabaList] = useState<AppWaba[]>([]);
   const [selectedAppWabaId, setSelectedAppWabaId] = useState<string>("");
   const [showAddDialog, setShowAddDialog] = useState(false);
-  const [facebookSDKLoaded, setFacebookSDKLoaded] = useState(false);
   const [addingChannel, setAddingChannel] = useState(false);
-  const sdkScriptRef = useRef<HTMLScriptElement | null>(null);
   const proxyPopupRef = useRef<Window | null>(null);
+  // Última janela da Meta aberta aqui e o tipo dela: a escuta só aceita mensagem dessa
+  // janela (D12d — popups do Gupshup/Dialog360 vêm da mesma origem) e ela segue valendo
+  // depois do sucesso, para o resultado do registro automático do número.
+  const proxyPopupLastRef = useRef<Window | null>(null);
+  const proxyPopupKindRef = useRef<"waba" | "instagram" | "facebook" | null>(null);
+
+  // Credenciais que o popup da Meta exige (como em /sessoes): token de verificação do
+  // webhook e licença (e-mail da empresa). Tenant.oauthEnabled === false esconde o proxy.
+  const [tenantOAuthEnabled, setTenantOAuthEnabled] = useState<boolean>(true);
+  const tenantMetaTokenRef = useRef("");
+  const tenantLicenseKeyRef = useRef("");
 
   // Phase 12 — respects tenant's oauthCustomDomain when set, falls back to oauth.techprovider.com.br
   const { customDomain: oauthCustomDomain } = useOAuthProxyDomain();
-  const PROXY_URL = getProxyBaseUrl(oauthCustomDomain);
+  const PROXY_URL = tenantOAuthEnabled ? getProxyBaseUrl(oauthCustomDomain) : "";
 
-  const isHttps = typeof window !== "undefined" && window.location.protocol === "https:";
   const usingProxy = PROXY_URL !== "" && selectedAppWabaId === "__PROXY__";
   const appWaba = usingProxy ? null : (appWabaList.find((a) => String(a.id) === selectedAppWabaId) ?? null);
   const canWhatsApp = usingProxy || !!appWaba?.configId;
@@ -356,6 +372,27 @@ export default function ConfigSessoesPage() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // ── Dados da empresa para o popup da Meta (licença, token do webhook, oauthEnabled)
+  useEffect(() => {
+    fetchTenantById(tenantId)
+      .then(({ data }) => {
+        const d = (Array.isArray(data) ? data[0] : data) as Record<string, unknown> | undefined;
+        tenantMetaTokenRef.current = typeof d?.metaToken === "string" ? d.metaToken : "";
+        tenantLicenseKeyRef.current = typeof d?.tenantEmail === "string" ? d.tenantEmail : "";
+        // Tenant.oauthEnabled defaulta a true no model — undefined = habilitado.
+        setTenantOAuthEnabled(d?.oauthEnabled !== false);
+      })
+      .catch(() => {});
+  }, [tenantId]);
+
+  // Corrida entre a carga da empresa e a auto-seleção: com oauthEnabled === false o
+  // proxy some da lista e não pode ficar selecionado.
+  useEffect(() => {
+    if (!tenantOAuthEnabled && selectedAppWabaId === "__PROXY__") {
+      setSelectedAppWabaId(appWabaList[0] ? String(appWabaList[0].id) : "");
+    }
+  }, [tenantOAuthEnabled, selectedAppWabaId, appWabaList]);
+
   // ── Listen for OAuth popup callbacks (same-origin)
   useEffect(() => {
     function handleMessage(event: MessageEvent) {
@@ -380,26 +417,92 @@ export default function ConfigSessoesPage() {
   useEffect(() => {
     function handleProxyMessage(event: MessageEvent) {
       if (event.origin !== OAUTH_PROXY_URL) return;
+      // D12d: só a janela da Meta aberta por esta tela.
+      const source = event.source;
+      if (!source || (source !== proxyPopupRef.current && source !== proxyPopupLastRef.current)) return;
       const metaExpectedOrigin = OAUTH_PROXY_URL;
-      const { type, error, errorCode } = (event.data || {}) as { type?: string; error?: string; errorCode?: string | null; data?: unknown };
+      const { type, error, errorCode, data: msgData } = (event.data || {}) as { type?: string; error?: string; errorCode?: string | null; data?: unknown };
+      if (type === "proxy:onboarding-update") {
+        const { registeredPhoneId, notices } = describeMetaProxyOnboardingUpdate(
+          readMetaProxyOnboardingUpdate(event.data)
+        );
+        if (registeredPhoneId) {
+          invalidateWabaPinPendingCache({ phoneNumberId: registeredPhoneId, markRegistered: true });
+        }
+        notices.forEach((n) => {
+          if (n.level === "success") toast.success(tSess(n.key));
+          else toast.warning(tSess(n.key), { duration: 10000 });
+        });
+        return;
+      }
       if (type === "proxy:ready") {
         const popup = proxyPopupRef.current;
         if (!popup || popup.closed) return;
-        const rawToken = localStorage.getItem("token");
-        const authToken = rawToken ? JSON.parse(rawToken) : null;
-        const apiUrl = process.env.NEXT_PUBLIC_API_URL || window.location.origin;
+        // Mesmas credenciais do /sessoes: sem licença (e-mail da empresa) o popup
+        // reprova a conexão. Espera a carga da empresa (até ~10 s).
         const appWabaId = !usingProxy && appWaba?.id ? Number(appWaba.id) : null;
-        popup.postMessage(
-          { type: "proxy:credentials", apiUrl, authToken, tenantId: appWaba?.tenantId ?? null, webhookOrigin: usingProxy ? 'zdg_oauth' : 'own_app', appWabaId },
-          metaExpectedOrigin
-        );
-        // When using proxy mode, button is shown immediately after load signal — no extra wait needed
+        const webhookOrigin = usingProxy ? "zdg_oauth" : "own_app";
+        let tries = 0;
+        const sendCredentials = () => {
+          const p = proxyPopupRef.current;
+          if (!p || p.closed) return;
+          if (!tenantLicenseKeyRef.current && tries < 50) {
+            tries++;
+            setTimeout(sendCredentials, 200);
+            return;
+          }
+          let authToken: string | null = null;
+          try {
+            const rawToken = localStorage.getItem("token");
+            authToken = rawToken ? JSON.parse(rawToken) : null;
+          } catch {
+            authToken = null;
+          }
+          p.postMessage(
+            {
+              type: "proxy:credentials",
+              apiUrl: process.env.NEXT_PUBLIC_API_URL || window.location.origin,
+              authToken,
+              tenantId: user?.tenantId ?? appWaba?.tenantId ?? null,
+              metaToken: tenantMetaTokenRef.current,
+              licenseKey: tenantLicenseKeyRef.current,
+              webhookOrigin,
+              appWabaId,
+              // Este backend cria também o canal Instagram (EAA) pelo login do Facebook.
+              igViaFacebook: true,
+            },
+            metaExpectedOrigin
+          );
+        };
+        sendCredentials();
       } else if (type === "proxy:success") {
-        toast.success(t("whatsappChannelCreated"));
-        loadChannels();
-        setShowAddDialog(false);
+        const successData = (msgData && typeof msgData === "object" ? msgData : {}) as MetaProxySuccessPayload;
+        const isFacebookShape = Array.isArray(successData.pages) || Array.isArray(successData.instagram);
+        const isInstagramShape =
+          !isFacebookShape && (successData.userId != null || successData.user_id != null);
+        const successKind = isFacebookShape
+          ? "facebook"
+          : isInstagramShape
+            ? "instagram"
+            : (proxyPopupKindRef.current || "waba");
         setAddingChannel(false);
         proxyPopupRef.current = null;
+        if (successKind === "waba" && !metaProxySuccessHasPhone(successData)) {
+          // A Meta autorizou mas nenhum número veio: nenhum canal foi criado.
+          toast.warning(tSess("waConnectedNoPhone"), { duration: 10000 });
+          return;
+        }
+        if (successKind === "instagram") {
+          toast.success(tSess("instagramChannelConnected"));
+        } else if (successKind === "facebook") {
+          const pagesCount = Array.isArray(successData.pages) ? successData.pages.length : 0;
+          const igCount = Array.isArray(successData.instagram) ? successData.instagram.length : 0;
+          toast.success(pagesCount === 0 && igCount > 0 ? tSess("instagramChannelConnected") : tSess("facebookChannelConnected"));
+        } else {
+          toast.success(t("whatsappChannelCreated"));
+        }
+        loadChannels();
+        setShowAddDialog(false);
       } else if (type === "proxy:cancelled") {
         toast.info(t("whatsappOAuthCancelled"));
         setAddingChannel(false);
@@ -407,115 +510,57 @@ export default function ConfigSessoesPage() {
       } else if (type === "proxy:error") {
         // Proxy novo manda errorCode; proxy antigo so a mensagem — mesmo mapa.
         const key = channelCreateErrorKey(errorCode || error);
-        toast.error(key ? tSess(key) : (error || t("errorWhatsappOAuth")));
+        const description = channelCreateErrorDetail(errorCode, error);
+        toast.error(key ? tSess(key) : (error || t("errorWhatsappOAuth")), description ? { description } : undefined);
         setAddingChannel(false);
         proxyPopupRef.current = null;
       }
     }
     window.addEventListener("message", handleProxyMessage);
     return () => window.removeEventListener("message", handleProxyMessage);
-  }, [selectedAppWabaId, appWaba, loadChannels, t, tSess, oauthCustomDomain]);
+  }, [selectedAppWabaId, appWaba, loadChannels, t, tSess, oauthCustomDomain, usingProxy, user?.tenantId]);
 
   function buildMetaPopupUrl(channel: "waba" | "instagram" | "facebook"): string {
     const cb = encodeURIComponent(window.location.origin);
     return `${OAUTH_PROXY_URL}/${channel}-signup?callbackOrigin=${cb}`;
   }
 
-  // ── Reload FB SDK when selected app changes (needed for WhatsApp Embedded Signup)
-  useEffect(() => {
-    if (canWhatsApp && appWaba) {
-      // If SDK already loaded for a different appId, reinit
-      if (window.FB) {
-        window.FB.init({
-          appId: appWaba.appId,
-          cookie: true,
-          xfbml: true,
-          version: (appWaba as any).apiVersion || "v19.0",
-        });
-        setFacebookSDKLoaded(true);
-      } else {
-        loadFacebookSDK();
-      }
+  // Abre o popup da Meta (proxy ou app próprio — o popup decide pelas credenciais).
+  // O antigo caminho direto pelo SDK do Facebook nesta página saiu: nunca era
+  // alcançado (sem Config ID o botão nem aparece) e chamava a troca sem os dados do app.
+  function openMetaPopup(kind: "waba" | "instagram" | "facebook") {
+    const names = { waba: "waba-proxy-signup", instagram: "instagram-oauth", facebook: "facebook-oauth" } as const;
+    const features = kind === "waba" ? "width=600,height=700" : "width=600,height=700,scrollbars=yes,resizable=yes";
+    const popup = window.open(buildMetaPopupUrl(kind), names[kind], features);
+    if (!popup) {
+      toast.error(tSess("popupBlocked"));
+      return;
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedAppWabaId]);
-
-  function loadFacebookSDK() {
-    if (window.FB) { setFacebookSDKLoaded(true); return; }
-    if (sdkScriptRef.current) return;
-    window.fbAsyncInit = function () {
-      window.FB.init({
-        appId: appWaba!.appId,
-        cookie: true,
-        xfbml: true,
-        version: appWaba!.apiVersion || "v19.0",
-      });
-      setFacebookSDKLoaded(true);
-    };
-    const script = document.createElement("script");
-    script.src = "https://connect.facebook.net/en_US/sdk.js";
-    script.async = true;
-    script.defer = true;
-    document.body.appendChild(script);
-    sdkScriptRef.current = script;
+    proxyPopupRef.current = popup;
+    proxyPopupLastRef.current = popup;
+    proxyPopupKindRef.current = kind;
+    setAddingChannel(true);
+    // Janela fechada sem resposta: libera os botões.
+    const watchdog = window.setInterval(() => {
+      if (!popup.closed) return;
+      window.clearInterval(watchdog);
+      if (proxyPopupRef.current === popup) {
+        proxyPopupRef.current = null;
+        setAddingChannel(false);
+      }
+    }, 500);
   }
 
   function launchWhatsAppOAuth() {
-    if (usingProxy) {
-      setAddingChannel(true);
-      const popup = window.open(buildMetaPopupUrl("waba"), "waba-proxy-signup", "width=600,height=700");
-      proxyPopupRef.current = popup;
-      return;
-    }
-    if (appWaba?.configId) {
-      setAddingChannel(true);
-      const popup = window.open(buildMetaPopupUrl("waba"), "waba-proxy-signup", "width=600,height=700");
-      proxyPopupRef.current = popup;
-      return;
-    }
-    // Default: direct FB SDK flow
-    if (!isHttps) {
-      toast.error(t("whatsappOAuthRequiresHttps"));
-      return;
-    }
-    if (!window.FB) { toast.error(t("facebookSdkNotLoaded")); return; }
-    setAddingChannel(true);
-    window.FB.login(
-      (response: any) => {
-        if (response.authResponse?.code) {
-          exchangeEmbeddedSignupCode({ code: response.authResponse.code })
-            .then(() => {
-              toast.success(t("whatsappChannelCreated"));
-              loadChannels();
-              setShowAddDialog(false);
-            })
-            .catch((err: any) => {
-              toast.error(err?.response?.data?.message || t("errorWhatsappOAuth"));
-            })
-            .finally(() => setAddingChannel(false));
-        } else {
-          toast.info(t("whatsappOAuthCancelled"));
-          setAddingChannel(false);
-        }
-      },
-      {
-        config_id: appWaba!.configId,
-        response_type: "code",
-        override_default_response_type: true,
-        // whatsapp_business_app_onboarding: habilita onboarding de numero que ja
-        // esta no app WhatsApp Business (coexistencia) com opt-in de compartilhar
-        // o historico de conversas — mesmo featureType usado no oauth-proxy
-        extras: { setup: {}, featureType: "whatsapp_business_app_onboarding", sessionInfoVersion: "3" },
-      }
-    );
+    openMetaPopup("waba");
   }
 
-  async function launchInstagramOAuth() {
-    window.open(buildMetaPopupUrl("instagram"), "instagram-oauth", "width=600,height=700,scrollbars=yes,resizable=yes");
+  function launchInstagramOAuth() {
+    openMetaPopup("instagram");
   }
 
-  async function launchFacebookOAuth() {
-    window.open(buildMetaPopupUrl("facebook"), "facebook-oauth", "width=600,height=700,scrollbars=yes,resizable=yes");
+  function launchFacebookOAuth() {
+    openMetaPopup("facebook");
   }
 
   const handleConfirm = useCallback(async () => {
@@ -540,12 +585,22 @@ export default function ConfigSessoesPage() {
           toast.error(t("errorBaileysReset"));
         }
       }
-    } catch {
-      toast.error(t("errorAction"));
+    } catch (err: any) {
+      const code = getBackendErrorCode(err);
+      if (type === "delete" && code === "ERR_NO_WAPP_FOUND") {
+        // Já excluído em outra aba ou por outro usuário: só a lista estava velha.
+        removeWhatsappFromStore(item.id);
+        toast.info(tSess("channelAlreadyDeleted"));
+      } else if (type === "delete" && code === "ERR_WAPP_IN_USE") {
+        // Outro cadastro ainda aponta para o canal (o servidor recusa antes de desligar nada).
+        toast.error(tSess("channelInUse"));
+      } else {
+        toast.error(t("errorAction"));
+      }
     } finally {
       setBusy(item.id, false);
     }
-  }, [confirm, loadChannels]);
+  }, [confirm, loadChannels, removeWhatsappFromStore, t, tSess]);
 
   const handleSetDefault = useCallback(async (item: Whatsapp) => {
     setBusy(item.id, true);
@@ -869,7 +924,7 @@ export default function ConfigSessoesPage() {
             <DialogTitle>{t("addMetaDialogTitle")}</DialogTitle>
           </DialogHeader>
 
-          {appWabaList.length === 0 ? (
+          {appWabaList.length === 0 && !PROXY_URL ? (
             <p className="text-sm text-muted-foreground py-2">
               {t("noMetaApp")}
             </p>
@@ -882,8 +937,6 @@ export default function ConfigSessoesPage() {
                   value={selectedAppWabaId}
                   onValueChange={(v) => {
                     setSelectedAppWabaId(v);
-                    setFacebookSDKLoaded(false);
-                    sdkScriptRef.current = null;
                   }}
                 >
                   <SelectTrigger>
@@ -892,7 +945,10 @@ export default function ConfigSessoesPage() {
                   <SelectContent>
                     {PROXY_URL && (
                       <SelectItem value="__PROXY__">
-                        🔒 OAuth Proxy ({PROXY_URL.replace(/^https?:\/\//, "")})
+                        <span className="inline-flex items-center gap-1.5">
+                          <Lock className="h-3.5 w-3.5" />
+                          {tSess("oauthProxyLabel")} ({PROXY_URL.replace(/^https?:\/\//, "")})
+                        </span>
                       </SelectItem>
                     )}
                     {appWabaList.map((a) => (
@@ -904,7 +960,7 @@ export default function ConfigSessoesPage() {
                 </Select>
                 {usingProxy && (
                   <p className="text-xs text-muted-foreground">
-                    Credenciais gerenciadas pelo proxy — nenhuma configuração local necessária.
+                    {tSess("oauthProxyInfo")}
                   </p>
                 )}
                 {appWaba && (
@@ -921,7 +977,7 @@ export default function ConfigSessoesPage() {
                   {canWhatsApp && (
                     <button
                       onClick={launchWhatsAppOAuth}
-                      disabled={addingChannel || (!usingProxy && !isHttps)}
+                      disabled={addingChannel}
                       className="flex items-center gap-4 rounded-lg border p-4 text-left transition-colors hover:bg-muted disabled:opacity-50 disabled:cursor-not-allowed"
                     >
                       <div className="flex h-10 w-10 items-center justify-center rounded-full bg-green-100 shrink-0">
@@ -930,7 +986,7 @@ export default function ConfigSessoesPage() {
                       <div>
                         <p className="font-medium text-sm">WhatsApp OAuth</p>
                         <p className="text-xs text-muted-foreground">
-                          {(!usingProxy && !isHttps) ? t("requiresHttps") : addingChannel ? t("processing") : t("embeddedSignup")}
+                          {addingChannel ? t("processing") : t("embeddedSignup")}
                         </p>
                       </div>
                     </button>

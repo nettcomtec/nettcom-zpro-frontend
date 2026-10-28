@@ -18,6 +18,7 @@
 // dedicada.
 
 import { useEffect, useMemo, useState } from "react";
+import { useTranslations } from "next-intl";
 import {
   Select,
   SelectContent,
@@ -77,10 +78,12 @@ export function TemplatePickerByChannel({
   value,
   onChange,
   disabled,
-  placeholderLoading = "Carregando...",
-  placeholderSelect = "Selecione um template",
+  placeholderLoading,
+  placeholderSelect,
   className,
 }: TemplatePickerByChannelProps) {
+  const tCommon = useTranslations("common");
+  const tPicker = useTranslations("templatePickerByChannel");
   const [templates, setTemplates] = useState<MinimalTemplate[]>([]);
   const [loading, setLoading] = useState(false);
   const [categoryFilter, setCategoryFilter] = useState<TemplateCategoryFilter>("all");
@@ -163,7 +166,7 @@ export function TemplatePickerByChannel({
       >
         <SelectTrigger className={className}>
           <SelectValue
-            placeholder={loading ? placeholderLoading : placeholderSelect}
+            placeholder={loading ? (placeholderLoading ?? tCommon("loading")) : (placeholderSelect ?? tPicker("selectTemplate"))}
           />
         </SelectTrigger>
         <SelectContent>

@@ -20,6 +20,8 @@ import {
 } from "@/services/support-chat";
 import { getInitials } from "@/lib/utils";
 import { validateChatFile, formatMaxFileSize, namePastedFile, shouldDeferPasteToText } from "@/lib/chat-upload-validation";
+import { buildMediaDownloadProxyUrl } from "@/lib/media-fetch";
+import { LinkPreviewCard } from "@/components/common/link-preview";
 import { format, isToday } from "date-fns";
 import { toast } from "sonner";
 
@@ -31,75 +33,11 @@ function getMediaUrl(msg: SupportMessage): string {
   return `${backendUrl}/public/${msg.tenantId}/${msg.mediaUrl}`;
 }
 
-// ── Link preview helpers (same pattern as message-bubble) ──────────────────
-interface LinkPreviewData {
-  url: string;
-  title?: string;
-  description?: string;
-  image?: string;
-  hostname?: string;
-}
-const LP_PREFIX = "lp_cache_";
-const LP_TTL = 1000 * 60 * 60 * 24;
-function lpReadCache(url: string): LinkPreviewData | null {
-  try {
-    const raw = localStorage.getItem(LP_PREFIX + url);
-    if (!raw) return null;
-    const { data, ts } = JSON.parse(raw) as { data: LinkPreviewData; ts: number };
-    if (Date.now() - ts > LP_TTL) { localStorage.removeItem(LP_PREFIX + url); return null; }
-    return data;
-  } catch { return null; }
-}
-function lpWriteCache(url: string, data: LinkPreviewData) {
-  try { localStorage.setItem(LP_PREFIX + url, JSON.stringify({ data, ts: Date.now() })); } catch { /* quota */ }
-}
+// ── Link preview ────────────────────────────────────────────────────────────
 function extractFirstUrl(text: string | null | undefined): string | null {
   if (!text) return null;
   const m = text.match(/https?:\/\/[^\s<>"]+/);
   return m ? m[0] : null;
-}
-function LinkPreview({ url }: { url: string }) {
-  const [data, setData] = useState<LinkPreviewData | null>(() => lpReadCache(url));
-  const [loading, setLoading] = useState(() => lpReadCache(url) === null);
-  useEffect(() => {
-    const cached = lpReadCache(url);
-    if (cached) { setData(cached); setLoading(false); return; }
-    let cancelled = false;
-    const t = setTimeout(() => {
-      fetch(`/api/link-preview?url=${encodeURIComponent(url)}`)
-        .then((r) => r.json())
-        .then((d: LinkPreviewData) => { if (!cancelled) { lpWriteCache(url, d); setData(d); } })
-        .catch(() => { if (!cancelled) setData(null); })
-        .finally(() => { if (!cancelled) setLoading(false); });
-    }, 150);
-    return () => { cancelled = true; clearTimeout(t); };
-  }, [url]);
-  if (loading) return (
-    <div className="mt-1.5 rounded-lg border bg-muted/20 overflow-hidden max-w-[240px]">
-      <div className="h-[60px] bg-muted/40 flex items-center justify-center">
-        <svg className="h-4 w-4 animate-spin text-muted-foreground/50" viewBox="0 0 24 24" fill="none">
-          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
-          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"/>
-        </svg>
-      </div>
-    </div>
-  );
-  if (!data || (!data.title && !data.image)) return null;
-  return (
-    <a href={url} target="_blank" rel="noopener noreferrer"
-      className="mt-1.5 block rounded-lg border bg-muted/20 overflow-hidden max-w-[240px] hover:bg-muted/30 transition-colors">
-      {data.image && (
-        // eslint-disable-next-line @next/next/no-img-element
-        <img src={data.image} alt="" className="w-full h-[100px] object-cover"
-          onError={(e) => { (e.target as HTMLImageElement).style.display = "none"; }} />
-      )}
-      <div className="p-2 space-y-0.5">
-        {data.hostname && <p className="text-[10px] text-muted-foreground uppercase tracking-wide">{data.hostname}</p>}
-        {data.title && <p className="text-xs font-semibold line-clamp-2 leading-snug">{data.title}</p>}
-        {data.description && <p className="text-[11px] text-muted-foreground line-clamp-2">{data.description}</p>}
-      </div>
-    </a>
-  );
 }
 
 // ── Message bubble content ─────────────────────────────────────────────────
@@ -134,9 +72,13 @@ function MessageContent({ msg, isMine }: { msg: SupportMessage; isMine: boolean 
   const downloadFile = (url: string, name = "arquivo") => {
     const isExternal = url.startsWith("http://") || url.startsWith("https://")
     const opts: RequestInit = isExternal ? { credentials: "omit" } : { credentials: "include" }
-    fetch(url, opts).then((r) => r.blob()).then((blob) => {
+    fetch(url, opts).then((r) => { if (!r.ok) throw new Error("not ok"); return r.blob(); }).then((blob) => {
       const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 2000);
-    }).catch(() => { const a = document.createElement("a"); a.href = url; a.download = name; a.click(); });
+    }).catch(() => {
+      // Bucket S3/R2 sem CORS: o "download" é ignorado em URL de outro domínio e o arquivo só abria. A rota do front devolve como anexo.
+      const a = document.createElement("a"); a.href = isExternal ? buildMediaDownloadProxyUrl(url, name) : url; a.download = name;
+      document.body.appendChild(a); a.click(); a.remove();
+    });
   };
 
   const mediaUrl = getMediaUrl(msg);
@@ -208,7 +150,7 @@ function MessageContent({ msg, isMine }: { msg: SupportMessage; isMine: boolean 
   return (
     <div>
       <p className="text-sm break-words whitespace-pre-wrap">{msg.text}</p>
-      {firstUrl && <LinkPreview url={firstUrl} />}
+      {firstUrl && <LinkPreviewCard url={firstUrl} size="xs" className="mt-1.5" />}
     </div>
   );
 }

@@ -104,6 +104,14 @@ export async function registerPhone(data: Record<string, unknown>) {
   return api.post("/wabametaRegisterPhone", data);
 }
 
+// Define um novo PIN da verificação em duas etapas do número (saída para quem perdeu
+// o PIN). Token e versão vêm do canal no servidor; só canal WABA da própria empresa.
+// 200 {success:true}; erro {error, code?} (400/403/404). 404 sem
+// error === "ERR_WHATSAPP_NOT_FOUND" = backend sem a rota (versão antiga).
+export async function setPhonePin(data: { whatsappId: number; pin: string }) {
+  return api.post<{ success?: boolean }>("/wabametaSetPhonePin", data);
+}
+
 export async function getPhoneById(data: Record<string, unknown>) {
   return api.post("/wabametaGetPhoneById", data);
 }

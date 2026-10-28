@@ -28,8 +28,11 @@ import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import {
   Search, Plus, Pencil, Trash2, Users, Shield, ShieldCheck, User, UserCog, Phone,
   GitBranch, Smartphone, UserX, UserCheck, ChevronRight, Clock, PhoneCall, Loader2, Mail,
-  AlertTriangle,
+  AlertTriangle, Lock, Info,
 } from "lucide-react";
+import {
+  Tooltip, TooltipContent, TooltipProvider, TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { toast } from "sonner";
 import { cn, getInitials } from "@/lib/utils";
 import { formatDateTime } from "@/lib/format";
@@ -47,6 +50,12 @@ import { useAuthStore } from "@/stores/auth-store";
 import { useSortable } from "@/hooks/use-sortable";
 import { SortableTableHead } from "@/components/ui/sortable-table-head";
 import { PhoneInput } from "@/components/ui/phone-input";
+import { SipConnectionTest } from "@/components/webphone/sip-connection-test";
+import { parseSipKeepAliveField, SIP_KEEPALIVE_DEFAULT_SECONDS } from "@/lib/sip-link";
+import { getBackendErrorCode } from "@/lib/backend-error-code";
+
+// Texto que o backend devolve (cadastro e edição) para e-mail que outro usuário já usa.
+const DUPLICATE_USER_EMAIL_MESSAGE = "An user with this email already exists.";
 
 // ── Menu permission keys (labels resolved inside component via t()) ─────────
 const ALL_MENU_PERMISSION_KEYS = [
@@ -54,13 +63,20 @@ const ALL_MENU_PERMISSION_KEYS = [
   "relatorios", "painel-atendimentos", "filas", "equipes", "mensagens-rapidas", "chat-flow",
   "agendamentos", "aniversarios", "fechamento", "etiquetas", "notas",
   "protocolos", "avaliacoes", "horarioAtendimento", "campanhas", "contatos",
-  "google-calendar", "agendamento-publico", "email-marketing",
+  "google-calendar", "agendamento-publico", "formularios", "email-marketing",
+  "instagramComentarios", "facebookComentarios",
 ];
 
-const USER_ONLY_PERMS = ["massa", "campanhas", "grupo", "chat-privado", "kanban", "funil", "tarefas", "agenda", "contatos"];
+const USER_ONLY_PERMS = ["massa", "campanhas", "grupo", "chat-privado", "kanban", "funil", "tarefas", "agenda", "contatos", "instagramComentarios", "facebookComentarios"];
+
+// Comentários do Instagram/Facebook só abrem com a chave MARCADA (usePageAccess exige
+// `=== true`): chave ausente no cadastro = desmarcada, nunca o default true dos outros
+// menus — senão abrir e salvar um usuário antigo concederia o acesso sem ninguém marcar.
+// O valor já gravado vale como está (o backend grava true por padrão desde abril/2026).
+const OPT_IN_MENU_PERMISSION_KEYS = ["instagramComentarios", "facebookComentarios"];
 
 const DEFAULT_MENU: Record<string, boolean> = Object.fromEntries(
-  ALL_MENU_PERMISSION_KEYS.map((k) => [k, true])
+  ALL_MENU_PERMISSION_KEYS.map((k) => [k, !OPT_IN_MENU_PERMISSION_KEYS.includes(k)])
 );
 
 // ── Hierarquia de perfis ────────────────────────────────────────────────────
@@ -94,6 +110,8 @@ interface ExtUser extends UserType {
   sipDomain?: string;
   sipPort?: number;
   sipTransport?: string;
+  /** Ausente = backend antigo ou coluna sem migration (o WebPhone usa o padrão). */
+  sipKeepAliveInterval?: number | null;
   businessHours?: BusinessHour[];
   menuPermissions?: Record<string, boolean>;
   customProfileId?: number | null;
@@ -115,6 +133,8 @@ interface FormState {
   sipDomain: string;
   sipPort: number;
   sipTransport: "wss" | "ws" | "udp";
+  /** Segundos em texto: "" = padrão, "0" = desligado. */
+  sipKeepAliveInterval: string;
   menuPermissions: Record<string, boolean>;
   businessHours: BusinessHour[];
   supervisorViewDept: boolean;
@@ -125,11 +145,34 @@ const EMPTY_FORM: FormState = {
   name: "", email: "", password: "", profile: "user", phone: "",
   blockWavoip: false, restrictedUser: "disabled",
   sipEnabled: false, sipUsername: "", sipPassword: "", sipServer: "", sipDomain: "", sipPort: 8089, sipTransport: "wss",
+  sipKeepAliveInterval: "",
   menuPermissions: { ...DEFAULT_MENU },
   businessHours: getDefaultBusinessHours(),
   supervisorViewDept: false,
   customProfileId: null,
 };
+
+// Horário salvo sem algum dos 7 dias (gravado pela API ou dado antigo): o editor só
+// desenha os dias que existem e o servidor procura o dia de hoje nessa lista — sem
+// ele o login do atendente é recusado naquele dia e a conferência do horário quebra.
+// Completa só os dias que faltam com o padrão de usuário novo, de domingo a sábado;
+// o dia que existe fica como veio. Sem lista, o padrão inteiro, como antes.
+function withAllBusinessDays(raw: unknown): BusinessHour[] {
+  const defaults = getDefaultBusinessHours();
+  if (!Array.isArray(raw) || raw.length === 0) return defaults;
+  const entries = raw as Array<{ day?: unknown } | null | undefined>;
+  return defaults.map((fallback) => {
+    // Mesma busca do servidor (dia numérico, a primeira que casa). Dia gravado como
+    // texto ("1") só entra na falta dela, já como número: assim o servidor o acha.
+    const exact = entries.find((h) => h?.day === fallback.day);
+    if (exact) return exact as unknown as BusinessHour;
+    const asText = entries.find((h) => {
+      const day = h?.day;
+      return typeof day === "string" && /^\d+$/.test(day.trim()) && Number(day) === fallback.day;
+    });
+    return asText ? ({ ...asText, day: fallback.day } as unknown as BusinessHour) : fallback;
+  });
+}
 
 const CHANNEL_GROUP: Record<string, string> = {
   waba: "meta", instagram: "meta", messenger: "meta",
@@ -148,6 +191,7 @@ export default function UsuariosPage() {
   const tBh = useTranslations("businessHoursEditor");
   const tSidebar = useTranslations("layoutSidebar");
   const tCommon = useTranslations("common");
+  const tCustomProfiles = useTranslations("customProfiles");
   const tUnsaved = useTranslations("flowBuilderNodeForm");
   const allowed = usePageAccess("usuarios", { adminSuperOnly: true });
 
@@ -179,7 +223,10 @@ export default function UsuariosPage() {
     "contatos": t("menuContatos"),
     "google-calendar": t("menuGoogleCalendar"),
     "agendamento-publico": tSidebar("item.agendamentoPublico"),
+    "formularios": tSidebar("item.formularios"),
     "painel-atendimentos": tSidebar("item.painelAtendimentos"),
+    "instagramComentarios": tCustomProfiles("menuLabels.instagramComentarios"),
+    "facebookComentarios": tCustomProfiles("menuLabels.facebookComentarios"),
   };
 
   const ALL_MENU_PERMISSIONS = ALL_MENU_PERMISSION_KEYS.map((key) => ({
@@ -371,9 +418,9 @@ export default function UsuariosPage() {
       sipDomain: u.sipDomain ?? "",
       sipPort: u.sipPort ?? 8089,
       sipTransport: (["wss", "ws", "udp"].includes(u.sipTransport ?? "") ? (u.sipTransport as "wss" | "ws" | "udp") : "wss"),
+      sipKeepAliveInterval: u.sipKeepAliveInterval === null || u.sipKeepAliveInterval === undefined ? "" : String(u.sipKeepAliveInterval),
       menuPermissions: menu,
-      businessHours: Array.isArray(u.businessHours) && u.businessHours.length > 0
-        ? u.businessHours : getDefaultBusinessHours(),
+      businessHours: withAllBusinessDays(u.businessHours),
       supervisorViewDept: uConfigs?.supervisorViewDept === "enabled",
       customProfileId: (u as { customProfileId?: number | null }).customProfileId ?? null,
     });
@@ -404,6 +451,16 @@ export default function UsuariosPage() {
     // Horário de Atendimento só é validado quando ele de fato viaja no payload: na
     // auto-edição sem gestão o editor nem é renderizado (o backend descarta o campo), e
     // validar um valor invisível prenderia o usuário fora de mudar o próprio nome.
+    // Keep-alive só viaja junto da Config SIP (gestão) e só é conferido com o campo
+    // habilitado: valor inválido num campo desabilitado (SIP desligado, UDP) não trava o
+    // salvar, só não é enviado.
+    const sipKeepAliveValue = parseSipKeepAliveField(form.sipKeepAliveInterval);
+    const sipKeepAliveEditable = form.sipEnabled && form.sipTransport !== "udp";
+    if (!selfEditStripsManagedFields && sipKeepAliveEditable && sipKeepAliveValue === "invalid") {
+      setSipOpen(true);
+      toast.error(t("sipKeepAliveInvalid"));
+      return;
+    }
     if (!selfEditStripsManagedFields) {
       const bhError = validateBusinessHours(form.businessHours);
       if (bhError === "empty") { toast.error(tBh("validationEmptyTime")); return; }
@@ -412,9 +469,12 @@ export default function UsuariosPage() {
     setSaving(true);
     try {
       // Só nome/telefone (e foto, por rota própria) são dados que o dono da conta mantém.
+      // Telefone (2FA): o campo vazio emite "". Só o DDI também é vazio — o campo antigo
+      // gravava "55" quando era esvaziado, e o código do 2FA ia para esse "número".
+      const phoneValue = String(form.phone || "");
       const payload: Record<string, unknown> = {
         name: form.name,
-        phone: form.phone || "",
+        phone: phoneValue.replace(/\D/g, "").length > 4 ? phoneValue : "",
       };
       // Campos que a GESTÃO decide SOBRE a conta. Na auto-edição sem gestão do próprio
       // escopo o backend os remove do body (SELF_PROTECTED_USER_FIELDS_ZPRO), então
@@ -424,12 +484,19 @@ export default function UsuariosPage() {
         payload.blockWavoip = form.blockWavoip;
         payload.restrictedUser = form.restrictedUser;
         payload.sipEnabled = form.sipEnabled;
-        payload.sipUsername = form.sipUsername;
+        // Aparados como no "Testar conexão": com espaço sobrando o sip.js não monta a URI.
+        payload.sipUsername = form.sipUsername.trim();
         payload.sipPassword = form.sipPassword;
-        payload.sipServer = form.sipServer;
+        payload.sipServer = form.sipServer.trim();
         payload.sipDomain = form.sipDomain.trim();
         payload.sipPort = form.sipPort;
         payload.sipTransport = form.sipTransport;
+        // Sem a chave na lista (servidor sem a coluna ou leitura que falhou) o campo aparece
+        // vazio: mandar vazio gravaria o padrão por cima de um 0. Aí só vai o que foi digitado.
+        const keepAliveKnown = !editing || editing.sipKeepAliveInterval !== undefined;
+        if (sipKeepAliveValue !== "invalid" && (keepAliveKnown || sipKeepAliveValue !== null)) {
+          payload.sipKeepAliveInterval = sipKeepAliveValue;
+        }
         payload.businessHours = form.businessHours;
       }
       if (!isSelfEdit) {
@@ -441,8 +508,16 @@ export default function UsuariosPage() {
       // `password` também está na lista de descarte da auto-edição sem gestão — o caminho
       // legítimo é PUT /users/change-password (tela /trocar-senha), que exige a senha atual.
       if (form.password && !selfEditStripsManagedFields) payload.password = form.password;
+      // Valor pedido (fora o padrão) que o servidor não devolveu = não gravou (servidor sem a
+      // coluna ainda): avisa em vez do "salvo" mudo.
+      const warnKeepAliveNotSaved = (saved: unknown) => {
+        const wanted = payload.sipKeepAliveInterval;
+        if (wanted === undefined || wanted === null) return;
+        const data = (saved as { data?: Record<string, unknown> } | null)?.data;
+        if (!data || !("sipKeepAliveInterval" in data)) toast.warning(t("sipKeepAliveNotSaved"));
+      };
       if (editing) {
-        await updateUser(editing.id, payload);
+        warnKeepAliveNotSaved(await updateUser(editing.id, payload));
         // Gate espelhado do backend (admin/superadmin sempre; super admin-like só em OUTRO
         // usuário, nunca em si mesmo — senão desligaria a própria restrição de departamento).
         // Sem este guard o salvamento tomava 403 aqui, depois do updateUser já ter gravado —
@@ -470,7 +545,7 @@ export default function UsuariosPage() {
         let lastError: unknown = null;
         for (let attempt = 1; attempt <= maxAttempts; attempt++) {
           try {
-            await createUser(payload);
+            warnKeepAliveNotSaved(await createUser(payload));
             toast.success(t("userCreated"));
             lastError = null;
             break;
@@ -496,7 +571,8 @@ export default function UsuariosPage() {
             const isDuplicateEmail =
               errMsg.includes("SequelizeUniqueConstraintError") ||
               errMsg.includes("Validation error") ||
-              errMsg.includes("já cadastrado");
+              errMsg.includes("já cadastrado") ||
+              errMsg.includes(DUPLICATE_USER_EMAIL_MESSAGE);
             if (isDuplicateEmail) {
               setEmailError(t("emailAlreadyExists"));
               toast.error(t("emailAlreadyExists"));
@@ -515,8 +591,14 @@ export default function UsuariosPage() {
       }
       setDialogOpen(false);
       load();
-    } catch {
-      toast.error(editing ? t("errorUpdating") : t("errorCreating"));
+    } catch (err) {
+      // Edição com e-mail que outro usuário já usa: o backend responde a mesma mensagem do cadastro.
+      if (editing && getBackendErrorCode(err).includes(DUPLICATE_USER_EMAIL_MESSAGE)) {
+        setEmailError(t("emailAlreadyExists"));
+        toast.error(t("emailAlreadyExists"));
+      } else {
+        toast.error(editing ? t("errorUpdating") : t("errorCreating"));
+      }
     } finally {
       setSaving(false);
     }
@@ -666,8 +748,13 @@ export default function UsuariosPage() {
   // (+Personalizado), porque `custom` empata com `user` no degrau 0 e criar `super`
   // também tomaria 403. Ordem de exibição preservada.
   const actorProfileRank = getProfileRank(loggedUser?.profile);
+  // Só o administrador atribui perfil de acesso (o servidor recusa os demais desde
+  // 16/10/2026); quem edita um Personalizado existente continua vendo o valor atual
+  // pelo item extra de `profileSelectKeys`.
+  const actorIsAdmin = loggedUser?.profile === "admin" || loggedUser?.profile === "superadmin";
   const allowedProfileKeys = ["user", "super", "admin", "custom"].filter((key) => {
     if (key === "custom" && !customProfileEnabled) return false; // regra que já existia
+    if (key === "custom" && !actorIsAdmin) return false;
     return getProfileRank(key) <= actorProfileRank;
   });
   // O valor ATUAL sempre precisa de um item correspondente: sem ele o Select renderiza o
@@ -831,8 +918,12 @@ export default function UsuariosPage() {
                 // em si mesmo `queues`/`whatsappAllowed` são descartados por ele não ser
                 // gestor). A expressão inteira é o espelho de `isSelfRow ?
                 // canManageOwnAccessScope : canManageOthers` do UserControllerZPRO.update.
+                // Usuário de nível ACIMA de quem está logado (supervisor diante de admin,
+                // personalizado diante de supervisor): o servidor recusa editar, inativar,
+                // excluir, filas/canais e Online dele desde 16/10/2026 — os botões somem.
+                const rowAboveMe = !isSelfRow && getProfileRank(u.profile) > actorProfileRank;
                 const canEditRowQueuesAndChannels =
-                  canManageUsers && !(loggedUser?.profile === "super" && isSelfRow);
+                  canManageUsers && !(loggedUser?.profile === "super" && isSelfRow) && !rowAboveMe;
                 return (
                   <TableRow key={u.id} className={rowClassName}>
                     <TableCell className={cellClassName}>
@@ -934,12 +1025,14 @@ export default function UsuariosPage() {
                           </Badge>
                         </span>
                       ) : (
-                        <Switch
-                          checked={!!u.isOnline}
-                          disabled={togglingOnlineId === u.id}
-                          onCheckedChange={() => handleToggleOnline(u)}
-                          aria-label={t("colOnline")}
-                        />
+                        <span title={rowAboveMe ? t("rowAboveYouHint") : undefined}>
+                          <Switch
+                            checked={!!u.isOnline}
+                            disabled={togglingOnlineId === u.id || rowAboveMe}
+                            onCheckedChange={() => handleToggleOnline(u)}
+                            aria-label={t("colOnline")}
+                          />
+                        </span>
                       )}
                     </TableCell>
                     <TableCell className={cellClassName}>
@@ -950,11 +1043,19 @@ export default function UsuariosPage() {
                             <Button variant="ghost" size="icon" className="h-7 w-7" title={t("titleConnections")} onClick={() => openWhatsappsModal(u)}><Smartphone className="h-3 w-3" /></Button>
                           </>
                         )}
-                        <Button variant="ghost" size="icon" className="h-7 w-7" title={tCommon("edit")} aria-label={tCommon("edit")} onClick={() => openEdit(u)}><Pencil className="h-3 w-3" /></Button>
-                        <Button variant="ghost" size="icon" className="h-7 w-7" title={!u.inactive ? t("titleDeactivate") : t("titleReactivate")} onClick={() => handleToggleActive(u)} disabled={togglingId === u.id}>
-                          {togglingId === u.id ? <Loader2 className="h-3 w-3 animate-spin" /> : !u.inactive ? <UserX className="h-3 w-3 text-orange-500" /> : <UserCheck className="h-3 w-3 text-emerald-500" />}
-                        </Button>
-                        <Button variant="ghost" size="icon" className="h-7 w-7" title={tCommon("delete")} aria-label={tCommon("delete")} onClick={() => setDeleting(u)}><Trash2 className="h-3 w-3 text-destructive" /></Button>
+                        {rowAboveMe ? (
+                          <span className="inline-flex h-7 items-center px-1 text-muted-foreground" title={t("rowAboveYouHint")}>
+                            <Lock className="h-3 w-3" aria-label={t("rowAboveYouHint")} />
+                          </span>
+                        ) : (
+                          <>
+                            <Button variant="ghost" size="icon" className="h-7 w-7" title={tCommon("edit")} aria-label={tCommon("edit")} onClick={() => openEdit(u)}><Pencil className="h-3 w-3" /></Button>
+                            <Button variant="ghost" size="icon" className="h-7 w-7" title={!u.inactive ? t("titleDeactivate") : t("titleReactivate")} onClick={() => handleToggleActive(u)} disabled={togglingId === u.id}>
+                              {togglingId === u.id ? <Loader2 className="h-3 w-3 animate-spin" /> : !u.inactive ? <UserX className="h-3 w-3 text-orange-500" /> : <UserCheck className="h-3 w-3 text-emerald-500" />}
+                            </Button>
+                            <Button variant="ghost" size="icon" className="h-7 w-7" title={tCommon("delete")} aria-label={tCommon("delete")} onClick={() => setDeleting(u)}><Trash2 className="h-3 w-3 text-destructive" /></Button>
+                          </>
+                        )}
                       </div>
                     </TableCell>
                     <TableCell className={cn("text-sm tabular-nums whitespace-nowrap", cellClassName)}>
@@ -1065,7 +1166,7 @@ export default function UsuariosPage() {
               )}
               <div className="space-y-1.5">
                 <Label>{t("labelPhone")}</Label>
-                <PhoneInput value={form.phone} onChange={(v) => setF("phone", v)} placeholder={t("phonePlaceholder")} />
+                <PhoneInput value={form.phone} onChange={(v) => setF("phone", v)} />
               </div>
               <div className="space-y-1.5">
                 <Label>{t("labelProfile")}</Label>
@@ -1174,6 +1275,9 @@ export default function UsuariosPage() {
               </CollapsibleTrigger>
               <CollapsibleContent className="pt-2">
                 <p className="text-xs text-muted-foreground mb-2">{t("menuPainelAtendimentosHint")}</p>
+                {(form.profile === "user" || form.profile === "super") && (
+                  <p className="text-xs text-muted-foreground mb-2">{t("menuSocialCommentsHint")}</p>
+                )}
                 {isSelfEdit && (
                   <p className="text-xs text-muted-foreground mb-2 rounded-md border border-dashed p-2.5">
                     {t("selfEditLockedNote")}
@@ -1271,6 +1375,67 @@ export default function UsuariosPage() {
                     <Label>{t("sipDomain")}</Label>
                     <Input value={form.sipDomain} onChange={(e) => setF("sipDomain", e.target.value)} placeholder={form.sipServer || undefined} disabled={!form.sipEnabled} />
                     <p className="text-xs text-muted-foreground">{t("sipDomainHelp")}</p>
+                  </div>
+                  <div className="space-y-1.5 sm:col-span-2">
+                    <div className="flex items-center gap-1.5">
+                      <Label htmlFor="usuario-field-sipKeepAlive">{t("sipKeepAlive")}</Label>
+                      <TooltipProvider delayDuration={150}>
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <button
+                              type="button"
+                              className="text-muted-foreground hover:text-foreground"
+                              aria-label={t("sipKeepAliveTooltip")}
+                            >
+                              <Info className="h-3.5 w-3.5" aria-hidden="true" />
+                            </button>
+                          </TooltipTrigger>
+                          <TooltipContent className="max-w-xs whitespace-normal text-xs">
+                            {t("sipKeepAliveTooltip")}
+                          </TooltipContent>
+                        </Tooltip>
+                      </TooltipProvider>
+                    </div>
+                    <Input
+                      id="usuario-field-sipKeepAlive"
+                      type="number"
+                      inputMode="numeric"
+                      min={0}
+                      max={300}
+                      value={form.sipKeepAliveInterval}
+                      onChange={(e) => setF("sipKeepAliveInterval", e.target.value)}
+                      placeholder={String(SIP_KEEPALIVE_DEFAULT_SECONDS)}
+                      aria-invalid={parseSipKeepAliveField(form.sipKeepAliveInterval) === "invalid"}
+                      className={parseSipKeepAliveField(form.sipKeepAliveInterval) === "invalid" ? "border-destructive focus-visible:ring-destructive" : undefined}
+                      disabled={!form.sipEnabled || form.sipTransport === "udp"}
+                    />
+                    <p className="text-xs text-muted-foreground">
+                      {form.sipTransport === "udp" ? t("sipKeepAliveUdpNote") : t("sipKeepAliveHelp")}
+                    </p>
+                  </div>
+                  <div className="sm:col-span-2">
+                    <SipConnectionTest
+                      config={{
+                        server: form.sipServer,
+                        port: form.sipPort,
+                        username: form.sipUsername,
+                        password: form.sipPassword,
+                        domain: form.sipDomain,
+                        transport: form.sipTransport,
+                      }}
+                      disabled={!form.sipEnabled}
+                      unsaved={
+                        !editing ||
+                        form.sipEnabled !== !!editing.sipEnabled ||
+                        form.sipServer.trim() !== String(editing.sipServer ?? "").trim() ||
+                        form.sipUsername.trim() !== String(editing.sipUsername ?? "").trim() ||
+                        form.sipPassword !== String(editing.sipPassword ?? "") ||
+                        form.sipDomain.trim() !== String(editing.sipDomain ?? "").trim() ||
+                        String(form.sipPort) !== String(editing.sipPort ?? "") ||
+                        form.sipTransport !== String(editing.sipTransport ?? "")
+                      }
+                      onUseDomain={(domain) => setF("sipDomain", domain)}
+                    />
                   </div>
                 </div>
               </CollapsibleContent>

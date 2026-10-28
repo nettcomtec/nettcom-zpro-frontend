@@ -54,6 +54,7 @@ export const PLAN_CAPABILITIES: PlanCapability[] = [
   { key: "relationship",    category: "crm",           labelKey: "planCap.relationship",    menuRoutes: [] },
   { key: "agenda",          category: "crm",           labelKey: "planCap.agenda",          menuRoutes: ["agenda"] },
   { key: "publicBooking",   category: "crm",           labelKey: "planCap.publicBooking",   menuRoutes: ["agendamento-publico"] },
+  { key: "forms",           category: "crm",           labelKey: "planCap.forms",           menuRoutes: ["formularios"] },
   { key: "productCatalog",  category: "crm",           labelKey: "planCap.productCatalog",  menuRoutes: ["catalogo"] },
   // Cobrança (template ORDER_DETAILS) — PLANO_TEMPLATE_ORDER_DETAILS.md D8.
   // No ENVIO o gate roda DENTRO do handler de template, só depois de detectar que
@@ -77,6 +78,8 @@ export const PLAN_CAPABILITIES: PlanCapability[] = [
   { key: "nuvemshop",       category: "integrations",  labelKey: "planCap.nuvemshop",       menuRoutes: ["nuvemshop"] },
   { key: "googleCalendar",  category: "integrations",  labelKey: "planCap.googleCalendar",  menuRoutes: ["google-calendar"] },
   { key: "rocketChat",      category: "integrations",  labelKey: "planCap.rocketChat",      menuRoutes: ["chat-interno-rc"] },
+  // PLANO_APLICATIVOS_PERSONALIZADOS D24: menuRoutes vazio (/aplicativos abre sem a cap para ocultar globais).
+  { key: "customApps",      category: "integrations",  labelKey: "planCap.customApps",      menuRoutes: [] },
 
   { key: "metaIntegrations", category: "channels",     labelKey: "planCap.metaIntegrations", menuRoutes: ["integracoes-meta"] }
 ];

@@ -37,6 +37,9 @@ import {
 import { useLiveMode } from "@/hooks/use-live-mode";
 import { cn } from "@/lib/utils";
 import { NewConversationDialog } from "@/components/layout/header";
+import { useAuthStore } from "@/stores/auth-store";
+import { useRegion, type UseRegionResult } from "@/hooks/use-region";
+import { isCountryIso, withDialCode } from "@/lib/region";
 
 // Status (open/closed/cancelled) — filtravel
 const STATUS_VALUES = ["open", "closed", "cancelled"] as const;
@@ -64,12 +67,16 @@ const SHIPPING_COLORS: Record<string, string> = {
   unshipped: "bg-yellow-500/15 text-yellow-400 border-yellow-500/30"
 };
 
-function formatPrice(value: string | number | null | undefined, currency = "BRL"): string {
+// Moeda do pedido vence (sem ela, a da empresa); formato no país da empresa.
+function formatPrice(
+  value: string | number | null | undefined,
+  currency: string | null | undefined,
+  formatMoney: UseRegionResult["formatMoney"]
+): string {
   if (value === null || value === undefined || value === "") return "—";
   const n = Number(value);
   if (!Number.isFinite(n)) return String(value);
-  const symbol = currency === "BRL" ? "R$ " : `${currency} `;
-  return `${symbol}${n.toFixed(2)}`;
+  return formatMoney(n, { currency: currency || undefined });
 }
 
 function formatDate(iso: string): string {
@@ -97,6 +104,13 @@ function orderPhone(o: NuvemshopOrder): string | undefined {
 function orderEmail(o: NuvemshopOrder): string | undefined {
   return o.contact_email || o.customer?.email || undefined;
 }
+// A Nuvemshop manda o país da cobrança solto em `billing_country` (o `billing_address`
+// é texto); o do envio vem em `shipping_address.country`. Só vale código de país válido.
+function orderCountry(o: NuvemshopOrder): string | undefined {
+  const billingCountry = (o as NuvemshopOrder & { billing_country?: string }).billing_country;
+  const found = [billingCountry, o.billing_address?.country, o.shipping_address?.country].find((c) => isCountryIso(c));
+  return found ? found.toUpperCase() : undefined;
+}
 
 export function NuvemshopPedidosView({ embedded = false }: { embedded?: boolean } = {}) {
   const t = useTranslations("nuvemshopPedidosPage");
@@ -104,6 +118,7 @@ export function NuvemshopPedidosView({ embedded = false }: { embedded?: boolean 
   const searchParams = useSearchParams();
   const pathname = usePathname();
   const { isLiveMode } = useLiveMode();
+  const { formatMoney, country } = useRegion();
 
   // label de enum via i18n com fallback p/ valor cru (chaves adicionadas na F6)
   const lbl = (ns: string, v: string) => {
@@ -148,6 +163,8 @@ export function NuvemshopPedidosView({ embedded = false }: { embedded?: boolean 
 
   const [messageOpen, setMessageOpen] = useState(false);
   const [messageOrder, setMessageOrder] = useState<NuvemshopOrder | null>(null);
+  // "Enviar mensagem" abre a Nova Conversa: some para quem não pode iniciar conversa (D12).
+  const canStartConversation = useAuthStore((s) => s.canStartConversation());
 
   const [cancelOpen, setCancelOpen] = useState(false);
   const [cancelOrderId, setCancelOrderId] = useState<number | null>(null);
@@ -432,7 +449,7 @@ export function NuvemshopPedidosView({ embedded = false }: { embedded?: boolean 
                   <Badge className={`text-xs border ${PAYMENT_COLORS[o.payment_status] ?? PAYMENT_COLORS.pending}`}>{lbl("paymentVal", o.payment_status)}</Badge>
                 </TableCell>
                 <TableCell className="hidden sm:table-cell text-muted-foreground text-sm">{o.products?.length ?? 0}</TableCell>
-                <TableCell className="text-foreground text-sm font-medium">{formatPrice(o.total, o.currency)}</TableCell>
+                <TableCell className="text-foreground text-sm font-medium">{formatPrice(o.total, o.currency, formatMoney)}</TableCell>
                 <TableCell>
                   <DropdownMenu>
                     <DropdownMenuTrigger asChild>
@@ -442,9 +459,11 @@ export function NuvemshopPedidosView({ embedded = false }: { embedded?: boolean 
                       <DropdownMenuItem onClick={() => openDetail(o)} className="gap-2 cursor-pointer hover:bg-muted">
                         <Eye className="h-4 w-4" /> {t("actionView")}
                       </DropdownMenuItem>
-                      <DropdownMenuItem onClick={() => openSendMessage(o)} disabled={!orderPhone(o) && !orderEmail(o)} className="gap-2 cursor-pointer hover:bg-muted">
-                        <Send className="h-4 w-4" /> {t("actionSendMessage")}
-                      </DropdownMenuItem>
+                      {canStartConversation && (
+                        <DropdownMenuItem onClick={() => openSendMessage(o)} disabled={!orderPhone(o) && !orderEmail(o)} className="gap-2 cursor-pointer hover:bg-muted">
+                          <Send className="h-4 w-4" /> {t("actionSendMessage")}
+                        </DropdownMenuItem>
+                      )}
                       <ActionItems o={o} />
                     </DropdownMenuContent>
                   </DropdownMenu>
@@ -514,7 +533,7 @@ export function NuvemshopPedidosView({ embedded = false }: { embedded?: boolean 
                             </div>
                           </TableCell>
                           <TableCell className="text-center text-foreground text-sm">{li.quantity}</TableCell>
-                          <TableCell className="text-right text-foreground text-sm">{formatPrice(Number(li.price) * (li.quantity || 1), detail.currency)}</TableCell>
+                          <TableCell className="text-right text-foreground text-sm">{formatPrice(Number(li.price) * (li.quantity || 1), detail.currency, formatMoney)}</TableCell>
                         </TableRow>
                       ))}
                     </TableBody>
@@ -540,7 +559,7 @@ export function NuvemshopPedidosView({ embedded = false }: { embedded?: boolean 
                   <h3 className="text-sm font-semibold text-foreground">{t("tabPayment")}</h3>
                   <div className="flex justify-between text-xs text-muted-foreground"><span>{t("paymentStatus")}</span><span>{lbl("paymentVal", detail.payment_status)}</span></div>
                   <div className="flex justify-between text-xs text-muted-foreground"><span>{t("shippingStatus")}</span><span>{lbl("shippingVal", detail.shipping_status)}</span></div>
-                  <div className="flex justify-between text-sm text-foreground font-medium pt-1 border-t border-border mt-1"><span>{t("paymentTotal")}</span><span>{formatPrice(detail.total, detail.currency)}</span></div>
+                  <div className="flex justify-between text-sm text-foreground font-medium pt-1 border-t border-border mt-1"><span>{t("paymentTotal")}</span><span>{formatPrice(detail.total, detail.currency, formatMoney)}</span></div>
                 </section>
               </div>
 
@@ -624,7 +643,9 @@ export function NuvemshopPedidosView({ embedded = false }: { embedded?: boolean 
       <NewConversationDialog
         open={messageOpen}
         onOpenChange={(o) => { setMessageOpen(o); if (!o) setMessageOrder(null); }}
-        prefilledNumber={messageOrder ? orderPhone(messageOrder) : undefined}
+        // A loja costuma guardar o telefone sem DDI: completa pelo país do pedido
+        // (sem país, o da empresa). Número já com DDI ou "+" segue como está.
+        prefilledNumber={messageOrder ? withDialCode(orderPhone(messageOrder), orderCountry(messageOrder) || country) || undefined : undefined}
         prefilledContactName={messageOrder ? customerName(messageOrder) : undefined}
         prefilledContactEmail={messageOrder ? orderEmail(messageOrder) : undefined}
       />

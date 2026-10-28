@@ -13,6 +13,7 @@ import api from "@/lib/api";
 import { Search, X } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { CONFIG_TAB_GROUPS, type ConfigTabKey } from "@/lib/config-links";
+import { isTenantBillingProvisioned } from "@/lib/tenant-billing";
 
 type TabKey = ConfigTabKey;
 
@@ -62,7 +63,10 @@ export default function ConfiguracoesLayout({ children }: { children: React.Reac
   const { user, hasPermission, isSupervisorAdmin, tenantConfigsLoaded } = useAuthStore();
   const TAB_GROUPS = buildTabGroups(t);
   const [activeTab, setActiveTab] = useState<TabKey>(() => getTabForPath(pathname, TAB_GROUPS));
-  const [asaasEnabled, setAsaasEnabled] = useState(false);
+  // Link Pagamentos (marcado `asaasOnly` em lib/config-links): aparece para empresa com
+  // cobrança provisionada em QUALQUER gateway, não só no Asaas — antes quem cobrava pela
+  // Stripe (ou outro gateway) nunca via o link, embora a página funcione para todos.
+  const [billingProvisioned, setBillingProvisioned] = useState(false);
   const [search, setSearch] = useState("");
 
   // Guard: admin, ou perfil custom com a permission settings_general (que é o gate
@@ -98,14 +102,15 @@ export default function ConfiguracoesLayout({ children }: { children: React.Reac
     }
   }, [user, canOpenSettings, relationshipOnlyAccess, relationshipCheckPending, router]);
 
-  // Verificar se Asaas está habilitado para o tenant
+  // Cobrança provisionada no gateway (mesmo critério do menu do usuário e do job de
+  // bloqueio: `billingProvisioned` do backend; sem ele, o cliente criado no gateway).
   useEffect(() => {
     if (!user?.tenantId) return;
     api
       .get(`/tenants/${user.tenantId}`)
       .then((res) => {
         const tenant = Array.isArray(res.data) ? res.data[0] : res.data;
-        setAsaasEnabled(tenant?.asaas === "enabled");
+        setBillingProvisioned(isTenantBillingProvisioned(tenant as Record<string, unknown> | null));
       })
       .catch(() => {});
   }, [user?.tenantId]);
@@ -126,7 +131,7 @@ export default function ConfiguracoesLayout({ children }: { children: React.Reac
 
   const currentGroup = TAB_GROUPS.find((g) => g.key === activeTab) ?? TAB_GROUPS[0];
   const visibleLinks = currentGroup.links.filter(
-    (l) => !l.asaasOnly || asaasEnabled
+    (l) => !l.asaasOnly || billingProvisioned
   );
   const searchTerm = search.trim().toLowerCase();
   // Busca cross-abas: com termo digitado, procura em TODOS os grupos (mantendo o
@@ -137,7 +142,7 @@ export default function ConfiguracoesLayout({ children }: { children: React.Reac
         g.links
           .filter(
             (l) =>
-              (!l.asaasOnly || asaasEnabled) &&
+              (!l.asaasOnly || billingProvisioned) &&
               l.name.toLowerCase().includes(searchTerm)
           )
           .map((l) => ({ ...l, tabKey: g.key, tabLabel: g.label }))

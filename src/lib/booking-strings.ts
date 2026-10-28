@@ -5,7 +5,9 @@
  * next-intl) resolve o idioma do localStorage do usuário LOGADO e NÃO lê ?lang=.
  * O portal é público (visitante sem sessão), então usa este dicionário próprio,
  * escolhido por ?lang= no servidor/cliente — mesma estratégia das páginas legais.
- * Datas/horas usam Intl (locale-aware), sem chaves aqui.
+ * Datas/horas usam Intl (locale-aware), sem chaves aqui. As chaves `phone*` são os
+ * textos do seletor de país do telefone (prop `labels` do PhoneInput, que fora do
+ * painel não tem o i18n da tela).
  */
 
 export const BOOKING_LANGS = [
@@ -14,9 +16,24 @@ export const BOOKING_LANGS = [
 
 export type BookingLang = (typeof BOOKING_LANGS)[number];
 
-export function resolveBookingLang(raw: string | string[] | undefined | null): BookingLang {
+export function isBookingLang(value: unknown): value is BookingLang {
+  return typeof value === "string" && (BOOKING_LANGS as readonly string[]).includes(value);
+}
+
+/**
+ * Idioma da página: `?lang=` válido (escolha explícita no link) → idioma da Região da
+ * empresa, só quando ela define idioma (`languageConfigured`) → pt. A Região chega junto
+ * com os dados da página; até lá a tela mostra só o carregando, então o texto nunca
+ * aparece num idioma e troca para outro. Sem Região (backend antigo) = o de sempre.
+ */
+export function resolveBookingLang(
+  raw: string | string[] | undefined | null,
+  region?: { language?: string | null; languageConfigured?: boolean } | null
+): BookingLang {
   const v = Array.isArray(raw) ? raw[0] : raw;
-  return (BOOKING_LANGS as readonly string[]).includes(v || "") ? (v as BookingLang) : "pt";
+  if (isBookingLang(v)) return v;
+  const regionLang = region?.languageConfigured === true ? region.language : null;
+  return isBookingLang(regionLang) ? regionLang : "pt";
 }
 
 export type BookingStrings = Record<string, string>;
@@ -55,7 +72,11 @@ const STRINGS: Record<BookingLang, BookingStrings> = {
     confirmCancel: "Tem certeza que deseja cancelar?",
     chooseProfessional: "Escolha um profissional",
     anyProfessional: "Qualquer um",
-    seatsLeft: "Vagas: {n}"
+    seatsLeft: "Vagas: {n}",
+    phoneSearchPlaceholder: "Buscar país ou DDI...",
+    phoneNoResults: "Nenhum país encontrado",
+    phoneAsTyped: "Como digitado",
+    phoneCountryLabel: "País do telefone"
   },
   en: {
     chooseService: "Choose a service",
@@ -90,7 +111,11 @@ const STRINGS: Record<BookingLang, BookingStrings> = {
     confirmCancel: "Are you sure you want to cancel?",
     chooseProfessional: "Choose a professional",
     anyProfessional: "Anyone",
-    seatsLeft: "Spots: {n}"
+    seatsLeft: "Spots: {n}",
+    phoneSearchPlaceholder: "Search country or code...",
+    phoneNoResults: "No country found",
+    phoneAsTyped: "As typed",
+    phoneCountryLabel: "Phone country"
   },
   es: {
     chooseService: "Elige un servicio",
@@ -125,7 +150,11 @@ const STRINGS: Record<BookingLang, BookingStrings> = {
     confirmCancel: "¿Seguro que deseas cancelar?",
     chooseProfessional: "Elige un profesional",
     anyProfessional: "Cualquiera",
-    seatsLeft: "Cupos: {n}"
+    seatsLeft: "Cupos: {n}",
+    phoneSearchPlaceholder: "Buscar país o código...",
+    phoneNoResults: "No se encontró ningún país",
+    phoneAsTyped: "Como se escribió",
+    phoneCountryLabel: "País del teléfono"
   },
   de: {
     chooseService: "Dienst wählen",
@@ -160,7 +189,11 @@ const STRINGS: Record<BookingLang, BookingStrings> = {
     confirmCancel: "Möchten Sie wirklich stornieren?",
     chooseProfessional: "Wählen Sie eine Fachkraft",
     anyProfessional: "Beliebig",
-    seatsLeft: "Plätze: {n}"
+    seatsLeft: "Plätze: {n}",
+    phoneSearchPlaceholder: "Land oder Vorwahl suchen...",
+    phoneNoResults: "Kein Land gefunden",
+    phoneAsTyped: "Wie eingegeben",
+    phoneCountryLabel: "Land der Telefonnummer"
   },
   fr: {
     chooseService: "Choisissez un service",
@@ -195,7 +228,11 @@ const STRINGS: Record<BookingLang, BookingStrings> = {
     confirmCancel: "Voulez-vous vraiment annuler ?",
     chooseProfessional: "Choisissez un professionnel",
     anyProfessional: "Peu importe",
-    seatsLeft: "Places : {n}"
+    seatsLeft: "Places : {n}",
+    phoneSearchPlaceholder: "Rechercher un pays ou un indicatif...",
+    phoneNoResults: "Aucun pays trouvé",
+    phoneAsTyped: "Tel que saisi",
+    phoneCountryLabel: "Pays du téléphone"
   },
   it: {
     chooseService: "Scegli un servizio",
@@ -230,7 +267,11 @@ const STRINGS: Record<BookingLang, BookingStrings> = {
     confirmCancel: "Sei sicuro di voler annullare?",
     chooseProfessional: "Scegli un professionista",
     anyProfessional: "Chiunque",
-    seatsLeft: "Posti: {n}"
+    seatsLeft: "Posti: {n}",
+    phoneSearchPlaceholder: "Cerca paese o prefisso...",
+    phoneNoResults: "Nessun paese trovato",
+    phoneAsTyped: "Come digitato",
+    phoneCountryLabel: "Paese del telefono"
   },
   ja: {
     chooseService: "サービスを選択",
@@ -265,7 +306,11 @@ const STRINGS: Record<BookingLang, BookingStrings> = {
     confirmCancel: "本当にキャンセルしますか？",
     chooseProfessional: "担当者を選択",
     anyProfessional: "指定なし",
-    seatsLeft: "残り{n}枠"
+    seatsLeft: "残り{n}枠",
+    phoneSearchPlaceholder: "国名または国番号で検索...",
+    phoneNoResults: "国が見つかりません",
+    phoneAsTyped: "入力どおり",
+    phoneCountryLabel: "電話番号の国"
   },
   zh: {
     chooseService: "选择服务",
@@ -300,7 +345,11 @@ const STRINGS: Record<BookingLang, BookingStrings> = {
     confirmCancel: "确定要取消吗？",
     chooseProfessional: "选择服务人员",
     anyProfessional: "任意",
-    seatsLeft: "剩余名额：{n}"
+    seatsLeft: "剩余名额：{n}",
+    phoneSearchPlaceholder: "搜索国家或国际区号...",
+    phoneNoResults: "未找到国家",
+    phoneAsTyped: "按原样",
+    phoneCountryLabel: "电话所属国家"
   },
   ar: {
     chooseService: "اختر خدمة",
@@ -335,7 +384,11 @@ const STRINGS: Record<BookingLang, BookingStrings> = {
     confirmCancel: "هل أنت متأكد من الإلغاء؟",
     chooseProfessional: "اختر مختصًا",
     anyProfessional: "أي شخص",
-    seatsLeft: "مقاعد: {n}"
+    seatsLeft: "مقاعد: {n}",
+    phoneSearchPlaceholder: "ابحث عن دولة أو رمز الاتصال...",
+    phoneNoResults: "لم يتم العثور على أي دولة",
+    phoneAsTyped: "كما أُدخل",
+    phoneCountryLabel: "دولة الهاتف"
   },
   hi: {
     chooseService: "एक सेवा चुनें",
@@ -370,7 +423,11 @@ const STRINGS: Record<BookingLang, BookingStrings> = {
     confirmCancel: "क्या आप वाकई रद्द करना चाहते हैं?",
     chooseProfessional: "एक पेशेवर चुनें",
     anyProfessional: "कोई भी",
-    seatsLeft: "स्थान: {n}"
+    seatsLeft: "स्थान: {n}",
+    phoneSearchPlaceholder: "देश या कोड खोजें...",
+    phoneNoResults: "कोई देश नहीं मिला",
+    phoneAsTyped: "जैसा लिखा गया",
+    phoneCountryLabel: "फ़ोन का देश"
   },
   id: {
     chooseService: "Pilih layanan",
@@ -405,7 +462,11 @@ const STRINGS: Record<BookingLang, BookingStrings> = {
     confirmCancel: "Yakin ingin membatalkan?",
     chooseProfessional: "Pilih profesional",
     anyProfessional: "Siapa saja",
-    seatsLeft: "Sisa: {n}"
+    seatsLeft: "Sisa: {n}",
+    phoneSearchPlaceholder: "Cari negara atau kode...",
+    phoneNoResults: "Negara tidak ditemukan",
+    phoneAsTyped: "Sesuai ketikan",
+    phoneCountryLabel: "Negara telepon"
   },
   ru: {
     chooseService: "Выберите услугу",
@@ -440,7 +501,11 @@ const STRINGS: Record<BookingLang, BookingStrings> = {
     confirmCancel: "Вы уверены, что хотите отменить?",
     chooseProfessional: "Выберите специалиста",
     anyProfessional: "Любой",
-    seatsLeft: "Мест: {n}"
+    seatsLeft: "Мест: {n}",
+    phoneSearchPlaceholder: "Поиск страны или кода...",
+    phoneNoResults: "Страна не найдена",
+    phoneAsTyped: "Как введено",
+    phoneCountryLabel: "Страна телефона"
   },
   tr: {
     chooseService: "Bir hizmet seçin",
@@ -475,7 +540,11 @@ const STRINGS: Record<BookingLang, BookingStrings> = {
     confirmCancel: "İptal etmek istediğinizden emin misiniz?",
     chooseProfessional: "Bir uzman seçin",
     anyProfessional: "Herhangi biri",
-    seatsLeft: "Yer: {n}"
+    seatsLeft: "Yer: {n}",
+    phoneSearchPlaceholder: "Ülke veya kod ara...",
+    phoneNoResults: "Ülke bulunamadı",
+    phoneAsTyped: "Girildiği gibi",
+    phoneCountryLabel: "Telefon ülkesi"
   }
 };
 

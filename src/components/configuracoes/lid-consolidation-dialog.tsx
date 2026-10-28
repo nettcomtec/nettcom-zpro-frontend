@@ -34,6 +34,7 @@ import {
 } from "@/services/lid-consolidation";
 import { useAuthStore } from "@/stores/auth-store";
 import { formatDateTime } from "@/lib/utils";
+import { getBackendErrorCode } from "@/lib/backend-error-code";
 
 type Step = "warn" | "auditing" | "review" | "applying" | "result" | "revert";
 
@@ -348,6 +349,12 @@ export function LidConsolidationDialog({ open, onOpenChange }: Props) {
       setMergeLogs((prev) => (prev || []).filter((l) => l.id !== target.id));
       setPendingRevert(null);
     } catch (err: any) {
+      // O número do duplicado já é de outro contato (ex.: a mensagem do WhatsApp oficial
+      // daquele número abriu contato próprio depois da mesclagem).
+      if (getBackendErrorCode(err).startsWith("ERR_UNMERGE_NUMBER_TAKEN")) {
+        toast.error(t("revertNumberTaken"));
+        return;
+      }
       const detail = err?.response?.data?.detail || err?.response?.data?.error || err?.message;
       toast.error(detail ? `${t("revertErrorGeneric")}: ${detail}` : t("revertErrorGeneric"));
     } finally {
@@ -369,8 +376,12 @@ export function LidConsolidationDialog({ open, onOpenChange }: Props) {
   };
   // Origem de um merge log: MatchKind heuristico → label traduzido;
   // origem literal (ex.: "manual") → exibida como veio do backend.
-  const originLabel = (kind: string): string =>
-    isKnownMatchKind(kind) ? matchKindLabel(kind) : kind;
+  const originLabel = (kind: string): string => {
+    if (isKnownMatchKind(kind)) return matchKindLabel(kind);
+    if (kind === "telegram_invite") return t("originTelegramInvite");
+    if (kind === "bsuid_auto") return t("originBsuidAuto");
+    return kind;
+  };
 
   return (
     <Dialog open={open} onOpenChange={handleClose}>
@@ -508,7 +519,7 @@ export function LidConsolidationDialog({ open, onOpenChange }: Props) {
 
             {auditDebug && (
               <div className="rounded-md border border-blue-500/40 bg-blue-500/5 p-3 text-xs space-y-1">
-                <p className="font-medium">Diagnóstico (scope: {auditScope})</p>
+                <p className="font-medium">{t("debugTitle", { scope: auditScope ?? "" })}</p>
                 <div className="grid grid-cols-2 gap-x-3 gap-y-0.5 font-mono">
                   <span className="text-muted-foreground">profile:</span>
                   <span>{String(auditDebug.profile)}</span>
@@ -518,17 +529,17 @@ export function LidConsolidationDialog({ open, onOpenChange }: Props) {
                   </span>
                   <span className="text-muted-foreground">allTenants?:</span>
                   <span>{String(auditDebug.allTenantsRequested)}</span>
-                  <span className="text-muted-foreground">filtro aplicado:</span>
+                  <span className="text-muted-foreground">{t("debugFilterApplied")}</span>
                   <span>
                     {auditDebug.effectiveTenantFilter === null
-                      ? "ALL (sem filtro)"
+                      ? t("debugAllNoFilter")
                       : String(auditDebug.effectiveTenantFilter)}
                   </span>
-                  <span className="text-muted-foreground">pares retornados:</span>
+                  <span className="text-muted-foreground">{t("debugPairsReturned")}</span>
                   <span>{auditDebug.pairsReturned}</span>
                   {auditDebug.globalCrossPairsCount !== undefined && (
                     <>
-                      <span className="text-muted-foreground">total global (DB):</span>
+                      <span className="text-muted-foreground">{t("debugGlobalTotal")}</span>
                       <span>{auditDebug.globalCrossPairsCount}</span>
                     </>
                   )}
@@ -548,11 +559,11 @@ export function LidConsolidationDialog({ open, onOpenChange }: Props) {
                 )}
                 {auditDebug.byTenant && auditDebug.byTenant.length > 0 && (
                   <div className="mt-2 border-t pt-2">
-                    <p className="text-muted-foreground mb-1">Distribuição por tenant (todos):</p>
+                    <p className="text-muted-foreground mb-1">{t("debugByTenant")}</p>
                     <div className="font-mono">
-                      {auditDebug.byTenant.map((t) => (
-                        <div key={t.tenantId}>
-                          tenant {t.tenantId}: {t.count} par(es)
+                      {auditDebug.byTenant.map((tn) => (
+                        <div key={tn.tenantId}>
+                          {t("debugTenantPairs", { tenantId: String(tn.tenantId), count: tn.count })}
                         </div>
                       ))}
                     </div>
@@ -603,7 +614,7 @@ export function LidConsolidationDialog({ open, onOpenChange }: Props) {
                         <td className="p-2">
                           {a.decision.skip ? "—" : (
                             <span>
-                              <span className="font-medium">{a.primaryName || "(sem nome)"}</span>
+                              <span className="font-medium">{a.primaryName || t("noName")}</span>
                               <br />
                               <span className="text-muted-foreground">{a.primaryNumber}</span>
                               <span className="text-[10px] text-muted-foreground"> · #{a.decision.primaryId}</span>
@@ -615,7 +626,7 @@ export function LidConsolidationDialog({ open, onOpenChange }: Props) {
                             <span className="text-muted-foreground">{a.pair.small_number} ↔ {a.pair.big_number}</span>
                           ) : (
                             <span>
-                              <span className="font-medium">{a.duplicateName || "(sem nome)"}</span>
+                              <span className="font-medium">{a.duplicateName || t("noName")}</span>
                               <br />
                               <span className="text-muted-foreground">{a.duplicateNumber}</span>
                               <span className="text-[10px] text-muted-foreground"> · #{a.decision.duplicateId}</span>
@@ -926,12 +937,12 @@ export function LidConsolidationDialog({ open, onOpenChange }: Props) {
                       <tr key={log.id} className="border-t">
                         <td className="p-2">
                           <span>
-                            <span className="font-medium">{log.primaryName || "(sem nome)"}</span>{" "}
+                            <span className="font-medium">{log.primaryName || t("noName")}</span>{" "}
                             <span className="text-muted-foreground">
                               {log.primaryNumber || `#${log.primaryId}`}
                             </span>
                             <span className="text-muted-foreground"> ← </span>
-                            <span className="font-medium">{log.duplicateName || "(sem nome)"}</span>{" "}
+                            <span className="font-medium">{log.duplicateName || t("noName")}</span>{" "}
                             <span className="text-muted-foreground">
                               {log.duplicateNumber || `#${log.duplicateId}`}
                             </span>
@@ -955,6 +966,7 @@ export function LidConsolidationDialog({ open, onOpenChange }: Props) {
                           <Badge
                             variant={isKnownMatchKind(log.matchKind) ? matchKindBadgeVariant(log.matchKind) : "outline"}
                             className="text-[10px]"
+                            title={log.matchKind === "bsuid_auto" ? t("originBsuidAutoHint") : undefined}
                           >
                             {originLabel(log.matchKind)}
                           </Badge>

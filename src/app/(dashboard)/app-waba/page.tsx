@@ -17,7 +17,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, Di
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tooltip, TooltipContent, TooltipTrigger, TooltipProvider } from "@/components/ui/tooltip";
-import { Plus, MoreVertical, Pencil, Trash2, Globe, Eye, EyeOff, Copy, Check, ChevronsUpDown, Search } from "lucide-react";
+import { Plus, MoreVertical, Pencil, Trash2, Globe, Eye, EyeOff, Copy, Check, ChevronsUpDown, Search, Info } from "lucide-react";
 import { toast } from "sonner";
 import { fetchAppWabas, createAppWaba, bulkCreateAppWaba, updateAppWaba, deleteAppWaba } from "@/services/superadmin";
 import { MetaPartnerSealDialog } from "@/components/meta-partner-seal-dialog";
@@ -42,6 +42,9 @@ interface AppWaba {
   redirectUriInstagram?: string;
   tenantId?: number;
   isActive?: boolean;
+  // Versão do cadastro do WhatsApp (Embedded Signup). null/ausente = padrão (v3).
+  // Backend antigo não devolve nem grava o campo.
+  esVersion?: "v3" | "v4" | "v5" | null;
 }
 
 interface Tenant { id: number; name: string; }
@@ -204,9 +207,16 @@ export default function AppWabaPage() {
         redirectUriFacebook: uris.redirectUriFacebook,
         redirectUriInstagram: uris.redirectUriInstagram,
       };
+      // Backend sem a coluna da versão (migration atrasada) devolve
+      // `esVersionUnavailable`: a versão escolhida não foi gravada.
+      const warnEsVersion = (res: unknown) => {
+        if ((res as { data?: { esVersionUnavailable?: boolean } } | undefined)?.data?.esVersionUnavailable) {
+          toast.warning(t("esVersionNotSaved"));
+        }
+      };
       if (editing.id) {
         // 1) Atualiza o AppWaba atual
-        await updateAppWaba(editing.id, basePayload as Record<string, unknown>);
+        warnEsVersion(await updateAppWaba(editing.id, basePayload as Record<string, unknown>));
         // 2) Se selecionou outros tenants, estende para eles
         if (bulkTenantIds.length > 0) {
           const additional = bulkTenantIds.filter((id) => id !== editing.tenantId);
@@ -238,10 +248,10 @@ export default function AppWabaPage() {
         }
       } else if (bulkTenantIds.length === 1) {
         const payload = { ...basePayload, tenantId: bulkTenantIds[0] };
-        await createAppWaba(payload as Record<string, unknown>);
+        warnEsVersion(await createAppWaba(payload as Record<string, unknown>));
         toast.success(t("appCreated"));
       } else if (editing.tenantId) {
-        await createAppWaba(basePayload as Record<string, unknown>);
+        warnEsVersion(await createAppWaba(basePayload as Record<string, unknown>));
         toast.success(t("appCreated"));
       } else {
         toast.warning(t("selectTenantWarning"));
@@ -543,6 +553,37 @@ export default function AppWabaPage() {
               <div className="space-y-1.5">
                 <Label>Config ID <span className="text-xs text-muted-foreground">({t("configIdHint")})</span></Label>
                 <Input value={editing.configId || ""} onChange={(e) => set("configId", e.target.value)} placeholder={t("configIdPlaceholder")} />
+              </div>
+
+              {/* Versão do cadastro do WhatsApp (Embedded Signup): par com o Config ID. Sem
+                  valor gravado = padrão (v3). Backend antigo ignora o campo. */}
+              <div className="space-y-1.5">
+                <div className="flex items-center gap-1.5">
+                  <Label>{t("esVersionLabel")}</Label>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <button type="button" className="text-muted-foreground hover:text-foreground" aria-label={t("esVersionTooltip")}>
+                        <Info className="h-3.5 w-3.5" />
+                      </button>
+                    </TooltipTrigger>
+                    <TooltipContent className="max-w-xs text-xs">{t("esVersionTooltip")}</TooltipContent>
+                  </Tooltip>
+                </div>
+                <Select
+                  value={editing.esVersion === "v4" || editing.esVersion === "v5" ? editing.esVersion : "v3"}
+                  onValueChange={(v) => set("esVersion", v === "v4" || v === "v5" ? v : "v3")}
+                >
+                  <SelectTrigger className="w-full sm:w-72"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="v3">{t("esVersionV3")}</SelectItem>
+                    <SelectItem value="v4">{t("esVersionV4")}</SelectItem>
+                    <SelectItem value="v5">{t("esVersionV5")}</SelectItem>
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-muted-foreground">{t("esVersionHint")}</p>
+                {editing.esVersion === "v5" && (
+                  <p className="text-xs text-amber-600 dark:text-amber-400">{t("esVersionV5Hint")}</p>
+                )}
               </div>
 
               <div className="space-y-1.5">

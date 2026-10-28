@@ -30,6 +30,10 @@ export interface WhatsApp {
   mlEventsEnabled?: boolean;
   /** Instagram: comentário abre atendimento (default true; false = só DM) */
   igCommentsCreateTickets?: boolean;
+  /** WABA: juntar mensagens seguidas dos robôs (chave ausente = backend sem suporte) */
+  wabaGroupBotMessages?: boolean;
+  /** WABA: segundos que a tela segura o texto do atendente (0 = não junta; ausente = backend sem suporte) */
+  wabaGroupAgentSeconds?: number;
 }
 
 interface WhatsAppState {

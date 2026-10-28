@@ -11,6 +11,8 @@
  *   - Substituir `new Audio(url).play()` por `playNotificationSound(url)`
  */
 
+import { isNotificationSoundMutedForMe } from "./notification-sound-mute";
+
 let ctx: AudioContext | null = null;
 const bufferCache = new Map<string, AudioBuffer>();
 const fetchingUrls = new Set<string>();
@@ -70,8 +72,11 @@ async function fetchBuffer(url: string): Promise<AudioBuffer | null> {
  * Toca o som de notificação via AudioContext.
  * Se o contexto ainda estiver suspenso, tenta fazer resume primeiro.
  * Fallback para HTMLAudioElement se AudioContext não estiver disponível.
+ * Não toca quando o usuário desligou esse som no botão do topo (`group` = mensagem ou
+ * atendimento de grupo; ver lib/notification-sound-mute.ts). O toque de chamada não passa aqui.
  */
-export async function playNotificationSound(url: string): Promise<void> {
+export async function playNotificationSound(url: string, opts?: { group?: boolean }): Promise<void> {
+  if (isNotificationSoundMutedForMe(opts)) return;
   const context = getContext();
 
   // Fallback para HTMLAudioElement se AudioContext não disponível

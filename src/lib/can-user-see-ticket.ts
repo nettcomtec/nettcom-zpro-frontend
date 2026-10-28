@@ -69,6 +69,8 @@ export interface UserVisibilityData {
    * chamadores (hooks de socket passam o UserData inteiro) compilando sem cast.
    */
   customProfile?: { customPermissions?: { tickets_view_all?: boolean } | null } | null;
+  /** Recurso "perfis personalizados" ligado na empresa (desligado = custom sem permissão). */
+  customProfileEnabled?: boolean | null;
 }
 
 export interface VisibilityConfig {
@@ -124,8 +126,12 @@ export function canUserSeeTicket(
   // paridade exata com ListTicketsServiceFrontNovoZPRO:119-120 (`customCanViewAll` entra no
   // `isAdmin` da query REST, inclusive quando supervisorAdmin === "enabled"). Sem este espelho o
   // gate client-side escondia do sino/lista tickets que o próprio REST tinha devolvido.
+  // Com o recurso desligado na empresa o servidor zera as permissões do custom (desde
+  // 16/10/2026, EffectiveCustomPermissionsZPRO) — o espelho exige o recurso ligado.
   const customCanViewAll =
-    profile === "custom" && user.customProfile?.customPermissions?.tickets_view_all === true;
+    profile === "custom" &&
+    user.customProfileEnabled === true &&
+    user.customProfile?.customPermissions?.tickets_view_all === true;
   const isAdminLike =
     profile === "admin" || profile === "superadmin" || supervisorIsAdmin || customCanViewAll;
 

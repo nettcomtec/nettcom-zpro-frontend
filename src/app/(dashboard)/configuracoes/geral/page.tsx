@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useState, useEffect, useCallback, useMemo } from "react";
-import { useTranslations, useMessages } from "next-intl";
+import { useTranslations, useMessages, useLocale } from "next-intl";
 import { useRouter } from "next/navigation";
 import { PageHeader } from "@/components/layout/page-header";
 import { Button } from "@/components/ui/button";
@@ -22,6 +22,7 @@ import { toast } from "sonner";
 import { fetchSettings, updateSetting } from "@/services/settings";
 import { fetchChatFlows } from "@/services/chatflow";
 import { fetchTenantById } from "@/services/tenants";
+import { fetchFreeEntryWindowBanner } from "@/services/free-entry-window";
 import { fetchQueues, type Queue } from "@/services/queues";
 import { fetchAllUsers, type User } from "@/services/users";
 import api from "@/lib/api";
@@ -40,8 +41,13 @@ import { useUnsavedChangesGuard } from "@/hooks/use-unsaved-changes-guard";
 import {
   SETTINGS_CATALOG, SETTINGS_BY_KEY, SETTING_SECTION_ORDER, SETTING_TAG_ORDER,
   SETTING_GROUP_ORDER, tagLabelKey, sectionOfSetting,
+  REGION_SECTION_KEY, REGION_SETTING_KEYS, REGION_APPLY_ACTION_KEY, isUncountedSection,
   type SettingTag,
 } from "@/lib/settings-catalog";
+import { RegionSettingsCard, regionLanguageName } from "@/components/configuracoes/region-settings-card";
+import { useRegion, ensureRegionTexts } from "@/hooks/use-region";
+import { countryName, regionStateFromTenant, type RegionState } from "@/lib/region";
+import { applyRegionDefaultTexts } from "@/services/region";
 
 interface Setting {
   key: string;
@@ -104,6 +110,8 @@ const TENANT_KEY_MAP: Record<string, { url: string; field: string }> = {
   wabaTemplateBanner:      { url: "tenantsWabaWindowBanners",       field: "wabaTemplateBanner" },
   wabaTemplateBannerMessage: { url: "tenantsWabaWindowBanners",     field: "wabaTemplateBannerMessage" },
   windowClosedBanner:      { url: "tenantsWabaWindowBanners",       field: "windowClosedBanner" },
+  // Coluna fora do model do Tenant: rota própria de leitura e gravação (não vem no GET /tenants/:id).
+  freeEntryWindowBanner:   { url: "tenantsFreeEntryWindowBanner",   field: "freeEntryWindowBanner" },
   validateContact:         { url: "tenantsValidateContact",       field: "validateContact" },
   brPhoneConvention:       { url: "tenantsBrPhoneConvention",     field: "brPhoneConvention" },
   userCreationPasswordMode: { url: "tenantsUserPasswordMode",     field: "userCreationPasswordMode" },
@@ -134,7 +142,44 @@ const TENANT_KEY_MAP: Record<string, { url: string; field: string }> = {
   tentativas:              { url: "tenantsMaxRetries",            field: "maxRetries" },
   limiteChatInterno:       { url: "tenantsPrivateMessageLimit",   field: "privateMessageLimit" },
   limiteTickets:           { url: "tenantsTicketLimit",           field: "ticketLimit" },
+  // Região e idioma: 1 PUT por campo (paralelos), "" = herdar o padrão geral.
+  regionCountry:           { url: "tenantsRegion",                field: "regionCountry" },
+  regionCurrency:          { url: "tenantsRegion",                field: "regionCurrency" },
+  regionLanguage:          { url: "tenantsRegion",                field: "regionLanguage" },
 };
+
+// Limites gravados em coluna inteira do Tenant: vão sempre como número (vazio = 0).
+const TENANT_INT_LIMIT_FIELDS = new Set(["maxRetries", "privateMessageLimit", "ticketLimit"]);
+
+const REGION_TENANT_URL = "tenantsRegion";
+const isRegionSettingKey = (key: string) => TENANT_KEY_MAP[key]?.url === REGION_TENANT_URL;
+
+// Códigos de recusa da Região com texto próprio (regionSettings.errors.*).
+const REGION_ERROR_CODES = [
+  "ERR_INVALID_REGION_COUNTRY",
+  "ERR_INVALID_REGION_CURRENCY",
+  "ERR_INVALID_REGION_LANGUAGE",
+  "ERR_NO_PERMISSION",
+];
+
+/** Código do erro: o interceptor rejeita com `error.response` (corpo em `data`). */
+function apiErrorCode(reason: unknown): string | undefined {
+  const r = reason as { data?: { error?: unknown }; response?: { data?: { error?: unknown } } } | undefined;
+  const code = r?.data?.error ?? r?.response?.data?.error;
+  return typeof code === "string" ? code : undefined;
+}
+
+/**
+ * Itens trocados pelo "aplicar textos padrão" (contrato 4): "queues:3" e
+ * "channels:queuePositionMessage:2" valem pelo número no fim; os demais, 1.
+ */
+function countUpdatedRegionItems(updated: unknown): number {
+  if (!Array.isArray(updated)) return 0;
+  return updated.reduce<number>((acc, item) => {
+    const match = /:(\d+)$/.exec(String(item));
+    return acc + (match ? Number(match[1]) || 0 : 1);
+  }, 0);
+}
 
 // Retenção do histórico do contato (Tenants.contactEventsRetentionDays): valores
 // aceitos pelo backend. 0 = nunca apagar (padrão).
@@ -162,9 +207,25 @@ function GroupHeading({ id, label, first }: { id: string; label: string; first?:
 
 export default function ConfigGeralPage() {
   const t = useTranslations("configGeralPage");
+  const tr = useTranslations("regionSettings");
+  const uiLocale = useLocale();
   const messages = useMessages();
   const tenantId = useAuthStore((s) => s.user?.tenantId);
+  // Card "Região e idioma" só existe quando o backend conhece a Região
+  // (`regionEffective` no GET /tenants/:id). Backend antigo: card, busca, índice e
+  // ajuda da Região ficam ocultos e nenhum request novo é feito. Só admin e custom
+  // editam a Região (o backend recusa super e superadmin): para os demais, o card some.
+  const { supported: regionBackendSupported } = useRegion();
+  const regionProfile = useAuthStore((s) => s.user?.profile);
+  const regionSupported = regionBackendSupported && (regionProfile === "admin" || regionProfile === "custom");
   const [settings, setSettings] = useState<Setting[]>([]);
+  // Aviso de mensagens sem custo (anúncios): só existe quando o backend confirma a coluna
+  // (rota própria). Sem ela a linha some e sai da contagem, senão o salvar travaria.
+  const [freeEntryBannerSupported, setFreeEntryBannerSupported] = useState(false);
+  const isCatalogEntryShown = useCallback(
+    (key: string) => key !== "freeEntryWindowBanner" || freeEntryBannerSupported,
+    [freeEntryBannerSupported]
+  );
   const [loading, setLoading] = useState(true);
   const [changed, setChanged] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState(false);
@@ -177,6 +238,10 @@ export default function ConfigGeralPage() {
   const [instagramPkSanitizeOpen, setInstagramPkSanitizeOpen] = useState(false);
   const userProfile = useAuthStore((s) => s.user?.profile);
   const canRunLidConsolidation = userProfile === "admin" || userProfile === "superadmin";
+  // "Habilitar perfis personalizados", "Atendentes podem enviar cobranças" e "Senha de
+  // novos usuários" só o administrador grava (o servidor recusa o personalizado): para ele
+  // as três aparecem travadas com o aviso, em vez de dar erro ao salvar.
+  const adminOnlyLocked = userProfile === "custom";
   const [confirm, setConfirm] = useState<ConfirmDialog>({
     open: false, title: "", message: "", onConfirm: () => {},
   });
@@ -240,7 +305,14 @@ export default function ConfigGeralPage() {
       try {
         const promises: Promise<unknown>[] = [fetchSettings(), fetchChatFlows(), fetchQueues(), fetchAllUsers()];
         if (tenantId) promises.push(fetchTenantById(tenantId));
+        // Aviso de mensagens sem custo (anúncios): a coluna fica fora do GET /tenants/:id.
+        // Falha ou backend sem a rota = valor padrão ("enabled"), sem derrubar a carga.
+        const freeEntryBannerPromise = tenantId
+          ? fetchFreeEntryWindowBanner(tenantId).then(({ data }) => data).catch(() => null)
+          : Promise.resolve(null);
         const results = await Promise.all(promises);
+        const freeEntryBanner = await freeEntryBannerPromise;
+        setFreeEntryBannerSupported(freeEntryBanner?.available === true);
         const settingsData = (results[0] as { data: unknown }).data;
         const flowsData = (results[1] as { data: unknown }).data;
         const queuesData = (results[2] as { data: Queue[] }).data;
@@ -264,6 +336,13 @@ export default function ConfigGeralPage() {
           setHasContactEventsRetention(
             !!tenantData && Object.prototype.hasOwnProperty.call(tenantData, "contactEventsRetentionDays")
           );
+          // Região: renova o store com o que o banco tem agora (outro admin pode ter
+          // trocado desde o boot). Backend antigo (sem regionEffective) = null = nada muda.
+          const loadedRegion = regionStateFromTenant(tenantData);
+          if (loadedRegion) {
+            useAuthStore.getState().setRegion(loadedRegion);
+            void ensureRegionTexts();
+          }
           const tenantFieldMap: Record<string, unknown> = {
             chatbotLane: tenantData?.showChatBot,
             semRedis: tenantData?.noRedis,
@@ -351,6 +430,11 @@ export default function ConfigGeralPage() {
             wabaTemplateBanner: tenantData?.wabaTemplateBanner ?? "enabled",
             wabaTemplateBannerMessage: tenantData?.wabaTemplateBannerMessage ?? "",
             windowClosedBanner: tenantData?.windowClosedBanner ?? "enabled",
+            freeEntryWindowBanner: freeEntryBanner?.available ? freeEntryBanner.freeEntryWindowBanner : undefined,
+            // Região: NULL no banco = herda o padrão geral = "" na tela.
+            regionCountry: tenantData?.regionCountry ?? "",
+            regionCurrency: tenantData?.regionCurrency ?? "",
+            regionLanguage: tenantData?.regionLanguage ?? "",
           };
           // Carência pós-atendimento: valor em segundos; exibir em minutos quando múltiplo
           const graceSecsLoaded = Number(tenantData?.botReopenGraceSeconds ?? 0);
@@ -410,6 +494,63 @@ export default function ConfigGeralPage() {
     });
   }, []);
 
+  // Recusa da Região traduzida. ERR_NO_PERMISSION usa o mesmo id do aviso global de
+  // permissão (layout): o sonner troca o texto em vez de empilhar dois toasts.
+  const showRegionError = (code: string) => {
+    if (REGION_ERROR_CODES.includes(code)) {
+      toast.error(tr(`errors.${code}`), code === "ERR_NO_PERMISSION" ? { id: "zpro-no-permission" } : undefined);
+    } else {
+      toast.error(tr("errors.generic"));
+    }
+  };
+
+  /**
+   * Depois de gravar campo(s) da Região: o store recebe a Região NOVA (tela inteira
+   * passa a usar país/moeda novos sem F5). Os PUTs são paralelos e cada resposta só
+   * garante o próprio campo, então a fonte é UMA releitura do GET /tenants/:id depois
+   * de todos; a resposta do último PUT gravado fica de reserva.
+   * Devolve o idioma novo quando o idioma EFETIVO mudou (o save oferece os textos
+   * padrão nele, depois dos avisos do próprio save); senão null.
+   */
+  const refreshRegionAfterSave = async (
+    results: PromiseSettledResult<unknown>[],
+    savedIdx: number[],
+    entries: [string, string][]
+  ): Promise<string | null> => {
+    const before = useAuthStore.getState().region;
+    let next: RegionState | null = null;
+    if (tenantId) {
+      try {
+        const { data } = await fetchTenantById(tenantId);
+        next = regionStateFromTenant(Array.isArray(data) ? data[0] : data);
+      } catch {
+        /* cai na resposta do PUT abaixo */
+      }
+    }
+    for (let k = savedIdx.length - 1; k >= 0 && !next; k -= 1) {
+      const r = results[savedIdx[k]];
+      if (r.status === "fulfilled") next = regionStateFromTenant((r.value as { data?: unknown } | undefined)?.data);
+    }
+    if (next) {
+      useAuthStore.getState().setRegion(next);
+      void ensureRegionTexts();
+    }
+
+    const languageSaved = savedIdx.some((i) => entries[i][0] === REGION_SETTING_KEYS.language);
+    const newLanguage = next?.language;
+    if (!languageSaved || !newLanguage || newLanguage === before?.language) return null;
+    return newLanguage;
+  };
+
+  // Oferta (nunca aplicação automática) dos textos padrão depois de trocar o idioma.
+  const offerRegionTexts = (language: string) => {
+    toast.info(tr("saved", { language: regionLanguageName(language) }), {
+      description: tr("savedOfferDesc"),
+      duration: 20000,
+      action: { label: tr("applyDefaultsButton"), onClick: () => handleApplyRegionTexts() },
+    });
+  };
+
   const handleSave = async (): Promise<boolean> => {
     setSaving(true);
     try {
@@ -430,13 +571,17 @@ export default function ConfigGeralPage() {
           const tenantMapping = TENANT_KEY_MAP[key];
           if (tenantMapping && tenantId) {
             // customProfileEnabled é boolean no backend; contactEventsRetentionDays é
-            // número de dias; demais flags são strings 'enabled'/'disabled'
+            // número de dias; os limites (tentativas, atendimentos, chat interno) são
+            // colunas inteiras — campo vazio ia como "" e o backend recusava;
+            // demais flags são strings 'enabled'/'disabled'
             const mappedValue =
               tenantMapping.field === "customProfileEnabled"
                 ? value === "enabled"
                 : tenantMapping.field === "contactEventsRetentionDays"
                   ? Number(value) || 0
-                  : value;
+                  : TENANT_INT_LIMIT_FIELDS.has(tenantMapping.field)
+                    ? Math.max(0, Math.trunc(Number(value) || 0))
+                    : value;
             return api.put(`/${tenantMapping.url}/${tenantId}`, {
               id: tenantId,
               [tenantMapping.field]: mappedValue,
@@ -446,12 +591,34 @@ export default function ConfigGeralPage() {
         })
       );
 
+      // Região: campo gravado (mesmo com falha em outra chave) → o store passa a ter a
+      // Região NOVA antes de qualquer retorno, senão a tela seguiria no país/moeda antigos.
+      const regionSavedIdx = entries
+        .map((_, i) => i)
+        .filter((i) => isRegionSettingKey(entries[i][0]) && results[i].status === "fulfilled");
+      const newRegionLanguage =
+        regionSavedIdx.length > 0 ? await refreshRegionAfterSave(results, regionSavedIdx, entries) : null;
+
       const failedKeys = results
         .map((r, i) => (r.status === "rejected" ? entries[i][0] : null))
         .filter((k): k is string => k !== null);
 
       if (failedKeys.length > 0) {
-        toast.error(t("errorSavePartial", { keys: failedKeys.join(", ") }));
+        // Recusa da Região tem texto próprio (código do backend traduzido); as demais
+        // chaves seguem no aviso de sempre.
+        const regionCodes = new Set<string>();
+        results.forEach((r, i) => {
+          if (r.status === "rejected" && isRegionSettingKey(entries[i][0])) {
+            regionCodes.add(apiErrorCode(r.reason) || "");
+          }
+        });
+        regionCodes.forEach((code) => showRegionError(code));
+        const otherFailed = failedKeys.filter((k) => !isRegionSettingKey(k));
+        if (otherFailed.length > 0) {
+          toast.error(t("errorSavePartial", { keys: otherFailed.join(", ") }));
+        }
+        // O idioma pode ter gravado mesmo com outra chave recusada.
+        if (newRegionLanguage) offerRegionTexts(newRegionLanguage);
         return false;
       }
 
@@ -488,6 +655,7 @@ export default function ConfigGeralPage() {
       }
       setChanged({});
       toast.success(t("successSave"));
+      if (newRegionLanguage) offerRegionTexts(newRegionLanguage);
       return true;
     } catch {
       toast.error(t("errorSave"));
@@ -508,6 +676,66 @@ export default function ConfigGeralPage() {
     } finally {
       setActionLoading(null);
     }
+  };
+
+  // Textos da tabela Settings que o "aplicar textos padrão" trocou e que esta tela
+  // mostra (mensagem de chamada recusada, encerramento, posição na fila): relê só
+  // essas chaves para o campo não seguir com o texto antigo até o F5.
+  const syncAppliedRegionSettings = async (updated: unknown[]) => {
+    const keys = updated
+      .filter((u): u is string => typeof u === "string" && u.startsWith("setting:"))
+      .map((u) => u.slice("setting:".length));
+    if (keys.length === 0) return;
+    try {
+      const { data } = await fetchSettings();
+      const arr: Setting[] = Array.isArray(data) ? data : ((data as Record<string, unknown>)?.settings as Setting[]) || [];
+      const fresh = arr.filter((s) => keys.includes(s.key));
+      if (fresh.length === 0) return;
+      setSettings((prev) => {
+        const next = prev.map((s) => {
+          const f = fresh.find((x) => x.key === s.key);
+          return f ? { ...s, value: f.value } : s;
+        });
+        for (const f of fresh) if (!prev.some((s) => s.key === f.key)) next.push({ key: f.key, value: f.value });
+        return next;
+      });
+      useAuthStore.getState().setConfiguracoes(fresh.map((s) => ({ key: s.key, value: s.value })));
+    } catch {
+      /* sem a releitura, o texto novo aparece depois de recarregar a tela */
+    }
+  };
+
+  // "Aplicar textos padrão no idioma": o idioma-alvo é o GRAVADO (o backend lê do
+  // banco), por isso o botão fica travado enquanto há troca de idioma sem salvar.
+  // Nada é aplicado sem confirmação — nem quando oferecido depois do save.
+  const handleApplyRegionTexts = () => {
+    if (!tenantId) return;
+    const languageName = regionLanguageName(useAuthStore.getState().region?.language || "pt");
+    openConfirm(
+      tr("applyDefaultsConfirmTitle", { language: languageName }),
+      tr("applyDefaultsConfirmDesc", { language: languageName }),
+      async () => {
+        await runAction(REGION_APPLY_ACTION_KEY, async () => {
+          try {
+            const { data } = await applyRegionDefaultTexts(tenantId);
+            const updated = Array.isArray(data?.updated) ? data.updated : [];
+            const count = countUpdatedRegionItems(updated);
+            const kept = Number(data?.keptCustom) || 0;
+            const resultLanguage = regionLanguageName(
+              data?.language || useAuthStore.getState().region?.language || "pt"
+            );
+            const detail = kept > 0 ? { description: tr("applyDefaultsKept", { count: kept }) } : undefined;
+            if (count > 0) toast.success(tr("applyDefaultsResult", { count, language: resultLanguage }), detail);
+            else toast.info(tr("applyDefaultsNothing", { language: resultLanguage }), detail);
+            await syncAppliedRegionSettings(updated);
+          } catch (err) {
+            const code = apiErrorCode(err);
+            if (code && REGION_ERROR_CODES.includes(code)) showRegionError(code);
+            else toast.error(tr("applyDefaultsError"));
+          }
+        });
+      }
+    );
   };
 
   const handleResetFlow = () => {
@@ -683,6 +911,7 @@ export default function ConfigGeralPage() {
     { id: "windowTimerBanner", label: t("windowTimerBanner"), section: t("orgDistTitle") },
     { id: "wabaTemplateBanner", label: t("wabaTemplateBanner"), section: t("orgDistTitle") },
     { id: "windowClosedBanner", label: t("windowClosedBanner"), section: t("orgDistTitle") },
+    ...(freeEntryBannerSupported ? [{ id: "freeEntryWindowBanner", label: t("freeEntryWindowBanner"), section: t("orgDistTitle") }] : []),
     { id: "listarPelaUltimaMensagem", label: t("listarPelaUltimaMensagem"), section: t("orgDistTitle") },
     { id: "ordemReversaLista", label: t("ordemReversaLista"), section: t("orgDistTitle") },
     { id: "validateContact", label: t("validateContact"), section: t("orgDistTitle") },
@@ -737,16 +966,23 @@ export default function ConfigGeralPage() {
     { id: "limiteTickets", label: t("limiteTickets"), section: t("attendanceResourcesTitle") },
     { id: "limiteChatInterno", label: t("limiteChatInterno"), section: t("attendanceResourcesTitle") },
     { id: "forbiddenNumbers", label: t("forbiddenNumbers"), section: t("attendanceResourcesTitle") },
+    // Região e idioma: só com backend que conhece a Região (senão o card não existe).
+    ...(regionSupported ? [
+      { id: REGION_SETTING_KEYS.country, label: tr("countryLabel"), section: tr("title") },
+      { id: REGION_SETTING_KEYS.currency, label: tr("currencyLabel"), section: tr("title") },
+      { id: REGION_SETTING_KEYS.language, label: tr("languageLabel"), section: tr("title") },
+      { id: REGION_APPLY_ACTION_KEY, label: tr("applyDefaultsButton"), section: tr("title") },
+    ] : []),
     { id: "forceMessage", label: t("forceMessageTitle"), section: t("systemActionsTitle") },
     { id: "resolvePending", label: t("resolveMessagesTitle"), section: t("systemActionsTitle") },
     { id: "validateContacts", label: t("validateContactsTitle"), section: t("systemActionsTitle") },
     { id: "syncMessages", label: t("syncMessagesTitle"), section: t("systemActionsTitle") },
-    { id: "syncTicketData", label: t("syncTicketsTitle"), section: t("systemActionsTitle") },
+    ...(canRunLidConsolidation ? [{ id: "syncTicketData", label: t("syncTicketsTitle"), section: t("systemActionsTitle") }] : []),
     { id: "scanContacts", label: t("scanContactsTitle"), section: t("systemActionsTitle") },
     ...(canRunLidConsolidation ? [{ id: "normalizeBirthdays", label: t("normalizeBirthdaysTitle"), section: t("systemActionsTitle") }] : []),
     ...(canRunLidConsolidation ? [{ id: "lidConsolidation", label: t("lidConsolidationTitle"), section: t("systemActionsTitle") }] : []),
     ...(canRunLidConsolidation ? [{ id: "instagramPkSanitize", label: t("instagramPkSanitizeTitle"), section: t("systemActionsTitle") }] : []),
-  ], [t, canRunLidConsolidation, hasContactEventsRetention]);
+  ], [t, tr, canRunLidConsolidation, hasContactEventsRetention, regionSupported, freeEntryBannerSupported]);
 
   // \u00cdndice r\u00f3tulo -> descri\u00e7\u00e3o, montado a partir das mensagens cruas do namespace.
   // A conven\u00e7\u00e3o do arquivo de locale \u00e9 `chave` + `chaveDesc`, ent\u00e3o d\u00e1 para indexar
@@ -761,6 +997,21 @@ export default function ConfigGeralPage() {
       const label = ns[key];
       const desc = ns[`${key}Desc`];
       if (typeof label === "string" && typeof desc === "string") map[label] = desc;
+    }
+    // Card da Região: rótulos e descrições no namespace próprio (regionSettings).
+    const rs = (messages as Record<string, unknown>)?.regionSettings as Record<string, unknown> | undefined;
+    if (rs) {
+      const pairs: Array<[string, string]> = [
+        ["countryLabel", "countryDesc"],
+        ["currencyLabel", "currencyDesc"],
+        ["languageLabel", "languageDesc"],
+        ["applyDefaultsButton", "applyDefaultsTooltip"],
+      ];
+      for (const [labelKey, descKey] of pairs) {
+        const label = rs[labelKey];
+        const desc = rs[descKey];
+        if (typeof label === "string" && typeof desc === "string") map[label] = desc;
+      }
     }
     return map;
   }, [messages]);
@@ -817,21 +1068,26 @@ export default function ConfigGeralPage() {
   );
 
   const statusCounts = useMemo(() => {
-    const all = SETTINGS_CATALOG.length;
+    // Sem Região no backend o card não existe: os itens dele não entram no total.
+    const catalog = (regionSupported
+      ? SETTINGS_CATALOG
+      : SETTINGS_CATALOG.filter((e) => e.section !== REGION_SECTION_KEY)
+    ).filter((e) => isCatalogEntryShown(e.key));
+    const all = catalog.length;
     let enabled = 0;
-    for (const e of SETTINGS_CATALOG) if (isEnabled(e.key)) enabled += 1;
+    for (const e of catalog) if (isEnabled(e.key)) enabled += 1;
     return { all, enabled, changed: Object.keys(changed).length };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [settings, changed]);
+  }, [settings, changed, regionSupported, isCatalogEntryShown]);
 
   const tagItems = useMemo(
     () =>
       SETTING_TAG_ORDER.map((tag) => ({
         tag,
         label: t(tagLabelKey(tag)),
-        count: SETTINGS_CATALOG.filter((e) => e.tags.includes(tag)).length,
+        count: SETTINGS_CATALOG.filter((e) => e.tags.includes(tag) && isCatalogEntryShown(e.key)).length,
       })),
-    [t]
+    [t, isCatalogEntryShown]
   );
 
   const toggleTag = useCallback((tag: SettingTag) => {
@@ -849,25 +1105,30 @@ export default function ConfigGeralPage() {
     for (const section of SETTING_SECTION_ORDER) acc[section] = { active: 0, total: 0 };
     for (const e of SETTINGS_CATALOG) {
       // Ações do sistema são execuções, não configurações — não entram na contagem.
-      if (e.section === "systemActionsTitle") continue;
+      // Região e idioma são seletores (país/moeda/idioma), não interruptores: idem.
+      if (isUncountedSection(e.section)) continue;
+      if (!isCatalogEntryShown(e.key)) continue;
       acc[e.section].total += 1;
       if (isEnabled(e.key)) acc[e.section].active += 1;
     }
     return acc;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [settings, changed]);
+  }, [settings, changed, isCatalogEntryShown]);
 
   const sectionNavItems = useMemo(
     () =>
-      SETTING_SECTION_ORDER.map((key) => ({
-        key,
-        label: t(key),
-        countLabel:
-          key === "systemActionsTitle"
+      SETTING_SECTION_ORDER
+        // Sem Região no backend o card não é renderizado: nada de item apontando para o vazio.
+        .filter((key) => key !== REGION_SECTION_KEY || regionSupported)
+        .map((key) => ({
+          key,
+          // O título do card da Região mora no namespace regionSettings.
+          label: key === REGION_SECTION_KEY ? tr("title") : t(key),
+          countLabel: isUncountedSection(key)
             ? undefined
             : `${sectionCounts[key]?.active ?? 0}/${sectionCounts[key]?.total ?? 0}`,
-      })),
-    [t, sectionCounts]
+        })),
+    [t, tr, sectionCounts, regionSupported]
   );
 
   // Lista "antes -> depois" exibida no popover da barra de pendências.
@@ -884,8 +1145,16 @@ export default function ConfigGeralPage() {
       const option = CONTACT_EVENTS_RETENTION_OPTIONS.find((o) => o.value === String(Number(v) || 0));
       return option ? t(option.labelKey) : fmt(v);
     };
+    // Região: "" é "Usar o padrão geral" (não "Vazio"); país e idioma pelo nome.
+    const fmtRegion = (key: string) => (v: string | undefined) => {
+      if (!v) return tr("useDefault");
+      if (key === REGION_SETTING_KEYS.country) return countryName(v, uiLocale);
+      if (key === REGION_SETTING_KEYS.language) return regionLanguageName(v);
+      return v;
+    };
     return Object.entries(changed).map(([key, value]) => {
-      const format = key === "contactEventsRetentionDays" ? fmtRetention : fmt;
+      const format =
+        key === "contactEventsRetentionDays" ? fmtRetention : isRegionSettingKey(key) ? fmtRegion(key) : fmt;
       return {
         key,
         label: labelOf(key),
@@ -893,7 +1162,7 @@ export default function ConfigGeralPage() {
         to: format(value),
       };
     });
-  }, [changed, settings, allSettingItems, t]);
+  }, [changed, settings, allSettingItems, t, tr, uiLocale]);
 
   // Com filtro ativo a seção fica sempre aberta: filtrar e continuar vendo um
   // card fechado passaria a impressão de que o filtro não fez nada. Ao limpar os
@@ -966,7 +1235,7 @@ export default function ConfigGeralPage() {
     // Sub-cabeçalhos de grupo somem quando todas as linhas do grupo sumiram.
     for (const [, groups] of Object.entries(SETTING_GROUP_ORDER)) {
       for (const group of groups) {
-        const keys = SETTINGS_CATALOG.filter((e) => e.group === group).map((e) => e.key);
+        const keys = SETTINGS_CATALOG.filter((e) => e.group === group && isCatalogEntryShown(e.key)).map((e) => e.key);
         const allHidden = hasActiveFilters && keys.every((k) => !matchesFilters(k));
         apply(`group-${group}`, allHidden);
       }
@@ -975,12 +1244,13 @@ export default function ConfigGeralPage() {
     // sem isso restaria só o cabeçalho e a tela pareceria não ter filtrado nada.
     for (const section of SETTING_SECTION_ORDER) {
       if (section === "systemActionsTitle") continue;
-      const keys = SETTINGS_CATALOG.filter((e) => e.section === section).map((e) => e.key);
+      const keys = SETTINGS_CATALOG.filter((e) => e.section === section && isCatalogEntryShown(e.key)).map((e) => e.key);
       apply(`section-${section}`, hasActiveFilters && keys.every((k) => !matchesFilters(k)));
     }
     // Ações do sistema são execuções: sem sentido sob filtro de configuração.
     apply("section-systemActionsTitle", hasActiveFilters);
-  }, [hasActiveFilters, matchesFilters, loading, collapsedSections, compactMode]);
+    // regionSupported: o card da Região pode montar depois (store renovado na carga).
+  }, [hasActiveFilters, matchesFilters, loading, collapsedSections, compactMode, regionSupported, isCatalogEntryShown]);
 
   // `SettingRow`/`Toggle` viviam declarados AQUI dentro. Como ganhavam identidade
   // nova a cada render, o React desmontava e remontava as 61 linhas a cada toggle
@@ -1016,6 +1286,9 @@ export default function ConfigGeralPage() {
       { title: t("helpS8T"), items: [t("helpS8I0"), t("helpS8I1")] },
       { title: t("helpS9T"), items: [t("helpS9I0"), t("helpS9I1"), t("helpS9I2"), t("helpS9I3")] },
       { title: t("helpS10T"), items: [t("helpS10I0"), t("helpS10I1"), t("helpS10I2")] },
+      ...(regionSupported
+        ? [{ title: t("helpS11T"), items: [t("helpS11I0"), t("helpS11I1"), t("helpS11I2"), t("helpS11I3")] }]
+        : []),
     ],
   };
 
@@ -1139,6 +1412,9 @@ export default function ConfigGeralPage() {
               label={t("notViewAssignedTickets")}
               description={t("notViewAssignedTicketsDesc")}
             />
+            <p id="note-NotViewAssignedTickets" className="js-setting-hint text-xs text-muted-foreground -mt-2 mb-3 ml-1 pl-3 border-l-2 border-amber-300 dark:border-amber-700/50">
+              {t("notViewAssignedTicketsNote")}
+            </p>
             <SettingRow
               settingKey="NotViewTicketsChatBot"
               label={t("notViewTicketsChatBot")}
@@ -1176,11 +1452,15 @@ export default function ConfigGeralPage() {
               settingKey="customProfileEnabled"
               label={t("customProfileEnabled")}
               description={t("customProfileEnabledDesc")}
+              disabled={adminOnlyLocked}
+              hint={adminOnlyLocked ? t("adminOnlyOptionHint") : undefined}
             />
             <SettingRow
               settingKey="userPaymentsEnabled"
               label={t("userPaymentsEnabled")}
               description={t("userPaymentsEnabledDesc")}
+              disabled={adminOnlyLocked}
+              hint={adminOnlyLocked ? t("adminOnlyOptionHint") : undefined}
             />
             <SettingRow
               settingKey="privacidadeFunil"
@@ -1458,6 +1738,20 @@ export default function ConfigGeralPage() {
               label={t("windowClosedBanner")}
               description={t("windowClosedBannerDesc")}
             />
+            {/* Janela grátis do anúncio (WABA Meta / Dialog360): aviso de custo, nunca de permissão.
+                Só com backend que confirma a coluna (freeEntryBannerSupported). */}
+            {freeEntryBannerSupported && (
+              <>
+                <SettingRow
+                  settingKey="freeEntryWindowBanner"
+                  label={t("freeEntryWindowBanner")}
+                  description={t("freeEntryWindowBannerDesc")}
+                />
+                <p id="note-freeEntryWindowBanner" className="js-setting-hint text-xs text-muted-foreground -mt-2 mb-3 ml-1 pl-3 border-l-2 border-amber-300 dark:border-amber-700/50">
+                  {t("freeEntryWindowBannerNote")}
+                </p>
+              </>
+            )}
             <GroupHeading id="group-groupPhone" label={t("groupPhone")} />
             <SettingRow
               settingKey="validateContact"
@@ -1490,10 +1784,16 @@ export default function ConfigGeralPage() {
               <div className="flex-1 min-w-0 sm:pr-4">
                 <Label className="text-sm font-medium">{t("userCreationPasswordMode")}</Label>
                 <p className="js-setting-hint text-xs text-muted-foreground mt-0.5">{t("userCreationPasswordModeDesc")}</p>
+                {adminOnlyLocked && (
+                  <p className="text-xs text-muted-foreground mt-1.5 pl-3 border-l-2 border-amber-300 dark:border-amber-700/50">
+                    {t("adminOnlyOptionHint")}
+                  </p>
+                )}
               </div>
               <Select
                 value={getValue("userCreationPasswordMode") || "manual"}
                 onValueChange={(v) => handleChange("userCreationPasswordMode", v)}
+                disabled={adminOnlyLocked}
               >
                 <SelectTrigger className="w-full sm:w-[200px]"><SelectValue /></SelectTrigger>
                 <SelectContent>
@@ -1941,6 +2241,9 @@ export default function ConfigGeralPage() {
                 <div className="js-setting-hint rounded-md bg-blue-50 border border-blue-200 p-3 text-xs text-blue-800">
                   {t("autoCloseChannelOverrideNote")}
                 </div>
+                <div className="js-setting-hint rounded-md bg-amber-50 border border-amber-200 p-3 text-xs text-amber-800">
+                  {t("autoCloseOfficialWindowNote")}
+                </div>
                 <div>
                   <Label className="text-sm">{t("autoCloseTimeLabel")}</Label>
                   <Select
@@ -2080,6 +2383,31 @@ export default function ConfigGeralPage() {
             </div>
         </SettingsCollapsibleSection>
 
+        {/* Região e idioma — país, moeda e idioma das mensagens ao cliente. Só com
+            backend que conhece a Região; seletores fora da contagem de ativas. */}
+        {regionSupported && !!tenantId && (
+          <SettingsCollapsibleSection
+            sectionKey={REGION_SECTION_KEY}
+            title={tr("title")}
+            description={tr("description")}
+            open={isSectionOpen(REGION_SECTION_KEY)}
+            onOpenChange={(o) => toggleSection(REGION_SECTION_KEY, o)}
+          >
+            <RegionSettingsCard
+              getValue={getValue}
+              onChange={handleChange}
+              highlightedKey={highlightedKey}
+              languagePending={
+                REGION_SETTING_KEYS.language in changed &&
+                changed[REGION_SETTING_KEYS.language] !==
+                  (settings.find((s) => s.key === REGION_SETTING_KEYS.language)?.value || "")
+              }
+              applying={actionLoading === REGION_APPLY_ACTION_KEY}
+              onApplyDefaults={handleApplyRegionTexts}
+            />
+          </SettingsCollapsibleSection>
+        )}
+
         {/* Ações do Sistema */}
         <SettingsCollapsibleSection
           sectionKey="systemActionsTitle"
@@ -2113,12 +2441,13 @@ export default function ConfigGeralPage() {
                 description: t("syncMessagesDesc"),
                 onClick: handleSyncMessages,
               },
-              {
+              // O servidor aceita esta só do administrador (os demais levavam erro).
+              ...(canRunLidConsolidation ? [{
                 key: "syncTicketData",
                 label: t("syncTicketsTitle"),
                 description: t("syncTicketsDesc"),
                 onClick: handleSyncTicketData,
-              },
+              }] : []),
               {
                 key: "scanContacts",
                 label: t("scanContactsTitle"),

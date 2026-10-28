@@ -50,9 +50,15 @@ interface Props {
   channel: ChannelInfo;
   value: string | null | undefined;
   onChange: (json: string | null) => void;
+  // Rótulo e dica próprios (o lembrete da página usa o mesmo picker).
+  label?: string;
+  hint?: string;
+  // false = sem cobrança: templates de cobrança saem da lista (o lembrete não monta a
+  // ficha e a Meta recusaria o botão de pagamento sem ela).
+  allowCharge?: boolean;
 }
 
-export function BookingTemplatePicker({ channel, value, onChange }: Props) {
+export function BookingTemplatePicker({ channel, value, onChange, label, hint, allowCharge = true }: Props) {
   const t = useTranslations("bookingConfig");
   // Labels das variáveis reusam as chaves do builder do chatbot (já em todos os locales).
   const tNode = useTranslations("flowBuilderNodeForm");
@@ -97,6 +103,7 @@ export function BookingTemplatePicker({ channel, value, onChange }: Props) {
   // Dedup por name|language (templates WABA repetem entre idiomas).
   const templateOptions = templates.filter(
     (tpl: any, idx: number, arr: any[]) =>
+      (allowCharge || !isOrderDetailsTemplateLike(tpl?.components || [])) &&
       arr.findIndex(
         (o: any) => o?.name === tpl?.name && String(o?.language || "") === String(tpl?.language || "")
       ) === idx
@@ -107,7 +114,7 @@ export function BookingTemplatePicker({ channel, value, onChange }: Props) {
   // template escolhido é de cobrança e viaja no MESMO JSON já salvo em
   // confirmationTemplate (coluna TEXT), sob a chave `orderDetails`. Template
   // comum continua emitindo exatamente as chaves de hoje.
-  const isOrderDetails = isOrderDetailsTemplateLike(tplComponents);
+  const isOrderDetails = allowCharge && isOrderDetailsTemplateLike(tplComponents);
   const orderKey = `${channel.id}|${selectedName}|${selectedLang}`;
   const [orderValue, setOrderValue] = useState<OrderDetailsValue>(
     () => orderDetailsFromPayload(parsed?.orderDetails) || emptyOrderDetails()
@@ -131,7 +138,7 @@ export function BookingTemplatePicker({ channel, value, onChange }: Props) {
     order: OrderDetailsValue | null = orderValue
   ) => {
     if (!name) { onChange(null); return; }
-    const withOrder = !!order && isOrderDetailsTemplateLike(components);
+    const withOrder = allowCharge && !!order && isOrderDetailsTemplateLike(components);
     onChange(JSON.stringify({
       templateName: name,
       language: language || "pt_BR",
@@ -176,8 +183,8 @@ export function BookingTemplatePicker({ channel, value, onChange }: Props) {
 
   return (
     <div className="grid gap-2 rounded-md border p-3 bg-muted/30 min-w-0">
-      <Label className="text-xs">{t("confirmationTemplateLabel")}</Label>
-      <p className="text-[11px] text-muted-foreground">{t("confirmationTemplateHint")}</p>
+      <Label className="text-xs">{label ?? t("confirmationTemplateLabel")}</Label>
+      <p className="text-[11px] text-muted-foreground">{hint ?? t("confirmationTemplateHint")}</p>
 
       {loading ? (
         <div className="flex items-center gap-2 text-sm text-muted-foreground py-1">

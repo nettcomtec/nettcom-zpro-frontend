@@ -5,7 +5,7 @@ import { useTranslations } from "next-intl";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 
 interface Props {
-  context: "copilot" | "channel";
+  context: "copilot" | "channel" | "agent";
 }
 
 export function OpenAIBaseUrlTooltip({ context }: Props) {
@@ -62,7 +62,11 @@ export function OpenAIBaseUrlTooltip({ context }: Props) {
           </section>
 
           <div className="text-muted-foreground italic border-t pt-2">
-            {context === "copilot" ? t("tooltipScopeCopilot") : t("tooltipScopeChannel")}
+            {context === "copilot"
+              ? t("tooltipScopeCopilot")
+              : context === "agent"
+                ? t("tooltipScopeAgent")
+                : t("tooltipScopeChannel")}
           </div>
         </div>
       </PopoverContent>

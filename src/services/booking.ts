@@ -8,6 +8,9 @@ export interface BookingEventTypeLite {
   name: string;
   isActive: boolean;
   durationMinutes: number;
+  // Só na lista de páginas (backend novo): o serviço tem template de confirmação.
+  // Ausente = backend antigo, sem aviso.
+  hasConfirmationTemplate?: boolean;
 }
 
 export interface BookingPage {
@@ -30,9 +33,21 @@ export interface BookingPage {
   googleCalendarId?: string | null;
   checkInMinutesBefore?: number;
   checkInMessage?: string | null;
+  // Template do lembrete em canal oficial (JSON do picker). Ausente = backend antigo.
+  checkInTemplate?: string | null;
   eventTypes?: BookingEventTypeLite[];
   createdAt?: string;
   updatedAt?: string;
+}
+
+// Troca da página para canal oficial com serviço ativo sem template: o backend recusa
+// (ERR_BOOKING_BSP_TEMPLATE_REQUIRED + services) até a tela confirmar a pausa deles.
+export interface BookingPageUpdatePayload extends Partial<BookingPage> {
+  pauseServicesWithoutTemplate?: boolean;
+}
+
+export interface BookingPageUpdateResult extends BookingPage {
+  pausedServices?: Array<{ id: number; name: string }>;
 }
 
 export type BookingLocationType = "in_person" | "online" | "phone" | "custom";
@@ -146,9 +161,9 @@ export async function createBookingPage(data: Partial<BookingPage>): Promise<Boo
   return res.data as BookingPage;
 }
 
-export async function updateBookingPage(id: number, data: Partial<BookingPage>): Promise<BookingPage> {
+export async function updateBookingPage(id: number, data: BookingPageUpdatePayload): Promise<BookingPageUpdateResult> {
   const res = await api.put(`/booking-pages/${id}`, data);
-  return res.data as BookingPage;
+  return res.data as BookingPageUpdateResult;
 }
 
 export async function deleteBookingPage(id: number): Promise<void> {

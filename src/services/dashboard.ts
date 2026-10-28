@@ -51,6 +51,9 @@ export interface RawUserDetail {
   qtd_resolvidos?: number | null;
   qtd_por_usuario?: number | null;
   media_avaliacao?: number | null;
+  // true = média escondida pela Privacidade das avaliações; false = visível;
+  // ausente = backend anterior ao campo (média vazia pode ser qualquer dos dois).
+  avaliacao_oculta?: boolean;
   tma?: DurationParts | null;
   tme?: DurationParts | null;
   tpr?: DurationParts | null;

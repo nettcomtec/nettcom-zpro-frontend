@@ -23,7 +23,8 @@ export interface BulkDispatch {
   metadata?: {
     variables?: string[];
     contacts?: string[];
-    sentContacts?: { contact: string; timestamp: string }[];
+    /** `messageId` = id da mensagem no provedor (wamid), gravado nos envios da 4.0.3.10 em diante */
+    sentContacts?: { contact: string; timestamp: string; messageId?: string }[];
     [key: string]: unknown;
   };
   errors?: { contact: string; error: string; timestamp: string; code?: string; status?: number }[];
@@ -141,6 +142,21 @@ export interface BulkDispatchReportRecipient {
   providerError: unknown;
   /** "wamid" = casamento exato; "phone" = deduzido pelo número (disparo antigo) */
   matchedBy: "wamid" | "phone" | null;
+  /** Só com `replies`: 1ª mensagem do contato pelo canal até `replies.windowDays` dias depois */
+  repliedAt?: string | null;
+  /** Só com `replies`: atendimento em que a resposta chegou */
+  replyTicketId?: number | null;
+}
+
+/** Quem respondeu. Ausente = backend anterior (ou disparo para grupos). */
+export interface DispatchRepliesSummary {
+  available: boolean;
+  windowDays: number;
+  /** Contatos conferidos (envio aceito, casado com a mensagem e sem falha de entrega) */
+  checked: number;
+  /** Contatos que responderam */
+  count: number;
+  reason?: "timeout" | "error" | "busy" | "no_channel";
 }
 
 export interface BulkDispatchReport {
@@ -158,11 +174,21 @@ export interface BulkDispatchReport {
   confirmedFailed: number;
   hasApproximateMatch: boolean;
   recipients: BulkDispatchReportRecipient[];
+  replies?: DispatchRepliesSummary;
 }
 
-/** Relatório por destinatário: número + status confirmado pelo provedor */
-export async function getBulkDispatchReport(id: number) {
-  return api.get<BulkDispatchReport>(`/bulk-dispatch/${id}/report`);
+/** Relatório por destinatário: número + status confirmado pelo provedor.
+ *  `background`: leitura automática da tela (sem o aviso global de recurso fora do plano).
+ *  `replies`: confere também quem respondeu (backend anterior ignora e não devolve `replies`). */
+export async function getBulkDispatchReport(id: number, options?: { background?: boolean; replies?: boolean }) {
+  const config = {
+    ...(options?.background ? BACKGROUND_REQUEST : {}),
+    ...(options?.replies ? { params: { replies: 1 } } : {}),
+  };
+  return api.get<BulkDispatchReport>(
+    `/bulk-dispatch/${id}/report`,
+    Object.keys(config).length ? config : undefined
+  );
 }
 
 /** Fecha a conta do dispatch para eventos que só o front enxerga (ex.: falha de

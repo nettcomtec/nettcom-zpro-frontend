@@ -1,4 +1,5 @@
 import api from "@/lib/api";
+import type { SipConnectivityResponse } from "@/lib/sip-diagnostics";
 
 export interface Queue {
   id: number;
@@ -86,6 +87,13 @@ export async function persistTourDone(userId: number) {
   return api.put(`/users/${userId}/configs`, { tourDone: "v1" }, { skipNoPermissionToast: true });
 }
 
+// Som das notificações só do próprio usuário (botão de som do topo). skipNoPermissionToast:
+// backend antigo sem a chave na allowlist de User.configs responde 403 — quem chama mostra
+// o próprio aviso e volta a escolha.
+export async function persistNotificationSoundMute(userId: number, mode: "none" | "groups" | "all") {
+  return api.put(`/users/${userId}/configs`, { notificationSoundMute: mode }, { skipNoPermissionToast: true });
+}
+
 // Troca da própria senha (exige senha atual; backend limpa mustChangePassword)
 export async function changeOwnPassword(data: { currentPassword: string; newPassword: string }) {
   return api.put("/users/change-password", data);
@@ -94,6 +102,31 @@ export async function changeOwnPassword(data: { currentPassword: string; newPass
 // Reenvio do convite de definição de senha (modo invite do tenant)
 export async function resendUserInvite(userId: number) {
   return api.post(`/users/${userId}/resend-invite`);
+}
+
+// "Testar conexão" da Config SIP. Falha da chamada (backend antigo sem a rota, rede)
+// devolve null: o teste mostra o motivo genérico em vez de quebrar.
+export async function checkSipConnectivity(input: {
+  server: string;
+  port: number;
+  transport: "wss" | "ws";
+  origin: string;
+}): Promise<SipConnectivityResponse | null> {
+  try {
+    const { data } = await api.post<SipConnectivityResponse>("/users/sip-diagnostics/connectivity", input);
+    return data && typeof data.code === "string" ? data : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function resolveSipHost(host: string): Promise<string[] | null> {
+  try {
+    const { data } = await api.post<{ ok: boolean; addresses?: string[] }>("/users/sip-diagnostics/resolve", { host });
+    return data?.ok && Array.isArray(data.addresses) ? data.addresses : null;
+  } catch {
+    return null;
+  }
 }
 
 export async function updateUserIsOnline(userId: number, isOnline: boolean) {

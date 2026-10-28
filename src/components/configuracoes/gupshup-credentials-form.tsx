@@ -53,9 +53,9 @@ export function GupshupCredentialsForm() {
           gupshupSolutionId: sol,
           gupshupAppId: app,
         });
-        toast.success(t("saveSuccess"));
+        toast.success(t("successSave"));
       } catch {
-        toast.error(t("saveError"));
+        toast.error(t("errorSave"));
       }
     }, 700);
   };
@@ -70,20 +70,13 @@ export function GupshupCredentialsForm() {
         <CardContent className="pt-5 text-sm space-y-2">
           <p className="font-semibold text-foreground">Customer Account vs Partner Account</p>
           <p className="text-muted-foreground">
-            <strong>Partner Account</strong> (partner.gupshup.io) tem acesso a Partner API:
-            cria apps via Solution ID, gera Embedded Signup links, autenticacao via email/senha.
-            Cadastro separado, exige aprovacao Gupshup (gupshup.io/whatsapp/partner-program).
+            {t.rich("partnerAccountInfo", { strong: (chunks) => <strong>{chunks}</strong> })}
           </p>
           <p className="text-muted-foreground">
-            <strong>Customer Account</strong> (gupshup.io comum) so permite gerenciar apps
-            criados via painel — sem Partner API. Para conectar canais Customer no Z-PRO use
-            o fluxo <strong>Manual</strong> em /sessoes (cola App ID + App Token direto, sem
-            Solution ID nem Partner login). Webhook precisa ser configurado manualmente no
-            painel do app Gupshup.
+            {t.rich("customerAccountInfo", { strong: (chunks) => <strong>{chunks}</strong> })}
           </p>
           <p className="text-muted-foreground">
-            Os campos abaixo sao credenciais <strong>Partner</strong>. Deixe em branco se
-            so vai usar o fluxo Manual com Customer Account.
+            {t.rich("partnerFieldsInfo", { strong: (chunks) => <strong>{chunks}</strong> })}
           </p>
         </CardContent>
       </Card>

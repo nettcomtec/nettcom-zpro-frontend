@@ -71,23 +71,20 @@ export function Dialog360CredentialsForm() {
         <CardContent className="pt-5 text-sm space-y-2">
           <p className="font-semibold text-foreground">Customer Account vs Partner Account</p>
           <p className="text-muted-foreground">
-            <strong>Partner Account</strong> (hub.360dialog.com como Partner) tem acesso a
-            Partner API: cria novos canais, emite D360-API-KEY, atua como BSP em nome de
-            clientes. Cadastro separado, exige aprovacao 360dialog. Os campos abaixo
-            (Partner ID + Partner API Key + Platform Secret) sao desse modelo.
+            {t.rich("partnerAccountInfo", { strong: (chunks) => <strong>{chunks}</strong> })}
           </p>
           <p className="text-muted-foreground">
-            <strong>Customer Account</strong> (conta 360dialog comum) so gerencia canais
-            criados via painel — usa D360-API-KEY emitida pelo WABA Manager. Para conectar
-            canais Customer no Z-PRO use o fluxo <strong>Manual</strong> em /sessoes (cola
-            apenas a D360-API-KEY, sem Partner ID).
+            {t.rich("customerAccountInfo", { strong: (chunks) => <strong>{chunks}</strong> })}
           </p>
           <p className="text-muted-foreground">
-            <strong>Formato do Partner ID:</strong> alfanumerico opaco (ex: <code>p_xyz123</code>),
-            <em>nao eh seu email</em>. Encontrado no painel 360dialog &rarr; perfil de Partner.
+            {t.rich("partnerIdFormatInfo", {
+              strong: (chunks) => <strong>{chunks}</strong>,
+              code: (chunks) => <code>{chunks}</code>,
+              em: (chunks) => <em>{chunks}</em>,
+            })}
           </p>
           <p className="text-muted-foreground">
-            Deixe em branco se so vai usar o fluxo Manual com Customer Account.
+            {t("leaveBlankInfo")}
           </p>
         </CardContent>
       </Card>

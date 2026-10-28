@@ -55,6 +55,8 @@ const normalizeSearch = (s: string) =>
 
 export function BlockPalette() {
   const t = useTranslations("flowBuilderEditor");
+  // Nome do bloco no idioma da tela; sem `labelKey` (nome próprio) vale o `label`.
+  const tDef = useTranslations("flowBuilderDefaults");
   const [search, setSearch] = useState("");
   const query = normalizeSearch(search.trim());
 
@@ -76,8 +78,10 @@ export function BlockPalette() {
           const items = cat.types.flatMap((type) => {
             const it = INTERACTION_TYPES.find((i) => i.type === type);
             if (!it) return [];
-            if (query && !normalizeSearch(it.label).includes(query)) return [];
-            return [{ type, it }];
+            const label = it.labelKey ? tDef(it.labelKey) : it.label;
+            // Busca pelo nome traduzido e também pelo PT de reserva.
+            if (query && !normalizeSearch(label).includes(query) && !normalizeSearch(it.label).includes(query)) return [];
+            return [{ type, it, label }];
           });
           if (items.length === 0) return null;
           return (
@@ -86,7 +90,7 @@ export function BlockPalette() {
                 {t(cat.labelKey)}
               </p>
               <div className="space-y-0.5">
-                {items.map(({ type, it }) => {
+                {items.map(({ type, it, label }) => {
                   const Ico = iconMap[it.icon] || MessageSquare;
                   return (
                     <div
@@ -97,10 +101,10 @@ export function BlockPalette() {
                         e.dataTransfer.effectAllowed = "move";
                       }}
                       className="flex cursor-grab items-center gap-2 rounded-md px-2 py-1.5 text-xs hover:bg-accent active:cursor-grabbing"
-                      title={it.label}
+                      title={label}
                     >
                       <Ico className="h-3.5 w-3.5 shrink-0 text-primary" />
-                      <span className="truncate">{it.label}</span>
+                      <span className="truncate">{label}</span>
                     </div>
                   );
                 })}

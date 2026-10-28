@@ -21,14 +21,15 @@ import {
 } from "@/components/ui/table";
 import { TextareaWithVars } from "@/components/shared/variable-picker";
 import {
-  Plus, Pencil, Trash2, X, Check, ChevronRight, Film, Instagram, Zap, History,
+  Plus, Pencil, Trash2, X, Check, ChevronRight, ChevronDown, Film, Instagram, Zap, History,
   ShieldCheck, Loader2, Minus, RefreshCw, CalendarClock, FileText, Send, LayoutGrid, Upload, Cloud, Home,
 } from "lucide-react";
 import { Textarea } from "@/components/ui/textarea";
 import { toast } from "sonner";
 import { useTranslations } from "next-intl";
 import { fetchWhatsapps, type Whatsapp } from "@/services/whatsapp";
-import { listMedia, type InstagramMedia } from "@/services/instagram";
+import { useInstagramMediaPages } from "@/hooks/use-instagram-media-pages";
+import { InstagramMediaThumb } from "@/components/instagram/instagram-media-thumb";
 import { fetchChatFlows } from "@/services/chatflow";
 import {
   listInstagramAutomations, createInstagramAutomation, updateInstagramAutomation,
@@ -47,7 +48,6 @@ import { checkIgImageFile, checkIgImageUrl } from "@/lib/ig-image-validation";
 import { usePageAccess } from "@/hooks/use-page-access";
 import { AccessDenied } from "@/components/layout/access-denied";
 
-type MediaItem = InstagramMedia & { thumbnail_url?: string };
 type TriggerType = InstagramAutomation["triggerType"];
 type KeywordMatch = InstagramAutomation["keywordMatch"];
 type ScheduleWindow = { weekdays: number[]; startTime: string; endTime: string };
@@ -165,8 +165,9 @@ export default function InstagramAutomacaoPage() {
   const [form, setForm] = useState<FormState>(defaultForm());
   const [saving, setSaving] = useState(false);
 
-  const [mediaList, setMediaList] = useState<MediaItem[]>([]);
-  const [loadingMedia, setLoadingMedia] = useState(false);
+  const mediaPages = useInstagramMediaPages();
+  const mediaList = mediaPages.items;
+  const loadingMedia = mediaPages.loading;
   const [chatFlows, setChatFlows] = useState<{ id: number; name: string }[]>([]);
 
   const [keywordInput, setKeywordInput] = useState("");
@@ -456,6 +457,9 @@ export default function InstagramAutomacaoPage() {
   const selectedConn = connections.find((c) => String(c.id) === selectedConnection);
 
   const needsMediaStep = form.triggerType === "comment" || form.triggerType === "live_comment";
+  // Publicações já selecionadas (edição) que ainda estão em páginas não carregadas
+  const loadedMediaIds = new Set(mediaList.map((m) => m.id));
+  const selectedMediaNotLoaded = form.mediaIds.filter((id) => !loadedMediaIds.has(id)).length;
   const allowsPublicReply = needsMediaStep;
   const allowsDm = form.triggerType !== "live_comment";
   const isCommentTrigger = form.triggerType === "comment";
@@ -531,20 +535,23 @@ export default function InstagramAutomacaoPage() {
     }
   }, []);
 
-  const loadMediaList = useCallback(async (connId: string) => {
-    if (!connId) return;
-    setLoadingMedia(true);
-    try {
-      const res = await listMedia(Number(connId));
-      const raw = res.data;
-      const list = Array.isArray(raw) ? raw : (raw as { data?: MediaItem[] })?.data ?? [];
-      setMediaList(list as MediaItem[]);
-    } catch {
-      setMediaList([]);
-    } finally {
-      setLoadingMedia(false);
+  const { load: loadMediaPages, reset: resetMediaPages, loadMore: loadMoreMediaPages } = mediaPages;
+  const loadMediaList = useCallback((connId: string) => {
+    if (!connId) {
+      resetMediaPages();
+      return;
     }
-  }, []);
+    // Falha avisada: sem o aviso a grade diria "nenhuma publicação" e, na edição, o
+    // operador acharia que a seleção sumiu
+    void loadMediaPages(Number(connId)).then((ok) => {
+      if (!ok) toast.error(t("errorLoadMedia"));
+    });
+  }, [loadMediaPages, resetMediaPages, t]);
+
+  const handleLoadMoreMedia = async () => {
+    const ok = await loadMoreMediaPages();
+    if (!ok) toast.error(t("errorLoadMedia"));
+  };
 
   const openCreate = () => {
     setEditing(null);
@@ -1099,7 +1106,7 @@ export default function InstagramAutomacaoPage() {
                   ) : mediaList.length === 0 ? (
                     <p className="text-sm text-muted-foreground text-center py-6">{t("noMedia")}</p>
                   ) : (
-                    <div className="grid grid-cols-4 gap-2">
+                    <div className="grid grid-cols-3 sm:grid-cols-4 gap-2">
                       {mediaList.map((m) => {
                         const selected = form.mediaIds.includes(m.id);
                         const isVideo = m.media_type === "VIDEO" || m.media_type === "REELS";
@@ -1112,15 +1119,7 @@ export default function InstagramAutomacaoPage() {
                               selected ? "border-primary ring-2 ring-primary/40" : "border-transparent hover:border-muted-foreground/40"
                             }`}
                           >
-                            {isVideo ? (
-                              m.thumbnail_url ? (
-                                <img src={m.thumbnail_url} alt="" className="h-full w-full object-cover" />
-                              ) : (
-                                <video src={m.media_url} className="h-full w-full object-cover" muted />
-                              )
-                            ) : (
-                              <img src={m.media_url} alt="" className="h-full w-full object-cover" />
-                            )}
+                            <InstagramMediaThumb media={m} />
                             {selected && (
                               <div className="absolute top-1 right-1 rounded-full bg-primary p-0.5 text-primary-foreground">
                                 <Check className="h-3 w-3" />
@@ -1140,6 +1139,28 @@ export default function InstagramAutomacaoPage() {
                           </button>
                         );
                       })}
+                    </div>
+                  )}
+                  {!loadingMedia && mediaPages.hasMore && (
+                    <div className="flex flex-col items-center gap-1.5 pt-1">
+                      {selectedMediaNotLoaded > 0 && (
+                        <p className="text-xs text-muted-foreground text-center">
+                          {t("mediaSelectedNotLoaded", { count: selectedMediaNotLoaded })}
+                        </p>
+                      )}
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        onClick={handleLoadMoreMedia}
+                        disabled={mediaPages.loadingMore}
+                        title={t("loadMoreMediaHint")}
+                      >
+                        {mediaPages.loadingMore
+                          ? <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                          : <ChevronDown className="mr-2 h-4 w-4" />}
+                        {t("loadMoreMedia")}
+                      </Button>
                     </div>
                   )}
                 </div>

@@ -50,7 +50,7 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Search, RotateCcw, Eye, RefreshCw, Info, ExternalLink, FileText, Mic, Image as ImageIcon, Video, CheckCircle2, XCircle, Clipboard, Download, Ban, Loader2, CircleAlert, CircleMinus, CircleHelp } from "lucide-react";
+import { Search, RotateCcw, Eye, RefreshCw, Info, ExternalLink, FileText, Mic, Image as ImageIcon, Video, CheckCircle2, XCircle, Clipboard, Download, Ban, Loader2, CircleAlert, CircleMinus, CircleHelp, Check, CheckCheck, Clock, Reply } from "lucide-react";
 import { toast } from "sonner";
 import {
   listDispatches,
@@ -63,6 +63,7 @@ import {
   readBulkSmsErrorStatus,
   isLegacyBackend404,
   type BulkDispatch,
+  type BulkDispatchReport,
   type BulkDispatchReportRecipient,
   type SmsBulkDispatchLean,
   type WabaTemplate,
@@ -73,6 +74,8 @@ import { usePageAccess } from "@/hooks/use-page-access";
 import { useAuthStore } from "@/stores/auth-store";
 import { AccessDenied } from "@/components/layout/access-denied";
 import { PageHelp } from "@/components/layout/page-help";
+import { describeAckError, type AckStatusError } from "@/lib/ack-error-text";
+import { DispatchRepliesHint, DispatchReplyTicketLink, replyRatePercent } from "@/components/common/dispatch-replies";
 
 // ─── helpers ──────────────────────────────────────────────────────────────────
 
@@ -219,6 +222,7 @@ function TemplatePreview({
 // ─── NonOfficialPreview ───────────────────────────────────────────────────────
 
 function NonOfficialPreview({ dispatch }: { dispatch: BulkDispatch }) {
+  const t = useTranslations("massaRelatorioPage");
   const { message, mediaUrl, mediaDescription, voiceUrl } = dispatch;
 
   const isImage =
@@ -255,7 +259,7 @@ function NonOfficialPreview({ dispatch }: { dispatch: BulkDispatch }) {
             >
               <div className="w-full h-28 bg-gray-200 rounded-t-xl flex items-center justify-center gap-1 text-xs text-gray-500">
                 <Video className="h-5 w-5" />
-                <span className="underline">Vídeo</span>
+                <span className="underline">{t("videoPreview")}</span>
               </div>
             </a>
           )}
@@ -322,189 +326,527 @@ function downloadCsv(filename: string, content: string) {
   URL.revokeObjectURL(url);
 }
 
-type TimelineEntry =
-  | { kind: "success"; number: string; timestamp: Date }
-  | { kind: "error"; number: string; timestamp: Date; error: string };
+// ─── resultado da entrega por número (relatório `/:id/report`) ────────────────
+// "Enviado" no disparo = o provedor ACEITOU o pedido de envio. O que acontece
+// depois (entregue, lida, ou falha com o motivo: número sem WhatsApp, limite de
+// marketing da Meta…) chega pelo webhook e fica gravado na mensagem de cada
+// destinatário; o relatório junta os dois. Sem ele (backend anterior ao relatório,
+// ou disparo que não dá para casar com a mensagem) a lista é a de sempre.
+
+type DeliveryOutcome = "read" | "delivered" | "sent" | "awaiting" | "unknown" | "failed";
+
+/** `accepted` e `dispatch_error` = lista de sempre (só o que o disparo guardou). */
+type TimelineRowState = "accepted" | "dispatch_error" | DeliveryOutcome;
+
+interface TimelineRow {
+  number: string;
+  timestamp: Date | null;
+  state: TimelineRowState;
+  /** Erro do disparo ou motivo da falha de entrega */
+  detail: string;
+  /** Status cru do provedor (sent/delivered/read/failed), para o CSV */
+  providerStatus: string;
+  /** 1ª mensagem do contato pelo canal depois do envio (só com o relatório que confere) */
+  repliedAt: Date | null;
+  replyTicketId: number | null;
+}
+
+/** O relatório conferiu quem respondeu (backend novo, disparo que não é para grupos). */
+function hasRepliesInfo(report: BulkDispatchReport | null | undefined): boolean {
+  return report?.replies?.available === true;
+}
+
+const DELIVERY_LABEL_KEY: Record<DeliveryOutcome, string> = {
+  read: "deliveryStatusRead",
+  delivered: "deliveryStatusDelivered",
+  sent: "deliveryStatusSent",
+  awaiting: "deliveryStatusAwaiting",
+  unknown: "deliveryStatusUnknown",
+  failed: "deliveryStatusFailed",
+};
+
+function deliveryOutcomeOf(r: BulkDispatchReportRecipient): DeliveryOutcome {
+  switch (r.providerStatus) {
+    case "read":
+    case "delivered":
+    case "sent":
+    case "failed":
+      return r.providerStatus;
+    default:
+      // Mensagem achada ainda sem confirmação × nenhuma mensagem para conferir.
+      return r.matchedBy ? "awaiting" : "unknown";
+  }
+}
+
+/** O relatório só substitui a lista de sempre quando achou a mensagem de ao menos
+ *  um envio aceito: disparo sem o id da mensagem e sem template (texto por canal
+ *  não oficial, e-mail) não tem como ser conferido, e a tela fica como era. */
+function isDeliveryReportUsable(
+  report: BulkDispatchReport | null | undefined
+): report is BulkDispatchReport {
+  return (
+    !!report &&
+    Array.isArray(report.recipients) &&
+    report.recipients.some((r) => r.accepted && !!r.matchedBy)
+  );
+}
+
+/** Contagem dos envios aceitos pelo resultado final (lida conta como entregue).
+ *  `unknown` (sem mensagem para conferir) fica à parte: nunca vai mudar. */
+function countDeliveryOutcomes(report: BulkDispatchReport): {
+  delivered: number;
+  failed: number;
+  awaiting: number;
+  unknown: number;
+} {
+  let delivered = 0;
+  let failed = 0;
+  let awaiting = 0;
+  let unknown = 0;
+  for (const r of report.recipients) {
+    if (!r.accepted) continue;
+    const outcome = deliveryOutcomeOf(r);
+    if (outcome === "read" || outcome === "delivered") delivered += 1;
+    else if (outcome === "failed") failed += 1;
+    else if (outcome === "unknown") unknown += 1;
+    else awaiting += 1;
+  }
+  return { delivered, failed, awaiting, unknown };
+}
+
+/** `statusError` gravado pelo webhook (`{code, title, details}`); texto solto vira título. */
+function toAckStatusError(value: unknown): AckStatusError | null {
+  if (!value) return null;
+  if (typeof value === "string") return { title: value };
+  if (typeof value === "object") return value as AckStatusError;
+  return null;
+}
+
+/** Motivo da falha de entrega: o mesmo texto do ícone de falha na conversa. */
+function deliveryReasonText(value: unknown, tBubble: (key: string) => string): string {
+  const { code, showCode, desc } = describeAckError(toAckStatusError(value), tBubble);
+  if (desc) return showCode ? `(${code}) ${desc}` : desc;
+  return code;
+}
+
+function dispatchErrorText(error: string | null | undefined, t: (key: string) => string): string {
+  // Marcador interno do pulo por conversa ativa (crossChannelTicketCheck) → rótulo
+  // humano na tela e nos CSVs; demais erros seguem crus.
+  if (error === "active_conversation") return t("skippedActiveConversation");
+  return error ?? "";
+}
+
+function TimelineRowIcon({ state }: { state: TimelineRowState }) {
+  const base = "h-3.5 w-3.5 shrink-0 mt-0.5";
+  switch (state) {
+    case "accepted":
+      return <CheckCircle2 className={`${base} text-green-600`} />;
+    case "read":
+      return <CheckCheck className={`${base} text-sky-600`} />;
+    case "delivered":
+      return <CheckCheck className={`${base} text-green-600`} />;
+    case "sent":
+      return <Check className={`${base} text-muted-foreground`} />;
+    case "awaiting":
+      return <Clock className={`${base} text-amber-600`} />;
+    case "unknown":
+      return <CircleHelp className={`${base} text-muted-foreground`} />;
+    default:
+      return <XCircle className={`${base} text-red-600`} />;
+  }
+}
+
+// Disparo pode ter dezenas de milhares de números: rótulos traduzidos uma vez por
+// lista (não por linha) e a lista só redesenha quando as linhas mudam.
+const TimelineRowList = React.memo(function TimelineRowList({
+  rows,
+  emptyText,
+  labels,
+  copyLabel,
+  onCopy,
+  replyText,
+  openTicketLabel,
+}: {
+  rows: TimelineRow[];
+  emptyText: string;
+  labels: Record<TimelineRowState, string>;
+  copyLabel: string;
+  onCopy: (n: string) => void;
+  /** "Respondeu em <data>": só para as linhas com resposta */
+  replyText: (repliedAt: Date) => string;
+  openTicketLabel: string;
+}) {
+  if (rows.length === 0) {
+    return <p className="text-xs text-muted-foreground text-center py-6">{emptyText}</p>;
+  }
+  return (
+    <ul className="divide-y text-xs">
+      {rows.map((row, i) => {
+        const isError = row.state === "dispatch_error" || row.state === "failed";
+        const label = labels[row.state];
+        const time = row.timestamp ? fmtTime(row.timestamp) : "";
+        return (
+          <li key={i} className="py-1.5 flex items-start gap-2">
+            <TimelineRowIcon state={row.state} />
+            <div className="flex-1 min-w-0">
+              <p className="font-mono truncate">{row.number}</p>
+              {label && (
+                <p className={`text-[11px] ${isError ? "text-red-600 font-medium" : "text-muted-foreground"}`}>
+                  {label}
+                </p>
+              )}
+              {row.detail && <p className="text-red-600 text-[11px] break-words">{row.detail}</p>}
+              {row.repliedAt && (
+                <p className="flex items-center gap-1 text-[11px] font-medium text-emerald-700 dark:text-emerald-400">
+                  <Reply className="h-3 w-3 shrink-0" />
+                  <span className="tabular-nums">{replyText(row.repliedAt)}</span>
+                </p>
+              )}
+              {time && <p className="sm:hidden text-[11px] text-muted-foreground tabular-nums">{time}</p>}
+            </div>
+            {time && (
+              <span className="hidden sm:inline shrink-0 text-muted-foreground tabular-nums mt-0.5">{time}</span>
+            )}
+            {row.repliedAt && row.replyTicketId && (
+              <DispatchReplyTicketLink ticketId={row.replyTicketId} label={openTicketLabel} />
+            )}
+            <Button
+              size="icon"
+              variant="ghost"
+              className="h-6 w-6 shrink-0"
+              onClick={() => onCopy(row.number)}
+              title={copyLabel}
+              aria-label={copyLabel}
+            >
+              <Clipboard className="h-3 w-3" />
+            </Button>
+          </li>
+        );
+      })}
+    </ul>
+  );
+});
+
+function sortRowsByTime(rows: TimelineRow[]): TimelineRow[] {
+  return rows.sort((a, b) => (a.timestamp?.getTime() ?? 0) - (b.timestamp?.getTime() ?? 0));
+}
 
 function DispatchTimeline({
   dispatch,
   t,
+  report,
+  reportLoading,
+  onRefreshReport,
 }: {
   dispatch: BulkDispatch;
   t: (key: string) => string;
+  /** Relatório deste disparo (ou null: carregando, falhou ou backend antigo) */
+  report: BulkDispatchReport | null;
+  reportLoading: boolean;
+  onRefreshReport: () => void;
 }) {
-  const successEntries = (dispatch.metadata?.sentContacts ?? []).map((s) => ({
-    kind: "success" as const,
-    number: s.contact,
-    timestamp: new Date(s.timestamp),
-  }));
-  const errorEntries = (dispatch.errors ?? []).map((e) => ({
-    kind: "error" as const,
-    number: e.contact,
-    timestamp: new Date(e.timestamp),
-    // Marcador interno do pulo por conversa ativa (crossChannelTicketCheck) →
-    // rótulo humano na tela e nos CSVs; demais erros seguem crus.
-    error: e.error === "active_conversation" ? t("skippedActiveConversation") : e.error,
-  }));
-  const timeline: TimelineEntry[] = [...successEntries, ...errorEntries].sort(
-    (a, b) => a.timestamp.getTime() - b.timestamp.getTime(),
-  );
+  const tBubbleRaw = useTranslations("messageBubble");
+  const tBubble = useCallback((key: string) => tBubbleRaw(key as never), [tBubbleRaw]);
+  const tReplies = useTranslations("dispatchReplies");
+  const usable = isDeliveryReportUsable(report);
+  // "Respondeu" só com o relatório que conferiu (backend novo e disparo que não é para grupos).
+  const repliesOn = usable && hasRepliesInfo(report);
+  const repliesFailed =
+    usable && !!report?.replies && !report.replies.available && report.replies.reason !== "no_channel";
 
-  if (timeline.length === 0) return null;
-
-  const copyNumber = (n: string) => {
-    if (typeof navigator !== "undefined" && navigator.clipboard) {
-      navigator.clipboard.writeText(n).then(
-        () => toast.success(t("numberCopied")),
-        () => toast.error(t("copyFailed")),
+  const rows = useMemo<TimelineRow[]>(() => {
+    if (usable && report) {
+      return sortRowsByTime(
+        report.recipients.map((r) => {
+          const outcome = r.accepted ? deliveryOutcomeOf(r) : null;
+          const repliedAt = repliesOn ? parseDateSafe(r.repliedAt) : null;
+          return {
+            number: r.number,
+            timestamp: parseDateSafe(r.sentAt),
+            state: outcome ?? "dispatch_error",
+            detail: !r.accepted
+              ? dispatchErrorText(r.dispatchError, t)
+              : outcome === "failed"
+                ? deliveryReasonText(r.providerError, tBubble)
+                : "",
+            providerStatus: r.providerStatus ?? "",
+            repliedAt,
+            replyTicketId: repliedAt && typeof r.replyTicketId === "number" ? r.replyTicketId : null,
+          };
+        })
       );
     }
-  };
+    return sortRowsByTime([
+      ...(dispatch.metadata?.sentContacts ?? []).map((s) => ({
+        number: s.contact,
+        timestamp: parseDateSafe(s.timestamp),
+        state: "accepted" as const,
+        detail: "",
+        providerStatus: "",
+        repliedAt: null,
+        replyTicketId: null,
+      })),
+      ...(dispatch.errors ?? []).map((e) => ({
+        number: e.contact,
+        timestamp: parseDateSafe(e.timestamp),
+        state: "dispatch_error" as const,
+        detail: dispatchErrorText(e.error, t),
+        providerStatus: "",
+        repliedAt: null,
+        replyTicketId: null,
+      })),
+    ]);
+  }, [usable, repliesOn, report, dispatch, t, tBubble]);
 
+  const groups = useMemo(() => {
+    const errorRows: TimelineRow[] = [];
+    const acceptedRows: TimelineRow[] = [];
+    const deliveredRows: TimelineRow[] = [];
+    const awaitingRows: TimelineRow[] = [];
+    const repliedRows: TimelineRow[] = [];
+    for (const r of rows) {
+      if (r.state === "dispatch_error" || r.state === "failed") errorRows.push(r);
+      else if (r.state === "accepted") acceptedRows.push(r);
+      else if (r.state === "read" || r.state === "delivered") deliveredRows.push(r);
+      else awaitingRows.push(r);
+      if (r.repliedAt) repliedRows.push(r);
+    }
+    return { errorRows, acceptedRows, deliveredRows, awaitingRows, repliedRows };
+  }, [rows]);
+
+  const replyText = useCallback(
+    (repliedAt: Date) => tReplies("repliedAt", { date: fmtTime(repliedAt) }),
+    [tReplies]
+  );
+
+  // Aba controlada: se a conferência das respostas falhar num "Atualizar status", a aba
+  // "Respondidas" some e quem estava nela volta a "Todos" (senão a lista ficava em branco).
+  const [deliveryTab, setDeliveryTab] = useState("all");
+  const activeDeliveryTab = deliveryTab === "replied" && !repliesOn ? "all" : deliveryTab;
+
+  const labels = useMemo<Record<TimelineRowState, string>>(
+    () => ({
+      accepted: "",
+      dispatch_error: t("deliveryStatusNotSent"),
+      read: t(DELIVERY_LABEL_KEY.read),
+      delivered: t(DELIVERY_LABEL_KEY.delivered),
+      sent: t(DELIVERY_LABEL_KEY.sent),
+      awaiting: t(DELIVERY_LABEL_KEY.awaiting),
+      unknown: t(DELIVERY_LABEL_KEY.unknown),
+      failed: t(DELIVERY_LABEL_KEY.failed),
+    }),
+    [t]
+  );
+
+  const copyNumber = useCallback(
+    (n: string) => {
+      if (typeof navigator !== "undefined" && navigator.clipboard) {
+        navigator.clipboard.writeText(n).then(
+          () => toast.success(t("numberCopied")),
+          () => toast.error(t("copyFailed")),
+        );
+      }
+    },
+    [t]
+  );
+
+  if (rows.length === 0) return null;
+
+  const { errorRows, acceptedRows, deliveredRows, awaitingRows, repliedRows } = groups;
+
+  // As 4 primeiras colunas são as de sempre; o resultado da entrega vem no fim
+  // (vazio quando a tela não tem o relatório), e a resposta depois dele.
   const exportFull = () => {
-    const rows: string[][] = [["status", "number", "timestamp", "error"]];
-    for (const it of timeline) {
-      rows.push([
-        it.kind,
-        it.number,
-        it.timestamp.toISOString(),
-        it.kind === "error" ? it.error : "",
+    const out: string[][] = [[
+      "status", "number", "timestamp", "error", "delivery_status", "delivery_error", "replied_at", "reply_ticket_id",
+    ]];
+    for (const row of rows) {
+      out.push([
+        row.state === "dispatch_error" ? "error" : "success",
+        row.number,
+        csvTimestamp(row.timestamp),
+        row.state === "dispatch_error" ? row.detail : "",
+        row.providerStatus,
+        row.state === "failed" ? row.detail : "",
+        row.repliedAt ? csvTimestamp(row.repliedAt) : "",
+        row.replyTicketId ? String(row.replyTicketId) : "",
       ]);
     }
-    downloadCsv(`relatorio-disparo-${dispatch.id}-${Date.now()}.csv`, toCsv(rows));
+    downloadCsv(`relatorio-disparo-${dispatch.id}-${Date.now()}.csv`, toCsv(out));
   };
 
+  // Com o relatório, entra também quem foi aceito e não foi entregue (com o motivo).
   const exportErrors = () => {
-    const rows: string[][] = [["number", "timestamp", "error"]];
-    for (const e of errorEntries) {
-      rows.push([e.number, e.timestamp.toISOString(), e.error]);
+    const out: string[][] = [["number", "timestamp", "error"]];
+    for (const row of errorRows) {
+      const failedLabel = t("deliveryStatusFailed");
+      out.push([
+        row.number,
+        csvTimestamp(row.timestamp),
+        row.state === "failed" ? (row.detail ? `${failedLabel}: ${row.detail}` : failedLabel) : row.detail,
+      ]);
     }
-    downloadCsv(`relatorio-disparo-${dispatch.id}-erros-${Date.now()}.csv`, toCsv(rows));
+    downloadCsv(`relatorio-disparo-${dispatch.id}-erros-${Date.now()}.csv`, toCsv(out));
   };
 
-  // Diferente dos dois acima (montados só com o que o disparo guarda), este busca no
+  // Diferente dos dois acima (montados com o que a tela tem), este busca de novo no
   // servidor o status que o provedor confirmou por destinatário — aceite, entrega,
-  // leitura ou falha posterior. `matched_by` diz se o casamento foi exato (wamid) ou
-  // deduzido pelo número, em disparo anterior ao registro do id da mensagem.
+  // leitura ou falha posterior com o motivo. `matched_by` diz se o casamento foi
+  // exato (wamid) ou deduzido pelo número, em disparo anterior ao registro do id da
+  // mensagem. As duas colunas do motivo vêm no fim (aditivas).
   const exportDelivery = async () => {
     try {
-      const res = await getBulkDispatchReport(dispatch.id);
-      const report = res.data;
-      const rows: string[][] = [
-        ["number", "accepted", "provider_status", "message_id", "sent_at", "dispatch_error", "matched_by"],
+      const res = await getBulkDispatchReport(dispatch.id, { replies: true }).catch(() =>
+        getBulkDispatchReport(dispatch.id)
+      );
+      const fresh = res.data;
+      const freshReplies = hasRepliesInfo(fresh);
+      const out: string[][] = [
+        [
+          "number", "accepted", "provider_status", "message_id", "sent_at", "dispatch_error", "matched_by",
+          "provider_error_code", "provider_error", "replied_at", "reply_ticket_id",
+        ],
       ];
-      for (const r of report.recipients ?? []) {
-        rows.push([
+      for (const r of fresh.recipients ?? []) {
+        const reason =
+          r.providerStatus === "failed"
+            ? describeAckError(toAckStatusError(r.providerError), tBubble)
+            : null;
+        const repliedAt = freshReplies ? parseDateSafe(r.repliedAt) : null;
+        out.push([
           r.number,
           r.accepted ? "true" : "false",
           r.providerStatus ?? "",
           r.messageId ?? "",
           r.sentAt ?? "",
-          r.dispatchError === "active_conversation"
-            ? t("skippedActiveConversation")
-            : r.dispatchError ?? "",
+          dispatchErrorText(r.dispatchError, t),
           r.matchedBy ?? "",
+          reason?.code ?? "",
+          reason?.desc ?? "",
+          repliedAt ? repliedAt.toISOString() : "",
+          repliedAt && r.replyTicketId ? String(r.replyTicketId) : "",
         ]);
       }
-      downloadCsv(`relatorio-disparo-${dispatch.id}-entrega-${Date.now()}.csv`, toCsv(rows));
+      downloadCsv(`relatorio-disparo-${dispatch.id}-entrega-${Date.now()}.csv`, toCsv(out));
     } catch {
       toast.error(t("exportDeliveryFailed"));
     }
+  };
+
+  const listProps = {
+    labels,
+    copyLabel: t("copyNumber"),
+    onCopy: copyNumber,
+    replyText,
+    openTicketLabel: tReplies("openTicket"),
   };
 
   return (
     <div className="space-y-3">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <p className="font-semibold text-base">{t("timelineTitle")}</p>
-        <div className="flex items-center gap-2">
-          <Button size="sm" variant="outline" onClick={exportFull} disabled={timeline.length === 0}>
+        <div className="flex flex-wrap items-center gap-2">
+          {usable && (
+            <Button size="sm" variant="outline" onClick={onRefreshReport} disabled={reportLoading}>
+              <RefreshCw className={`h-3.5 w-3.5 mr-1${reportLoading ? " animate-spin" : ""}`} /> {t("deliveryRefresh")}
+            </Button>
+          )}
+          <Button size="sm" variant="outline" onClick={exportFull}>
             <Download className="h-3.5 w-3.5 mr-1" /> {t("exportCsvAll")}
           </Button>
-          <Button size="sm" variant="outline" onClick={exportErrors} disabled={errorEntries.length === 0}>
+          <Button size="sm" variant="outline" onClick={exportErrors} disabled={errorRows.length === 0}>
             <Download className="h-3.5 w-3.5 mr-1" /> {t("exportCsvErrors")}
           </Button>
-          <Button size="sm" variant="outline" onClick={exportDelivery} disabled={timeline.length === 0}>
+          <Button size="sm" variant="outline" onClick={exportDelivery}>
             <Download className="h-3.5 w-3.5 mr-1" /> {t("exportCsvDelivery")}
           </Button>
         </div>
       </div>
 
-      <Tabs defaultValue="all" className="w-full">
-        <TabsList className="grid grid-cols-3 w-full">
-          <TabsTrigger value="all">{t("tabAll")} ({timeline.length})</TabsTrigger>
-          <TabsTrigger value="sent">{t("tabSent")} ({successEntries.length})</TabsTrigger>
-          <TabsTrigger value="errors">{t("tabErrors")} ({errorEntries.length})</TabsTrigger>
-        </TabsList>
+      {usable ? (
+        <div className="space-y-1 text-xs text-muted-foreground">
+          <p className="flex items-start gap-1.5">
+            <Info className="h-3.5 w-3.5 mt-0.5 shrink-0" />
+            <span>{t("deliveryNote")}</span>
+          </p>
+          {report?.hasApproximateMatch && <p className="pl-5">{t("deliveryApproximate")}</p>}
+          {repliesOn && report?.replies && (
+            <p className="pl-5">{tReplies("note", { days: report.replies.windowDays })}</p>
+          )}
+          {repliesFailed && <p className="pl-5 text-amber-700 dark:text-amber-400">{tReplies("unavailable")}</p>}
+        </div>
+      ) : (
+        reportLoading && (
+          <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            {t("deliveryLoading")}
+          </p>
+        )
+      )}
 
-        <TabsContent value="all">
-          <ScrollArea className="h-72">
-            <ul className="divide-y text-xs">
-              {timeline.map((it, i) => (
-                <li key={i} className="py-1.5 flex items-center gap-2">
-                  {it.kind === "success" ? (
-                    <CheckCircle2 className="h-3.5 w-3.5 text-green-600 shrink-0" />
-                  ) : (
-                    <XCircle className="h-3.5 w-3.5 text-red-600 shrink-0" />
-                  )}
-                  <span className="font-mono">{it.number}</span>
-                  {it.kind === "error" ? (
-                    <span className="text-red-600 truncate">· {it.error}</span>
-                  ) : null}
-                  <span className="ml-auto text-muted-foreground tabular-nums">{fmtTime(it.timestamp)}</span>
-                  <Button size="icon" variant="ghost" className="h-6 w-6" onClick={() => copyNumber(it.number)} title={t("copyNumber")}>
-                    <Clipboard className="h-3 w-3" />
-                  </Button>
-                </li>
-              ))}
-            </ul>
-          </ScrollArea>
-        </TabsContent>
-
-        <TabsContent value="sent">
-          <ScrollArea className="h-72">
-            {successEntries.length === 0 ? (
-              <p className="text-xs text-muted-foreground text-center py-6">{t("noSent")}</p>
-            ) : (
-              <ul className="divide-y text-xs">
-                {successEntries.map((s, i) => (
-                  <li key={i} className="py-1.5 flex items-center gap-2">
-                    <CheckCircle2 className="h-3.5 w-3.5 text-green-600 shrink-0" />
-                    <span className="font-mono">{s.number}</span>
-                    <span className="ml-auto text-muted-foreground tabular-nums">{fmtTime(s.timestamp)}</span>
-                    <Button size="icon" variant="ghost" className="h-6 w-6" onClick={() => copyNumber(s.number)}>
-                      <Clipboard className="h-3 w-3" />
-                    </Button>
-                  </li>
-                ))}
-              </ul>
+      {usable ? (
+        <Tabs key="delivery" value={activeDeliveryTab} onValueChange={setDeliveryTab} className="w-full">
+          <TabsList className={`grid h-auto w-full grid-cols-2 ${repliesOn ? "sm:grid-cols-5" : "sm:grid-cols-4"}`}>
+            <TabsTrigger value="all">{t("tabAll")} ({rows.length})</TabsTrigger>
+            <TabsTrigger value="delivered">{t("tabDelivered")} ({deliveredRows.length})</TabsTrigger>
+            <TabsTrigger value="awaiting">{t("tabAwaiting")} ({awaitingRows.length})</TabsTrigger>
+            <TabsTrigger value="errors">{t("tabErrors")} ({errorRows.length})</TabsTrigger>
+            {repliesOn && (
+              <TabsTrigger value="replied">{tReplies("tab")} ({repliedRows.length})</TabsTrigger>
             )}
-          </ScrollArea>
-        </TabsContent>
-
-        <TabsContent value="errors">
-          <ScrollArea className="h-72">
-            {errorEntries.length === 0 ? (
-              <p className="text-xs text-muted-foreground text-center py-6">{t("noErrors")}</p>
-            ) : (
-              <ul className="divide-y text-xs">
-                {errorEntries.map((e, i) => (
-                  <li key={i} className="py-1.5 flex items-start gap-2">
-                    <XCircle className="h-3.5 w-3.5 text-red-600 shrink-0 mt-0.5" />
-                    <div className="flex-1 min-w-0">
-                      <p className="font-mono truncate">{e.number}</p>
-                      <p className="text-red-600 text-[11px]">{e.error}</p>
-                    </div>
-                    <span className="text-muted-foreground tabular-nums mt-0.5">{fmtTime(e.timestamp)}</span>
-                    <Button size="icon" variant="ghost" className="h-6 w-6" onClick={() => copyNumber(e.number)}>
-                      <Clipboard className="h-3 w-3" />
-                    </Button>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </ScrollArea>
-        </TabsContent>
-      </Tabs>
+          </TabsList>
+          <TabsContent value="all">
+            <ScrollArea className="h-72">
+              <TimelineRowList rows={rows} emptyText={t("noRecords")} {...listProps} />
+            </ScrollArea>
+          </TabsContent>
+          <TabsContent value="delivered">
+            <ScrollArea className="h-72">
+              <TimelineRowList rows={deliveredRows} emptyText={t("noDelivered")} {...listProps} />
+            </ScrollArea>
+          </TabsContent>
+          <TabsContent value="awaiting">
+            <ScrollArea className="h-72">
+              <TimelineRowList rows={awaitingRows} emptyText={t("noAwaiting")} {...listProps} />
+            </ScrollArea>
+          </TabsContent>
+          <TabsContent value="errors">
+            <ScrollArea className="h-72">
+              <TimelineRowList rows={errorRows} emptyText={t("noErrors")} {...listProps} />
+            </ScrollArea>
+          </TabsContent>
+          {repliesOn && (
+            <TabsContent value="replied">
+              <ScrollArea className="h-72">
+                <TimelineRowList rows={repliedRows} emptyText={tReplies("none")} {...listProps} />
+              </ScrollArea>
+            </TabsContent>
+          )}
+        </Tabs>
+      ) : (
+        <Tabs key="accepted" defaultValue="all" className="w-full">
+          <TabsList className="grid grid-cols-3 w-full">
+            <TabsTrigger value="all">{t("tabAll")} ({rows.length})</TabsTrigger>
+            <TabsTrigger value="sent">{t("tabSent")} ({acceptedRows.length})</TabsTrigger>
+            <TabsTrigger value="errors">{t("tabErrors")} ({errorRows.length})</TabsTrigger>
+          </TabsList>
+          <TabsContent value="all">
+            <ScrollArea className="h-72">
+              <TimelineRowList rows={rows} emptyText={t("noRecords")} {...listProps} />
+            </ScrollArea>
+          </TabsContent>
+          <TabsContent value="sent">
+            <ScrollArea className="h-72">
+              <TimelineRowList rows={acceptedRows} emptyText={t("noSent")} {...listProps} />
+            </ScrollArea>
+          </TabsContent>
+          <TabsContent value="errors">
+            <ScrollArea className="h-72">
+              <TimelineRowList rows={errorRows} emptyText={t("noErrors")} {...listProps} />
+            </ScrollArea>
+          </TabsContent>
+        </Tabs>
+      )}
     </div>
   );
 }
@@ -954,6 +1296,7 @@ function SmsDispatchResults({
 export default function MassaRelatorioPage() {
   const t = useTranslations("massaRelatorioPage");
   const tSms = useTranslations("massaSmsPage");
+  const tReplies = useTranslations("dispatchReplies");
   const allowed = usePageAccess("massa");
   // O `return <AccessDenied />` fica DEPOIS de todos os hooks (a permissão pode mudar
   // com a tela aberta, pelo refresh de 30 s, e a ordem dos hooks não pode variar).
@@ -966,6 +1309,7 @@ export default function MassaRelatorioPage() {
   const customCanViewAllTickets = useAuthStore(
     (s) =>
       s.user?.profile === "custom" &&
+      s.user?.customProfileEnabled === true &&
       (s.user?.customProfile?.customPermissions as unknown as { tickets_view_all?: boolean } | undefined)
         ?.tickets_view_all === true
   );
@@ -1063,6 +1407,13 @@ export default function MassaRelatorioPage() {
   const droppedSmsIdsRef = useRef<Set<number>>(new Set());
   const openDetailsIdRef = useRef<number | null>(null);
 
+  // Resultado da entrega por número (entregue, lida, falha com o motivo): lido ao
+  // abrir o disparo e no "Atualizar status". Sem ele a lista mostra só o aceite.
+  const [deliveryReport, setDeliveryReport] = useState<BulkDispatchReport | null>(null);
+  const [deliveryLoading, setDeliveryLoading] = useState(false);
+  // Só a leitura mais recente vale (trocar de disparo com uma leitura no ar).
+  const deliveryReqRef = useRef(0);
+
   const loadData = useCallback(async () => {
     setLoading(true);
     try {
@@ -1113,13 +1464,49 @@ export default function MassaRelatorioPage() {
     setPage(1);
   };
 
+  /** Relatório por número. Falha (backend anterior ao relatório, rede) mantém o que a
+   *  tela já tinha: na 1ª leitura, a lista de sempre. */
+  const loadDeliveryReport = useCallback(async (id: number) => {
+    const req = ++deliveryReqRef.current;
+    setDeliveryLoading(true);
+    try {
+      // Com as respostas; se esse pedido falhar, repete sem elas (a entrega nunca fica
+      // pior que antes por causa da conferência de quem respondeu).
+      const res = await getBulkDispatchReport(id, { background: true, replies: true }).catch(() =>
+        req === deliveryReqRef.current ? getBulkDispatchReport(id, { background: true }) : Promise.reject()
+      );
+      if (req !== deliveryReqRef.current) return;
+      const data = res.data;
+      if (data && data.id === id && Array.isArray(data.recipients)) setDeliveryReport(data);
+    } catch {
+      /* segue com o que já está na tela */
+    } finally {
+      if (req === deliveryReqRef.current) setDeliveryLoading(false);
+    }
+  }, []);
+
   const handleViewDetails = async (row: BulkDispatch) => {
     setPreviewTemplate(null);
+    deliveryReqRef.current += 1;
+    setDeliveryReport(null);
+    setDeliveryLoading(false);
     try {
       const res = await showDispatch(row.id);
       const details = res.data;
       setSelectedDetails(details);
       setModalOpen(true);
+
+      // Só disparo que o servidor consegue casar com a mensagem: com o id da mensagem
+      // gravado ou por template (número + janela). SMS tem relatório próprio; texto e
+      // e-mail sem id nunca casam, e a lista fica a de sempre sem pedido à toa.
+      const sentContacts = details.metadata?.sentContacts ?? [];
+      if (
+        !isSmsDispatch(details) &&
+        sentContacts.length > 0 &&
+        (!!details.templateName || sentContacts.some((s) => !!s?.messageId))
+      ) {
+        void loadDeliveryReport(details.id);
+      }
 
       // Fetch template structure for WABA dispatches
       if (isWabaTemplate(details.dispatchType) && details.whatsappId && details.templateName) {
@@ -1329,6 +1716,15 @@ export default function MassaRelatorioPage() {
   const smsRemovedDuplicates = isSmsDispatch(selectedDetails)
     ? Number(selectedDetails?.metadata?.removedDuplicates) || 0
     : 0;
+
+  const openDeliveryReport =
+    selectedDetails && deliveryReport && deliveryReport.id === selectedDetails.id ? deliveryReport : null;
+  const deliveryCounts = isDeliveryReportUsable(openDeliveryReport)
+    ? countDeliveryOutcomes(openDeliveryReport)
+    : null;
+  const openReplies =
+    deliveryCounts && hasRepliesInfo(openDeliveryReport) ? openDeliveryReport?.replies ?? null : null;
+  const openReplyRate = openReplies ? replyRatePercent(openReplies.count, openReplies.checked) : null;
 
   if (!allowed) return <AccessDenied />;
 
@@ -1594,7 +1990,7 @@ export default function MassaRelatorioPage() {
                 <CardContent className="pt-4 space-y-2 text-sm">
                   <p className="font-semibold text-base mb-2">{t("statistics")}</p>
                   <p><strong>{t("totalMessages")}:</strong> {selectedDetails.totalMessages ?? "—"}</p>
-                  <div className="flex items-center gap-1">
+                  <div className="flex flex-wrap items-center gap-1">
                     <strong>{t("sent")}:</strong>{" "}
                     <Badge variant="default">
                       {Math.min(
@@ -1602,6 +1998,9 @@ export default function MassaRelatorioPage() {
                         selectedDetails.totalMessages ?? 0
                       )}
                     </Badge>
+                    {deliveryCounts && (
+                      <span className="text-xs text-muted-foreground">({t("statSentHint")})</span>
+                    )}
                   </div>
                   <div className="flex items-center gap-1">
                     <strong>{t("notSent")}:</strong>{" "}
@@ -1610,6 +2009,40 @@ export default function MassaRelatorioPage() {
                         (selectedDetails.failedMessages ?? 0)}
                     </Badge>
                   </div>
+                  {deliveryCounts && (
+                    <>
+                      <div className="flex items-center gap-1">
+                        <strong>{t("tabDelivered")}:</strong>{" "}
+                        <Badge variant="success">{deliveryCounts.delivered}</Badge>
+                      </div>
+                      <div className="flex items-center gap-1">
+                        <strong>{t("statDeliveryFailed")}:</strong>{" "}
+                        <Badge variant="destructive">{deliveryCounts.failed}</Badge>
+                      </div>
+                      <div className="flex items-center gap-1">
+                        <strong>{t("deliveryStatusAwaiting")}:</strong>{" "}
+                        <Badge variant="secondary">{deliveryCounts.awaiting}</Badge>
+                      </div>
+                      {deliveryCounts.unknown > 0 && (
+                        <div className="flex items-center gap-1">
+                          <strong>{t("deliveryStatusUnknown")}:</strong>{" "}
+                          <Badge variant="outline">{deliveryCounts.unknown}</Badge>
+                        </div>
+                      )}
+                      {openReplies && (
+                        <div className="flex flex-wrap items-center gap-1">
+                          <strong>{tReplies("replied")}:</strong>{" "}
+                          <Badge variant="success">{openReplies.count}</Badge>
+                          {openReplyRate !== null && (
+                            <span className="text-xs text-muted-foreground">
+                              ({tReplies("rate", { percent: openReplyRate })})
+                            </span>
+                          )}
+                          <DispatchRepliesHint windowDays={openReplies.windowDays} />
+                        </div>
+                      )}
+                    </>
+                  )}
                   {smsRemovedDuplicates > 0 && (
                     <p className="text-xs text-muted-foreground">
                       {t("smsDuplicatesRemoved", { count: smsRemovedDuplicates })}
@@ -1735,7 +2168,18 @@ export default function MassaRelatorioPage() {
                   <div className="md:col-span-2">
                     <Card>
                       <CardContent className="pt-4">
-                        <DispatchTimeline dispatch={selectedDetails} t={t} />
+                        <DispatchTimeline
+                          dispatch={selectedDetails}
+                          t={t}
+                          report={openDeliveryReport}
+                          reportLoading={deliveryLoading}
+                          onRefreshReport={() => {
+                            // Contadores e status do disparo também (disparo ainda saindo
+                            // por outra aba): senão "Enviadas" fica no retrato da abertura.
+                            void reloadOpenSmsDetails(selectedDetails.id);
+                            void loadDeliveryReport(selectedDetails.id);
+                          }}
+                        />
                       </CardContent>
                     </Card>
                   </div>

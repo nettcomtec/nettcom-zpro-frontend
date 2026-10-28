@@ -20,21 +20,26 @@ import { Checkbox } from "@/components/ui/checkbox";
 import {
   MessageCircle, Search, RefreshCw, Reply, Trash2, ExternalLink,
   Instagram, Image, Film, LayoutGrid, Plus, Send, Upload, X,
-  Grid3x3, MessagesSquare, Pencil, CalendarClock, FileText, Cloud, Home,
+  Grid3x3, MessagesSquare, Pencil, CalendarClock, FileText, Cloud, Home, ChevronDown,
 } from "lucide-react";
 import { toast } from "sonner";
 import { useTranslations } from "next-intl";
 import { fetchWhatsapps, type Whatsapp } from "@/services/whatsapp";
 import {
-  listMedia, getMediaComments, getCommentReplies, replyComment, deleteComment, commentOnMedia,
+  getMediaComments, getCommentReplies, replyComment, deleteComment, commentOnMedia,
   publishMedia, editInstagramMedia,
   type InstagramMedia, type InstagramComment, type InstagramCommentReply,
 } from "@/services/instagram";
+import { useInstagramMediaPages } from "@/hooks/use-instagram-media-pages";
+import { InstagramMediaThumb, looksLikeVideoUrl } from "@/components/instagram/instagram-media-thumb";
 import { createInstagramScheduledPost } from "@/services/instagram-scheduled";
 import { checkIgImageFile } from "@/lib/ig-image-validation";
 import { isMetaAppPermissionError } from "@/lib/meta-app-permission-error";
 import { usePageAccess } from "@/hooks/use-page-access";
 import { AccessDenied } from "@/components/layout/access-denied";
+import { useAuthStore } from "@/stores/auth-store";
+import { canManageSocialPage } from "@/lib/social-page-manage";
+import { filterWhatsappsForCurrentUser } from "@/lib/whatsapp-user-access";
 
 const mediaTypeIcon = (type: string) => {
   switch (type) {
@@ -61,15 +66,27 @@ const ChannelAppIcon = ({ conn, ownLabel, oauthLabel }: { conn?: Whatsapp; ownLa
 };
 
 export default function InstagramComentariosPage() {
+  // O gate fica num componente próprio: o acesso do atendente pode mudar no meio da
+  // sessão (o refresh de 30 s relê as permissões) e os hooks da tela não podem rodar
+  // pela metade.
+  const allowed = usePageAccess("instagramComentarios");
+  if (!allowed) return <AccessDenied />;
+  return <InstagramComentariosContent />;
+}
+
+function InstagramComentariosContent() {
   const t = useTranslations("instagramComentariosPage");
   const tBadge = useTranslations("channelAppType");
-  const allowed = usePageAccess("instagramComentarios", { adminSuperOnly: true });
-  if (!allowed) return <AccessDenied />;
+  // Supervisor e atendente: ler, responder e comentar. Apagar, publicar, agendar e
+  // editar legenda ficam com o admin (o backend recusa o resto com 403).
+  const canManage = canManageSocialPage(useAuthStore((s) => s.user?.profile));
 
   const [loading, setLoading] = useState(true);
   const [connections, setConnections] = useState<Whatsapp[]>([]);
   const [selectedConnection, setSelectedConnection] = useState("");
-  const [mediaList, setMediaList] = useState<InstagramMedia[]>([]);
+  const mediaPages = useInstagramMediaPages();
+  const mediaList = mediaPages.items;
+  const setMediaList = mediaPages.setItems;
   const [selectedMediaId, setSelectedMediaId] = useState("");
   const [comments, setComments] = useState<InstagramComment[]>([]);
   const [commentsNextUrl, setCommentsNextUrl] = useState<string | null>(null);
@@ -110,7 +127,10 @@ export default function InstagramComentariosPage() {
     try {
       const res = await fetchWhatsapps();
       const all = Array.isArray(res.data) ? res.data : [];
-      setConnections(all.filter((c) => c.type === "instagram"));
+      const instagram = all.filter((c) => c.type === "instagram");
+      // Atendente vê só os canais liberados para ele, como no Atendimento; supervisor
+      // e perfil personalizado seguem vendo todos, como antes.
+      setConnections(useAuthStore.getState().user?.profile === "user" ? filterWhatsappsForCurrentUser(instagram) : instagram);
     } catch {
       toast.error(t("errorLoadConnections"));
     } finally {
@@ -120,23 +140,21 @@ export default function InstagramComentariosPage() {
 
   useEffect(() => { loadConnections(); }, [loadConnections]);
 
+  const { load: loadMediaPages, loadMore: loadMoreMediaPages } = mediaPages;
+  const mediaBusy = loading || mediaPages.loading;
+
   const handleLoadMedia = useCallback(async (connId: string) => {
     if (!connId) return;
-    setLoading(true);
-    setMediaList([]);
     setComments([]);
     setSelectedMediaId("");
-    try {
-      const res = await listMedia(Number(connId));
-      const raw = res.data;
-      const list = Array.isArray(raw) ? raw : (raw as { data?: InstagramMedia[] })?.data ?? [];
-      setMediaList(list);
-    } catch {
-      toast.error(t("errorLoadMedia"));
-    } finally {
-      setLoading(false);
-    }
-  }, []);
+    const ok = await loadMediaPages(Number(connId));
+    if (!ok) toast.error(t("errorLoadMedia"));
+  }, [loadMediaPages]);
+
+  const handleLoadMoreMedia = async () => {
+    const ok = await loadMoreMediaPages();
+    if (!ok) toast.error(t("errorLoadMedia"));
+  };
 
   useEffect(() => {
     if (selectedConnection) handleLoadMedia(selectedConnection);
@@ -471,12 +489,13 @@ export default function InstagramComentariosPage() {
             )}
           </div>
         </div>
-        {selectedMedia.media_url && (
+        {(selectedMedia.media_url || selectedMedia.thumbnail_url) && (
           <div className="border-t border-b">
-            {selectedMedia.media_type === "VIDEO" ? (
-              <video src={selectedMedia.media_url} controls className="w-full max-h-[500px] object-contain bg-black" />
+            {selectedMedia.media_url && (selectedMedia.media_type === "VIDEO" || looksLikeVideoUrl(selectedMedia.media_url)) ? (
+              <video src={selectedMedia.media_url} poster={selectedMedia.thumbnail_url} controls className="w-full max-h-[500px] object-contain bg-black" />
             ) : (
-              <img src={selectedMedia.media_url} alt="" className="w-full max-h-[500px] object-contain bg-black" />
+              // Reel com música vem sem media_url: mostra a capa
+              <img src={selectedMedia.media_url || selectedMedia.thumbnail_url} alt="" className="w-full max-h-[500px] object-contain bg-black" />
             )}
           </div>
         )}
@@ -548,11 +567,13 @@ export default function InstagramComentariosPage() {
                     <span className="text-[11px] text-muted-foreground">{formatDateTime(new Date(comment.timestamp))}</span>
                     <button className="text-[11px] font-semibold text-muted-foreground hover:text-foreground transition-colors"
                       onClick={() => { setReplyingTo(comment); setReplyingToParentId(comment.id); setReplyDialogOpen(true); }}>{t("reply")}</button>
-                    <button className="text-[11px] text-muted-foreground hover:text-destructive transition-colors disabled:opacity-50"
-                      onClick={() => handleDelete(comment.id)}
-                      disabled={deletingIds.has(comment.id)}>
-                      {deletingIds.has(comment.id) ? <RefreshCw className="h-3 w-3 animate-spin" /> : <Trash2 className="h-3 w-3" />}
-                    </button>
+                    {canManage && (
+                      <button className="text-[11px] text-muted-foreground hover:text-destructive transition-colors disabled:opacity-50"
+                        onClick={() => handleDelete(comment.id)}
+                        disabled={deletingIds.has(comment.id)}>
+                        {deletingIds.has(comment.id) ? <RefreshCw className="h-3 w-3 animate-spin" /> : <Trash2 className="h-3 w-3" />}
+                      </button>
+                    )}
                   </div>
                   {hasReplies && (
                     <button
@@ -600,11 +621,13 @@ export default function InstagramComentariosPage() {
                             onClick={() => { setReplyingTo(reply); setReplyingToParentId(comment.id); setReplyDialogOpen(true); }}>
                             {t("reply")}
                           </button>
-                          <button className="text-[10px] text-muted-foreground hover:text-destructive transition-colors disabled:opacity-50"
-                            onClick={() => handleDelete(reply.id)}
-                            disabled={deletingIds.has(reply.id)}>
-                            {deletingIds.has(reply.id) ? <RefreshCw className="h-3 w-3 animate-spin" /> : <Trash2 className="h-3 w-3" />}
-                          </button>
+                          {canManage && (
+                            <button className="text-[10px] text-muted-foreground hover:text-destructive transition-colors disabled:opacity-50"
+                              onClick={() => handleDelete(reply.id)}
+                              disabled={deletingIds.has(reply.id)}>
+                              {deletingIds.has(reply.id) ? <RefreshCw className="h-3 w-3 animate-spin" /> : <Trash2 className="h-3 w-3" />}
+                            </button>
+                          )}
                         </div>
                       </div>
                     </div>
@@ -654,8 +677,8 @@ export default function InstagramComentariosPage() {
               )}
             </div>
             <div className="flex items-end">
-              <Button variant="outline" onClick={() => handleLoadMedia(selectedConnection)} disabled={loading || !selectedConnection}>
-                {loading ? <RefreshCw className="mr-2 h-4 w-4 animate-spin" /> : <Instagram className="mr-2 h-4 w-4" />}
+              <Button variant="outline" onClick={() => handleLoadMedia(selectedConnection)} disabled={mediaBusy || !selectedConnection}>
+                {mediaBusy ? <RefreshCw className="mr-2 h-4 w-4 animate-spin" /> : <Instagram className="mr-2 h-4 w-4" />}
                 {t("loadMedia")}
               </Button>
             </div>
@@ -689,6 +712,20 @@ export default function InstagramComentariosPage() {
                         className="w-full max-w-full"
                       />
                     </div>
+                    {mediaPages.hasMore && (
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        className="h-7 w-fit px-2 text-xs"
+                        onClick={handleLoadMoreMedia}
+                        disabled={mediaPages.loadingMore}
+                        title={t("loadMoreMediaHint")}
+                      >
+                        {mediaPages.loadingMore ? <RefreshCw className="mr-1 h-3 w-3 animate-spin" /> : <ChevronDown className="mr-1 h-3 w-3" />}
+                        {t("loadMoreMedia")}
+                      </Button>
+                    )}
                   </div>
                 </div>
               )}
@@ -732,15 +769,20 @@ export default function InstagramComentariosPage() {
                 <div>
                   <h3 className="text-base font-semibold">{t("postsListTitle")}</h3>
                   <p className="text-xs text-muted-foreground">{t("postsListHint")}</p>
+                  {!canManage && (
+                    <p className="text-xs text-muted-foreground mt-1">{t("manageAdminOnlyNote")}</p>
+                  )}
                 </div>
                 <div className="flex items-center gap-2">
-                  <Button variant="outline" size="sm" onClick={() => handleLoadMedia(selectedConnection)} disabled={loading || !selectedConnection}>
-                    {loading ? <RefreshCw className="mr-2 h-4 w-4 animate-spin" /> : <RefreshCw className="mr-2 h-4 w-4" />}
+                  <Button variant="outline" size="sm" onClick={() => handleLoadMedia(selectedConnection)} disabled={mediaBusy || !selectedConnection}>
+                    {mediaBusy ? <RefreshCw className="mr-2 h-4 w-4 animate-spin" /> : <RefreshCw className="mr-2 h-4 w-4" />}
                     {t("refresh")}
                   </Button>
-                  <Button onClick={() => { resetNewPostForm(); setNewPostDialogOpen(true); }} disabled={!selectedConnection}>
-                    <Plus className="mr-2 h-4 w-4" />{t("newPost")}
-                  </Button>
+                  {canManage && (
+                    <Button onClick={() => { resetNewPostForm(); setNewPostDialogOpen(true); }} disabled={!selectedConnection}>
+                      <Plus className="mr-2 h-4 w-4" />{t("newPost")}
+                    </Button>
+                  )}
                 </div>
               </div>
             </CardContent>
@@ -752,7 +794,7 @@ export default function InstagramComentariosPage() {
                 {t("selectConnectionFirst")}
               </CardContent>
             </Card>
-          ) : loading ? (
+          ) : mediaBusy ? (
             <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3">
               {[1, 2, 3, 4, 5, 6, 7, 8].map((i) => (
                 <Skeleton key={i} className="aspect-square w-full rounded-md" />
@@ -763,18 +805,14 @@ export default function InstagramComentariosPage() {
               <CardContent className="p-6 text-center">
                 <Instagram className="mx-auto h-10 w-10 text-muted-foreground mb-3" />
                 <h3 className="text-base font-medium">{t("noPostsYet")}</h3>
-                <p className="text-sm text-muted-foreground mt-1">{t("noPostsYetHint")}</p>
+                {canManage && <p className="text-sm text-muted-foreground mt-1">{t("noPostsYetHint")}</p>}
               </CardContent>
             </Card>
           ) : (
             <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3">
               {mediaList.map((m) => (
                 <div key={m.id} className="group relative aspect-square overflow-hidden rounded-md border bg-muted">
-                  {m.media_type === "VIDEO" ? (
-                    <video src={m.media_url} className="h-full w-full object-cover" muted />
-                  ) : (
-                    <img src={m.media_url} alt="" className="h-full w-full object-cover" />
-                  )}
+                  <InstagramMediaThumb media={m} />
                   <div className="absolute top-1.5 right-1.5 rounded-full bg-black/60 p-1 text-white">
                     {mediaTypeIcon(m.media_type)}
                   </div>
@@ -783,9 +821,11 @@ export default function InstagramComentariosPage() {
                       <Button size="sm" variant="secondary" className="h-7" onClick={() => { setActiveTab("comments"); setSelectedMediaId(m.id); handleLoadComments(m.id); }} title={t("viewComments")}>
                         <MessageCircle className="h-3.5 w-3.5" />
                       </Button>
-                      <Button size="sm" variant="secondary" className="h-7" onClick={() => { setEditingMedia(m); setEditMediaCaption(m.caption || ""); setEditMediaDialogOpen(true); }} title={t("editMedia")}>
-                        <Pencil className="h-3.5 w-3.5" />
-                      </Button>
+                      {canManage && (
+                        <Button size="sm" variant="secondary" className="h-7" onClick={() => { setEditingMedia(m); setEditMediaCaption(m.caption || ""); setEditMediaDialogOpen(true); }} title={t("editMedia")}>
+                          <Pencil className="h-3.5 w-3.5" />
+                        </Button>
+                      )}
                       {m.permalink && (
                         <Button asChild size="sm" variant="outline" className="h-7" title={t("openOnInstagram")}>
                           <a href={m.permalink} target="_blank" rel="noopener noreferrer"><ExternalLink className="h-3.5 w-3.5" /></a>
@@ -800,6 +840,14 @@ export default function InstagramComentariosPage() {
                   )}
                 </div>
               ))}
+            </div>
+          )}
+          {selectedConnection && !mediaBusy && mediaPages.hasMore && (
+            <div className="flex justify-center">
+              <Button variant="outline" onClick={handleLoadMoreMedia} disabled={mediaPages.loadingMore} title={t("loadMoreMediaHint")}>
+                {mediaPages.loadingMore ? <RefreshCw className="mr-2 h-4 w-4 animate-spin" /> : <ChevronDown className="mr-2 h-4 w-4" />}
+                {t("loadMoreMedia")}
+              </Button>
             </div>
           )}
         </TabsContent>
@@ -875,13 +923,9 @@ export default function InstagramComentariosPage() {
             <DialogTitle>{t("editMediaDialogTitle")}</DialogTitle>
             <DialogDescription>{t("editMediaDialogDescription")}</DialogDescription>
           </DialogHeader>
-          {editingMedia?.media_url && (
-            <div className="rounded-md overflow-hidden border max-h-48">
-              {editingMedia.media_type === "VIDEO" ? (
-                <video src={editingMedia.media_url} className="w-full object-cover" muted />
-              ) : (
-                <img src={editingMedia.media_url} alt="" className="w-full object-cover" />
-              )}
+          {editingMedia && (editingMedia.media_url || editingMedia.thumbnail_url) && (
+            <div className="rounded-md overflow-hidden border h-48">
+              <InstagramMediaThumb media={editingMedia} className="h-full w-full object-cover" />
             </div>
           )}
           <div className="grid gap-2">

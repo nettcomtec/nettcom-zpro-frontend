@@ -34,6 +34,7 @@ import { formatDuration } from "@/services/dashboard";
 import { usePageAccess } from "@/hooks/use-page-access";
 import { useAuthStore } from "@/stores/auth-store";
 import { useLiveMode } from "@/hooks/use-live-mode";
+import { useRegion } from "@/hooks/use-region";
 import { useSortable } from "@/hooks/use-sortable";
 import { SortableTableHead } from "@/components/ui/sortable-table-head";
 import { cn } from "@/lib/utils";
@@ -294,6 +295,10 @@ export default function RelatorioAtendimentosParamsPage() {
   const tFunil = useTranslations("funil");
   const allowed = usePageAccess("relatorios", { adminSuperOnly: true });
   const { isLiveMode } = useLiveMode();
+  // Valor do atendimento = dinheiro da empresa: moeda e formato do país da Região
+  // (tela, planilha, CSV e impressão). Valor que não é número segue como veio.
+  const { formatMoney } = useRegion();
+  const formatTicketValue = (v: number | string) => formatMoney(v) || String(v);
 
   const STATUS_OPTIONS: SelectOption[] = [
     { label: t("statusAberto"), value: "open" },
@@ -524,7 +529,7 @@ export default function RelatorioAtendimentosParamsPage() {
         [t("colFila")]: row.queue?.queue ?? row.queue?.name ?? "N/A",
         [t("colUsuario")]: row.user?.name ?? "N/A",
         [t("colCanal")]: formatChannel(row.channel ?? ""),
-        [t("colValor")]: row.value ? `R$ ${row.value}` : "N/A",
+        [t("colValor")]: row.value ? formatTicketValue(row.value) : "N/A",
         [t("colNotas")]: formatNotes(row.ticketNotes),
         [t("colDataCriacao")]: formatDate(row.createdAt),
         [t("colInicioAtendimento")]: formatEpochDate(row.startedAttendanceAt) ?? t("naoIniciado"),
@@ -573,7 +578,7 @@ export default function RelatorioAtendimentosParamsPage() {
       row.queue?.queue ?? row.queue?.name ?? "N/A",
       row.user?.name ?? "N/A",
       formatChannel(row.channel ?? ""),
-      row.value ? `R$ ${row.value}` : "N/A",
+      row.value ? formatTicketValue(row.value) : "N/A",
       formatNotes(row.ticketNotes),
       formatDate(row.createdAt),
       formatEpochDate(row.startedAttendanceAt) ?? t("naoIniciado"),
@@ -618,7 +623,7 @@ export default function RelatorioAtendimentosParamsPage() {
       row.queue?.queue ?? row.queue?.name ?? "N/A",
       row.user?.name ?? "N/A",
       formatChannel(row.channel ?? ""),
-      row.value ? `R$ ${row.value}` : "N/A",
+      row.value ? formatTicketValue(row.value) : "N/A",
       formatNotes(row.ticketNotes),
       formatDate(row.createdAt),
       formatEpochDate(row.startedAttendanceAt) ?? t("naoIniciado"),
@@ -929,7 +934,7 @@ export default function RelatorioAtendimentosParamsPage() {
               <CardContent className="p-4">
                 <p className="text-xs text-muted-foreground mb-1">{t("metricsTotalValue")}</p>
                 <p className="text-2xl font-bold tabular-nums">
-                  {hasValues ? `R$ ${valueSum.toFixed(2)}` : t("metricsNoData")}
+                  {hasValues ? formatMoney(valueSum) : t("metricsNoData")}
                 </p>
               </CardContent>
             </Card>
@@ -1036,7 +1041,7 @@ export default function RelatorioAtendimentosParamsPage() {
                           {formatChannel(row.channel ?? "")}
                         </TableCell>
                         <TableCell>
-                          {row.value ? `R$ ${row.value}` : "N/A"}
+                          {row.value ? formatTicketValue(row.value) : "N/A"}
                         </TableCell>
                         <TableCell className="max-w-[200px] text-xs break-words">
                           {formatNotes(row.ticketNotes)}
@@ -1072,7 +1077,7 @@ export default function RelatorioAtendimentosParamsPage() {
                           {hasValues ? t("metricsValueTotal") : ""}
                         </TableCell>
                         <TableCell className="text-sm whitespace-nowrap">
-                          {hasValues ? `R$ ${valueSum.toFixed(2)}` : "—"}
+                          {hasValues ? formatMoney(valueSum) : "—"}
                         </TableCell>
                         <TableCell colSpan={4} />
                         <TableCell className="text-xs whitespace-nowrap tabular-nums">

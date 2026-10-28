@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect, useRef, useCallback } from "react";
+import React, { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { useTranslations } from "next-intl";
 import { motion } from "framer-motion";
 import {
@@ -13,7 +13,7 @@ import {
   Play, Pause, CalendarDays, CalendarCheck, ZoomIn, ZoomOut, RotateCcw, RotateCw, Printer, Maximize2, Search,
   Star, Bot, Loader2, Pin, BarChart3, Receipt, Copy as CopyIcon, Phone,
   PhoneCall, PhoneOff, ShieldCheck, Languages, X as XIcon, Youtube,
-  AudioLines, FolderPlus, Route, RouteOff, CheckCircle2, Ban,
+  AudioLines, FolderPlus, Route, RouteOff, CheckCircle2, Ban, MessageCircle, Eye, Info, Send,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { sanitize } from "@/lib/sanitize";
@@ -34,6 +34,7 @@ import {
 import {
   Tooltip, TooltipContent, TooltipTrigger, TooltipProvider,
 } from "@/components/ui/tooltip";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import {
   AlertDialog, AlertDialogContent, AlertDialogHeader, AlertDialogTitle,
   AlertDialogDescription, AlertDialogFooter, AlertDialogAction, AlertDialogCancel,
@@ -41,6 +42,7 @@ import {
 import type { Message, QuotedMessage } from "@/stores/ticket-store";
 import { useAuthStore } from "@/stores/auth-store";
 import { useLiveMode } from "@/hooks/use-live-mode";
+import { useRegion, type UseRegionResult } from "@/hooks/use-region";
 import { EMOJI_CATEGORIES } from "@/lib/emoji-data";
 import { toast } from "sonner";
 import api from "@/lib/api";
@@ -53,50 +55,32 @@ import {
   type WhatsappPayment,
 } from "@/services/whatsapp-payments";
 import { uploadGalleryFiles } from "@/services/gallery";
+import { downloadMediaFile, fetchMediaBlob } from "@/lib/media-fetch";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Label } from "@/components/ui/label";
 import { registerAudioPlay } from "@/lib/audio-manager";
+import { LinkPreviewCard, useLinkPreview } from "@/components/common/link-preview";
+import { OsmMapThumbnail } from "@/components/common/osm-map-thumbnail";
+import { buildGoogleMapsUrl, buildWazeUrl, getMessageLocation, isLocationMediaType } from "@/lib/location-message";
 import { useAudioPlayerStore } from "@/stores/audio-player-store";
 import { useLocale } from "@/i18n/locale-provider";
+import { readInstagramCommentAd, readInstagramCommentReply } from "@/lib/instagram-comment";
+import { readAdReferral } from "@/lib/ad-referral";
+import { readInstagramStoryReply, type InstagramStoryReplyView } from "@/lib/instagram-story-reply";
+import { AdReferralCard } from "@/components/atendimento/ad-referral-card";
+import { FormSubmissionContent } from "@/components/atendimento/form-submission-content";
+import {
+  formatTicketTransferNotice, readTicketTransferNotice, type TicketTransferTranslate,
+} from "@/lib/ticket-transfer-notice";
+import { SAVED_FILE_SUFFIX_RE, isBodyFileName, mediaCaptionText, mediaUrlFileName } from "@/lib/media-caption";
+import { extractWebchatInviteUrls, isWebchatInviteUrl, matchWebchatInviteUrl } from "@/lib/webchat-invite-link";
+import { describeAckError } from "@/lib/ack-error-text";
+import { flushByIdFront } from "@/lib/waba-agent-grouping";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "";
 
-const downloadingFiles = new Set<string>();
-
-// Força download sem navegar. fetch+blob direto → proxy /api/download se CORS bloquear.
-function downloadFile(url: string, filename = "arquivo") {
-  if (downloadingFiles.has(url)) return;
-  downloadingFiles.add(url);
-  const toastId = toast.loading("Baixando arquivo...");
-  const isExternal = url.startsWith("http://") || url.startsWith("https://");
-  const opts: RequestInit = isExternal ? { credentials: "omit" } : { credentials: "include" };
-  fetch(url, opts)
-    .then((r) => {
-      if (!r.ok) throw new Error("not ok");
-      return r.blob();
-    })
-    .then((blob) => {
-      const a = document.createElement("a");
-      a.href = URL.createObjectURL(blob);
-      a.download = filename;
-      a.click();
-      setTimeout(() => URL.revokeObjectURL(a.href), 2000);
-      toast.success("Download realizado com sucesso!", { id: toastId });
-    })
-    .catch(() => {
-      const proxyUrl = `/api/download?url=${encodeURIComponent(url)}&filename=${encodeURIComponent(filename)}`;
-      const a = document.createElement("a");
-      a.href = proxyUrl;
-      a.download = filename;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      toast.success("Download iniciado!", { id: toastId });
-    })
-    .finally(() => {
-      downloadingFiles.delete(url);
-    });
-}
+// Força download sem navegar, com porcentagem no aviso e erro de verdade quando falha.
+const downloadFile = downloadMediaFile;
 
 const savingToGalleryUrls = new Set<string>();
 async function saveUrlToGallery(url: string, filename: string, successMsg: string, errorMsg: string) {
@@ -105,9 +89,8 @@ async function saveUrlToGallery(url: string, filename: string, successMsg: strin
   const toastId = toast.loading(successMsg);
   try {
     const isExternal = url.startsWith("http://") || url.startsWith("https://");
-    const response = await fetch(url, isExternal ? { credentials: "omit" } : { credentials: "include" });
-    if (!response.ok) throw new Error("fetch failed");
-    const blob = await response.blob();
+    // Bucket S3/R2 sem CORS: a leitura direta falhava e a mídia não ia para a galeria.
+    const blob = await fetchMediaBlob(url, { credentials: isExternal ? "omit" : "include" });
     const safeName = (filename || `arquivo-${Date.now()}`).split("?")[0] || `arquivo-${Date.now()}`;
     const file = new File([blob], safeName, { type: blob.type || "application/octet-stream" });
     await uploadGalleryFiles([file]);
@@ -138,14 +121,6 @@ function getAudioUrl(input?: string | { mediaUrl?: string; storageUrl?: string }
   return full.replace(/\.ogg$/, ".mp3");
 }
 
-// Códigos de erro Meta/BSP com descrição traduzida no tooltip do ack de falha
-// NO_SEND_CONTEXT é nosso (backend/helpers/NoSendContextErrorZPRO): ticket sem
-// conversa/thread ativa no canal — ML, OLX, LinkedIn, TikTok e YouTube.
-// TELEGRAM_UNREACHABLE e TELEGRAM_MEDIA_MISSING também (TbotServices/helpers/
-// TelegramSendGuardZPRO): o contato bloqueou o bot ou nunca falou com ele; o
-// arquivo da mídia não está mais no servidor.
-const ACK_ERROR_KNOWN_CODES = ["100", "131026", "131042", "131047", "131048", "131049", "131051", "132000", "132012", "NO_SEND_CONTEXT", "TELEGRAM_UNREACHABLE", "TELEGRAM_MEDIA_MISSING"];
-
 function AckIcon({
   ack,
   fromMe,
@@ -153,19 +128,14 @@ function AckIcon({
 }: {
   ack?: number;
   fromMe: boolean;
-  statusError?: { code?: number | string; title?: string; details?: string } | null;
+  statusError?: { code?: number | string; subcode?: number | string; title?: string; details?: string } | null;
 }) {
   const t = useTranslations("messageBubble");
   if (!fromMe) return null;
   // ack -1: status "failed" do webhook WABA/BSP — tooltip com o motivo (statusError)
   if (ack === -1) {
-    const code = statusError?.code != null ? String(statusError.code) : "";
-    const desc = code && ACK_ERROR_KNOWN_CODES.includes(code)
-      ? t(`ackError${code}` as never)
-      : [statusError?.title, statusError?.details].filter(Boolean).join(" — ");
-    // Código entre parênteses só quando é numérico (erro Meta/BSP); os nossos
-    // são slugs e não dizem nada para o atendente.
-    const showCode = code && /^\d+$/.test(code);
+    // Mesma regra do relatório de envio em massa (lib/ack-error-text.ts).
+    const { code, showCode, desc } = describeAckError(statusError, (key) => t(key as never));
     const title = desc
       ? `${t("ackFailed")}${showCode ? ` (${code})` : ""}: ${desc}`
       : t("ackFailed");
@@ -296,26 +266,14 @@ function ExternalLinkConfirmDialog({ url, onCancel, onConfirm }: { url: string; 
   );
 }
 
+// Abrir a janela não busca a prévia: o link pode ser de uso único (botão de pagamento
+// de template, link de acesso) e a busca do servidor o gastaria. Só pelo "Ver prévia".
 function LinkModalBody({ url, onRequestOpen }: { url: string; onRequestOpen: () => void }) {
   const t = useTranslations("messageBubble");
-  const [data, setData] = useState<LinkPreviewData | null>(() => readCache(url));
-  const [loading, setLoading] = useState(() => readCache(url) === null);
+  const tPreview = useTranslations("linkPreview");
+  const { data, status, load } = useLinkPreview(url);
 
-  useEffect(() => {
-    const cached = readCache(url);
-    if (cached) { setData(cached); setLoading(false); return; }
-    let cancelled = false;
-    fetch(`/api/link-preview?url=${encodeURIComponent(url)}`)
-      .then((r) => r.json())
-      .then((d: LinkPreviewData) => { if (!cancelled) { writeCache(url, d); setData(d); } })
-      .catch(() => { if (!cancelled) setData(null); })
-      .finally(() => { if (!cancelled) setLoading(false); });
-    return () => { cancelled = true; };
-  }, [url]);
-
-  const openNew = onRequestOpen;
-
-  if (loading) {
+  if (status === "loading") {
     return (
       <div className="flex flex-col items-center justify-center gap-3 py-10">
         <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
@@ -323,30 +281,52 @@ function LinkModalBody({ url, onRequestOpen }: { url: string; onRequestOpen: () 
     );
   }
 
+  if (status === "ready" && data) {
+    return (
+      <div className="flex flex-col items-center gap-4 p-6">
+        {data.image && (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img
+            src={data.image}
+            alt=""
+            className="rounded-lg max-h-52 w-full object-cover"
+            onError={(e) => { (e.target as HTMLImageElement).style.display = "none"; }}
+          />
+        )}
+        {data.title && (
+          <p className="font-semibold text-base text-center leading-snug">{data.title}</p>
+        )}
+        {data.description && (
+          <p className="text-sm text-muted-foreground text-center line-clamp-4">{data.description}</p>
+        )}
+        <Button onClick={onRequestOpen} className="mt-1 gap-2">
+          <ExternalLink className="h-4 w-4" />
+          {t("openInNewTab")}
+        </Button>
+      </div>
+    );
+  }
+
   return (
     <div className="flex flex-col items-center gap-4 p-6">
-      {data?.image && (
-        // eslint-disable-next-line @next/next/no-img-element
-        <img
-          src={data.image}
-          alt=""
-          className="rounded-lg max-h-52 w-full object-cover"
-          onError={(e) => { (e.target as HTMLImageElement).style.display = "none"; }}
-        />
+      <p className="max-h-40 w-full overflow-y-auto text-sm text-muted-foreground text-center break-all">{url}</p>
+      {status === "empty" && (
+        <p className="text-xs text-muted-foreground text-center">{tPreview("unavailable")}</p>
       )}
-      {data?.title && (
-        <p className="font-semibold text-base text-center leading-snug">{data.title}</p>
-      )}
-      {data?.description && (
-        <p className="text-sm text-muted-foreground text-center line-clamp-4">{data.description}</p>
-      )}
-      {!data?.title && !data?.image && (
-        <p className="text-sm text-muted-foreground text-center break-all">{url}</p>
-      )}
-      <Button onClick={openNew} className="mt-1 gap-2">
-        <ExternalLink className="h-4 w-4" />
-        {t("openInNewTab")}
-      </Button>
+      <div className="flex flex-wrap items-center justify-center gap-2">
+        {/* Em "Sem prévia" o botão fica como nova tentativa (a falha pode ser de rede). */}
+        {(status === "idle" || status === "empty") && (
+          <Button variant="outline" onClick={load} className="gap-2">
+            <Eye className="h-4 w-4" />
+            {tPreview("show")}
+          </Button>
+        )}
+        <Button onClick={onRequestOpen} className="gap-2">
+          <ExternalLink className="h-4 w-4" />
+          {t("openInNewTab")}
+        </Button>
+      </div>
+      <p className="max-w-sm text-[11px] text-muted-foreground text-center">{tPreview("showHint")}</p>
     </div>
   );
 }
@@ -447,8 +427,14 @@ function formatWhatsApp(text: string | null | undefined): string {
   out = whatsappStyle(out, "_", "<i>", "</i>");
   out = whatsappStyle(out, "*", "<b>", "</b>");
   out = whatsappStyle(out, "~", "<s>", "</s>");
-  // Links (before \n → <br> so regex stops at newline)
-  out = out.replace(/(https?:\/\/[^\s<>"]+)/g, '<a href="$1" target="_blank" rel="noopener noreferrer" class="underline text-blue-400">$1</a>');
+  // Links (before \n → <br> so regex stops at newline). Link de convite do WebChat (D22) sai
+  // como texto, nunca <a>: quem abre primeiro fica com a conversa, e o atendente gastaria o
+  // código do cliente. Os demais links seguem exatamente como antes.
+  out = out.replace(/(https?:\/\/[^\s<>"]+)/g, (raw: string) => {
+    const invite = matchWebchatInviteUrl(raw);
+    if (invite) return `<span class="break-all">${invite.url}</span>${invite.tail}`;
+    return `<a href="${raw}" target="_blank" rel="noopener noreferrer" class="underline text-blue-400">${raw}</a>`;
+  });
   // Newlines
   out = out.replace(/\n/g, "<br>");
   return out;
@@ -496,140 +482,113 @@ function QuotedMessageBlock({ msg }: { msg: QuotedMessage }) {
 function extractFirstUrl(text: string | null | undefined): string | null {
   if (!text) return null;
   const match = text.match(/https?:\/\/[^\s<>"]+/);
-  return match ? match[0] : null;
+  if (!match) return null;
+  // Link de convite do WebChat nunca vira prévia (a prévia abre o link): vale o próximo link.
+  if (!matchWebchatInviteUrl(match[0])) return match[0];
+  const re = /https?:\/\/[^\s<>"]+/g;
+  let next: RegExpExecArray | null;
+  while ((next = re.exec(text)) !== null) {
+    if (!matchWebchatInviteUrl(next[0])) return next[0];
+  }
+  return null;
 }
 
-interface LinkPreviewData {
-  url: string;
-  title?: string;
-  description?: string;
-  image?: string;
-  hostname?: string;
-}
+// ── Link de convite do WebChat no balão (PLANO_WEBCHAT_LINK_CONVITE D22) ─────────────
+// O link é de uso único: quem abre primeiro fica com a conversa. No painel ele sai como texto
+// (nunca clicável, nem no app) com o aviso e um botão de copiar.
 
-const CACHE_PREFIX = "lp_cache_";
-const CACHE_TTL_MS = 1000 * 60 * 60 * 24; // 24 hours
-
-function readCache(url: string): LinkPreviewData | null {
+/** Copia texto; fora de contexto seguro (instalação por IP/HTTP) cai no modo antigo. */
+async function copyInviteLinkText(text: string): Promise<boolean> {
   try {
-    const raw = localStorage.getItem(CACHE_PREFIX + url);
-    if (!raw) return null;
-    const { data, ts } = JSON.parse(raw) as { data: LinkPreviewData; ts: number };
-    if (Date.now() - ts > CACHE_TTL_MS) {
-      localStorage.removeItem(CACHE_PREFIX + url);
-      return null;
+    if (typeof navigator !== "undefined" && navigator.clipboard?.writeText && window.isSecureContext) {
+      await navigator.clipboard.writeText(text);
+      return true;
     }
-    return data;
   } catch {
-    return null;
+    // cai no modo antigo abaixo
   }
-}
-
-function writeCache(url: string, data: LinkPreviewData) {
   try {
-    localStorage.setItem(CACHE_PREFIX + url, JSON.stringify({ data, ts: Date.now() }));
+    const area = document.createElement("textarea");
+    area.value = text;
+    area.setAttribute("readonly", "");
+    area.style.position = "fixed";
+    area.style.top = "-1000px";
+    area.style.opacity = "0";
+    document.body.appendChild(area);
+    area.select();
+    const ok = document.execCommand("copy");
+    document.body.removeChild(area);
+    return ok;
   } catch {
-    // quota exceeded or SSR — ignore
+    return false;
   }
 }
 
-function LinkPreview({ url, onOpen }: { url: string; onOpen?: (u: string) => void }) {
+function WebchatInviteLinkActions({ urls }: { urls: string[] }) {
   const t = useTranslations("messageBubble");
-  const [data, setData] = useState<LinkPreviewData | null>(() => readCache(url));
-  const [loading, setLoading] = useState(() => readCache(url) === null);
-
-  useEffect(() => {
-    const cached = readCache(url);
-    if (cached) {
-      setData(cached);
-      setLoading(false);
-      return;
-    }
-
-    let cancelled = false;
-    // Defer fetch slightly so it doesn't block message rendering
-    const timer = setTimeout(() => {
-      fetch(`/api/link-preview?url=${encodeURIComponent(url)}`)
-        .then((r) => r.json())
-        .then((d: LinkPreviewData) => {
-          if (!cancelled) {
-            writeCache(url, d);
-            setData(d);
-          }
-        })
-        .catch(() => {
-          if (!cancelled) setData(null);
-        })
-        .finally(() => {
-          if (!cancelled) setLoading(false);
-        });
-    }, 150);
-
-    return () => {
-      cancelled = true;
-      clearTimeout(timer);
-    };
-  }, [url]);
-
-  if (loading) {
-    return (
-      <div className="mt-2 rounded-lg border bg-muted/20 overflow-hidden max-w-[280px]">
-        <div className="relative h-[80px] bg-muted/40 flex flex-col items-center justify-center gap-2">
-          {/* spinner */}
-          <svg
-            className="h-5 w-5 animate-spin text-muted-foreground/50"
-            viewBox="0 0 24 24"
-            fill="none"
-          >
-            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
-          </svg>
-          <span className="text-[10px] text-muted-foreground/60">{t("loadingPreview")}</span>
-        </div>
-        <div className="p-2 space-y-1.5">
-          <div className="h-2 bg-muted rounded animate-pulse w-1/3" />
-          <div className="h-3 bg-muted rounded animate-pulse w-3/4" />
-          <div className="h-2 bg-muted rounded animate-pulse w-full" />
-        </div>
-      </div>
-    );
-  }
-
-  if (!data || (!data.title && !data.image)) return null;
-
-  const ERROR_TITLE = /^(404|403|500|502|503|page not found|not found|access denied|forbidden|error)/i;
-  if (data.title && ERROR_TITLE.test(data.title)) return null;
-
+  const tRegion = useTranslations("regionSettings");
+  if (urls.length === 0) return null;
+  const handleCopy = async (e: React.MouseEvent, url: string) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (await copyInviteLinkText(url)) toast.success(t("webchatInviteLinkCopied"));
+    else toast.error(t("adReferralCopyFailed"));
+  };
   return (
-    <div
-      role="button"
-      tabIndex={0}
-      onClick={() => onOpen ? onOpen(url) : window.open(url, "_blank", "noopener,noreferrer")}
-      onKeyDown={(e) => e.key === "Enter" && (onOpen ? onOpen(url) : window.open(url, "_blank", "noopener,noreferrer"))}
-      className="mt-2 block rounded-lg border bg-muted/20 overflow-hidden max-w-[280px] hover:bg-muted/30 transition-colors cursor-pointer"
-    >
-      {data.image && (
-        // eslint-disable-next-line @next/next/no-img-element
-        <img
-          src={data.image}
-          alt=""
-          className="w-full h-[140px] object-cover"
-          onError={(e) => { (e.target as HTMLImageElement).style.display = "none"; }}
-        />
-      )}
-      <div className="p-2 space-y-0.5">
-        {data.hostname && (
-          <p className="text-[10px] text-muted-foreground uppercase tracking-wide">{data.hostname}</p>
-        )}
-        {data.title && (
-          <p className="text-xs font-semibold line-clamp-2 leading-snug">{data.title}</p>
-        )}
-        {data.description && (
-          <p className="text-[11px] text-muted-foreground line-clamp-2">{data.description}</p>
-        )}
-      </div>
+    <div className="mt-1.5 space-y-1">
+      {urls.map((url) => (
+        <div
+          key={url}
+          className="flex items-center gap-1.5 rounded-md bg-black/10 px-2 py-1 text-[11px] dark:bg-white/10"
+          onDoubleClick={(e) => e.stopPropagation()}
+        >
+          <ShieldCheck className="h-3.5 w-3.5 shrink-0 opacity-80" aria-hidden />
+          <span className="min-w-0 flex-1 truncate font-medium">{t("webchatInviteLinkLabel")}</span>
+          <Popover>
+            <PopoverTrigger asChild>
+              <button
+                type="button"
+                aria-label={tRegion("moreInfo")}
+                onClick={(e) => e.stopPropagation()}
+                className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full opacity-70 transition-opacity hover:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+              >
+                <Info className="h-3.5 w-3.5" />
+              </button>
+            </PopoverTrigger>
+            <PopoverContent
+              align="end"
+              onClick={(e) => e.stopPropagation()}
+              className="w-64 max-w-[calc(100vw-2rem)] p-3 text-xs leading-relaxed text-muted-foreground"
+            >
+              {t("webchatInviteLinkWarning")}
+            </PopoverContent>
+          </Popover>
+          <button
+            type="button"
+            aria-label={t("webchatInviteLinkCopy")}
+            title={t("webchatInviteLinkCopy")}
+            onClick={(e) => void handleCopy(e, url)}
+            className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full opacity-80 transition-opacity hover:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+          >
+            <Copy className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      ))}
     </div>
   );
+}
+
+// Rede de segurança para link de convite que chegue a um <a> fora das duas rotas de texto
+// (botão de URL de template/interativo): clique (e clique do meio) não abre, só avisa.
+function blockWebchatInviteAnchor(e: React.MouseEvent<HTMLElement>, warning: string): void {
+  const target = e.target as HTMLElement | null;
+  const anchor = target && typeof target.closest === "function" ? target.closest("a") : null;
+  if (!anchor) return;
+  const href = anchor.getAttribute("href") || "";
+  if (!href || href.indexOf("#c=1.") === -1 || !matchWebchatInviteUrl(href)) return;
+  e.preventDefault();
+  e.stopPropagation();
+  toast.warning(warning);
 }
 
 /* Avisos que a Meta gera no lugar da mensagem do cliente. O backend grava um marcador
@@ -680,6 +639,7 @@ function TextContent({ body, isDeleted, isEdited, originalBody, showLinkPreview 
   }
 
   const firstUrl = showLinkPreview ? extractFirstUrl(body) : null;
+  const inviteUrls = extractWebchatInviteUrls(body);
   return (
     <div onClick={handleClick}>
       {/* overflow-wrap:anywhere quebra em espacos por padrao, mas tambem em qualquer
@@ -690,7 +650,8 @@ function TextContent({ body, isDeleted, isEdited, originalBody, showLinkPreview 
         className="[overflow-wrap:anywhere] text-sm leading-normal"
         dangerouslySetInnerHTML={{ __html: sanitize(formatWhatsApp(body)) }}
       />
-      {firstUrl && <LinkPreview url={firstUrl} onOpen={setModalUrl} />}
+      <WebchatInviteLinkActions urls={inviteUrls} />
+      {firstUrl && <LinkPreviewCard url={firstUrl} onOpen={setModalUrl} />}
       {originalBody && (
         <div className="mt-1.5 rounded px-2 py-1 bg-black/10 dark:bg-white/10 border-l-2 border-muted-foreground/30">
           <p className="text-[10px] font-medium text-current opacity-50 mb-0.5">{t("edited")}</p>
@@ -766,6 +727,12 @@ function StickerContent({ msg }: { msg: Message }) {
   );
 }
 
+// Legenda de imagem/video/album: preenchimento vira vazio (nada embaixo da midia).
+// Regra em lib/media-caption.ts (espelhada no backend para a midia encaminhada).
+function mediaCaption(msg: Message): string {
+  return mediaCaptionText(msg.body, msg.fileName, mediaUrlFileName(getMediaUrl(msg)));
+}
+
 function ImageContent({ msg }: { msg: Message }) {
   const t = useTranslations("messageBubble");
   const [lightbox, setLightbox] = useState(false);
@@ -826,17 +793,23 @@ function ImageContent({ msg }: { msg: Message }) {
   const handleTouchEnd = () => { pinchRef.current = null; };
 
   const isSticker = msg.mediaType === "sticker" || msg.mediaType === "stickerMessage" || msg.mediaType === "lottieStickerMessage";
+  const originalCaption = mediaCaption(msg);
+  // Edição vazia (linha antiga nasce com "") não apaga a legenda: mesma regra do encaminhar.
+  const caption = msg.edition || originalCaption;
 
   return (
     <div>
-      <button onClick={() => setLightbox(true)} className="block relative group/img">
+      {/* Teto fixo no botao (w-fit) e max-w-full na imagem: a bolha e limitada a
+          70% da lista, e 280px fixo na imagem vazava no celular. Nao usar
+          max-w-[min(280px,100%)] na imagem: no calculo da largura da bolha o
+          navegador ignora esse teto e a bolha crescia ate a largura natural da
+          foto (com a imagem desenhada em 280px dentro dela). */}
+      <button onClick={() => setLightbox(true)} className={cn("block relative group/img w-fit", !isSticker && "max-w-[280px]")}>
         {/* eslint-disable-next-line @next/next/no-img-element */}
         <img
           src={url}
           alt={msg.body || "imagem"}
-          // min(...,100%): a bolha e limitada a 70% da largura da lista, entao
-          // no celular 280px estouravam a bolha e vazavam para a direita.
-          className={cn("rounded-lg object-cover", isSticker ? "max-w-[100px] max-h-[100px]" : "max-w-[min(280px,100%)] max-h-[280px]")}
+          className={cn("rounded-lg object-cover", isSticker ? "max-w-[100px] max-h-[100px]" : "max-w-full max-h-[280px]")}
         />
         {!isSticker && (
           <div className="absolute inset-0 rounded-lg bg-black/0 group-hover/img:bg-black/10 transition-colors flex items-center justify-center">
@@ -844,7 +817,15 @@ function ImageContent({ msg }: { msg: Message }) {
           </div>
         )}
       </button>
-      {(msg.edition ?? msg.body) && !isSticker && <TextContent body={msg.edition ?? msg.body} isEdited={msg.isEdited} originalBody={msg.edition ? msg.body : undefined} />}
+      {/* w-0 + min-w: a legenda fica fora da conta da largura da bolha (que segue a
+          imagem) e quebra dentro dela — nome sem espaco esticava a bolha. O piso de
+          10rem segura a legenda enquanto a imagem carrega ou quando ela falha (a caixa
+          da imagem fica minuscula e a legenda virava uma coluna de palavras). */}
+      {caption && !isSticker && (
+        <div className="w-0 min-w-[max(100%,10rem)]">
+          <TextContent body={caption} isEdited={msg.isEdited} originalBody={msg.edition ? originalCaption || undefined : undefined} />
+        </div>
+      )}
       <Dialog open={lightbox} onOpenChange={(o) => { if (!o) closeLightbox(); }}>
         <DialogContent className="max-w-4xl w-full h-[85vh] flex flex-col p-0 gap-0">
           <DialogTitle className="sr-only">{msg.fileName || "imagem"}</DialogTitle>
@@ -1135,7 +1116,7 @@ function WaveAudioContent({ msg, fromMe }: { msg: Message; fromMe?: boolean }) {
         </div>
         <button
           type="button"
-          onClick={() => downloadFile(audioUrl, "audio.mp3")}
+          onClick={() => downloadFile(audioUrl, "audio.mp3", { fallbackUrl: url, fallbackFilename: "audio.ogg" })}
           className={cn(
             "shrink-0 rounded-full p-2 transition-colors",
             fromMe
@@ -1209,7 +1190,7 @@ function AudioContent({ msg }: { msg: Message }) {
         </div>
         <button
           type="button"
-          onClick={() => downloadFile(audioUrl, "audio.mp3")}
+          onClick={() => downloadFile(audioUrl, "audio.mp3", { fallbackUrl: url, fallbackFilename: "audio.ogg" })}
           className="shrink-0 rounded-full p-2 text-muted-foreground hover:bg-muted hover:text-foreground transition-colors"
           title={t("downloadAudio")}
         >
@@ -1223,15 +1204,27 @@ function AudioContent({ msg }: { msg: Message }) {
 function VideoContent({ msg }: { msg: Message }) {
   const url = getMediaUrl(msg);
   if (url.endsWith(".gif")) {
-    // eslint-disable-next-line @next/next/no-img-element
-    return <img src={url} alt="" className="rounded-lg max-w-[min(280px,100%)]" />;
+    return (
+      <div className="w-fit max-w-[280px]">
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img src={url} alt="" className="rounded-lg max-w-full" />
+      </div>
+    );
   }
+  const originalCaption = mediaCaption(msg);
+  // Edição vazia (linha antiga nasce com "") não apaga a legenda: mesma regra do encaminhar.
+  const caption = msg.edition || originalCaption;
   return (
     <div>
       <video controls preload="metadata" className="w-full max-w-[280px] rounded-lg">
         <source src={url} />
       </video>
-      {(msg.edition ?? msg.body) && <TextContent body={msg.edition ?? msg.body} isEdited={msg.isEdited} originalBody={msg.edition ? msg.body : undefined} />}
+      {/* Mesma regra da imagem: legenda quebra na largura do video. */}
+      {caption && (
+        <div className="w-0 min-w-[max(100%,10rem)]">
+          <TextContent body={caption} isEdited={msg.isEdited} originalBody={msg.edition ? originalCaption || undefined : undefined} />
+        </div>
+      )}
     </div>
   );
 }
@@ -1270,20 +1263,18 @@ function DocumentContent({ msg }: { msg: Message }) {
     try { return decodeURIComponent(base); } catch { return base; }
   })();
   const bodyText = (msg.body || "").trim();
-  // Remove o sufixo de data do multer (_ddMMyyyyHHmmssSSS = 17 digitos) p/ exibir um
-  // nome limpo quando so resta o nome do servidor (caso legenda + pos-refresh).
-  const cleanUrlName = urlName.replace(/_\d{17}(?=\.[^.]+$)/, "");
-  // Mesma sanitizacao do multer (uploadZPRO.ts): espacos->_ e [^\w.-] removidos.
-  const sanitizeName = (s: string) => s.replace(/\s+/g, "_").replace(/[^\w.-]/g, "");
-  // `body` e o NOME do arquivo (envio SEM legenda grava originalname) quando, apos a
-  // mesma sanitizacao do multer, bate com o nome do arquivo da URL; senao e LEGENDA.
-  // Comparacao por NOME-BASE (nao so pela extensao): uma legenda terminada em ".pdf"
-  // nao se passa por nome de arquivo, e evita RegExp dinamico (ext com metachar = crash).
-  const bodyIsFileName =
-    !bodyText || sanitizeName(bodyText).toLowerCase() === sanitizeName(cleanUrlName).toLowerCase();
+  // Remove o sufixo do nome salvo (data do multer ou horario em ms) p/ exibir um nome
+  // limpo quando so resta o nome do servidor (caso legenda + pos-refresh).
+  const cleanUrlName = urlName.replace(SAVED_FILE_SUFFIX_RE, "");
+  // `body` e o NOME do arquivo (envio SEM legenda grava originalname) quando bate com o
+  // nome do arquivo da URL (mesma sanitizacao do multer, ou o nome salvo com sufixo de
+  // horario/acento trocado); senao e LEGENDA. Comparacao por NOME-BASE (nao so pela
+  // extensao): uma legenda terminada em ".pdf" nao se passa por nome de arquivo.
+  const bodyIsFileName = isBodyFileName(bodyText, msg.fileName, urlName);
   const name = msg.fileName || (bodyIsFileName ? bodyText : "") || cleanUrlName || "documento";
-  // Legenda exibida separadamente (como nas imagens) quando o body nao e o nome.
-  const caption = !bodyIsFileName && bodyText && bodyText !== msg.fileName ? bodyText : "";
+  // Legenda exibida separadamente (como nas imagens) quando o body nao e o nome nem um
+  // preenchimento ("Documento" do documento sem titulo): mesma regra do encaminhar.
+  const caption = mediaCaptionText(bodyText, msg.fileName, urlName);
   // Fonte autoritativa da extensao p/ previa e icone: fileName explicito senao a URL.
   const extSource = msg.fileName || urlName;
   const { label, color } = getFileExtIcon(extSource || name);
@@ -1301,7 +1292,7 @@ function DocumentContent({ msg }: { msg: Message }) {
         {label}
       </div>
       <div className="min-w-0 flex-1">
-        <p className="truncate text-sm font-medium">{name}</p>
+        <p className="truncate text-sm font-medium" title={name}>{name}</p>
         <p className="text-xs text-muted-foreground">{canPreview ? t("tapToView") : t("tapToDownload")}</p>
       </div>
       <Download className="h-4 w-4 text-muted-foreground shrink-0" />
@@ -1639,115 +1630,73 @@ function VcardContent({ msg }: { msg: Message }) {
   );
 }
 
-const OSM_TILE_SIZE = 256;
-const OSM_ZOOM = 15;
-// Meia largura/altura máximas da miniatura (280 x 120): cobre o maior tamanho do
-// balão; em tela estreita o excedente fica fora do overflow-hidden.
-const OSM_HALF_W = 140;
-const OSM_HALF_H = 60;
 
-// Monta só os tiles que cobrem a área em volta do ponto (2 a 6 imagens) e os
-// posiciona em relação ao CENTRO do contêiner, então o ponto fica centrado em
-// qualquer largura do balão.
-function OsmMapThumbnail({ lat, lng, alt, attribution }: { lat: number; lng: number; alt: string; attribution: string }) {
-  const [failed, setFailed] = useState(false);
-  if (failed || !Number.isFinite(lat) || !Number.isFinite(lng)) {
-    return <MapPin className="h-12 w-12 text-muted-foreground" />;
-  }
-
-  const n = 2 ** OSM_ZOOM;
-  const latRad = (Math.max(-85.0511, Math.min(85.0511, lat)) * Math.PI) / 180;
-  const pointX = ((lng + 180) / 360) * n * OSM_TILE_SIZE;
-  const pointY = ((1 - Math.log(Math.tan(latRad) + 1 / Math.cos(latRad)) / Math.PI) / 2) * n * OSM_TILE_SIZE;
-
-  const tiles: { key: string; src: string; dx: number; dy: number }[] = [];
-  const firstY = Math.floor((pointY - OSM_HALF_H) / OSM_TILE_SIZE);
-  const lastY = Math.floor((pointY + OSM_HALF_H) / OSM_TILE_SIZE);
-  const firstX = Math.floor((pointX - OSM_HALF_W) / OSM_TILE_SIZE);
-  const lastX = Math.floor((pointX + OSM_HALF_W) / OSM_TILE_SIZE);
-  for (let ty = firstY; ty <= lastY; ty++) {
-    if (ty < 0 || ty >= n) continue;
-    for (let tx = firstX; tx <= lastX; tx++) {
-      const wrappedX = ((tx % n) + n) % n;
-      tiles.push({
-        key: `${tx}-${ty}`,
-        src: `https://tile.openstreetmap.org/${OSM_ZOOM}/${wrappedX}/${ty}.png`,
-        dx: tx * OSM_TILE_SIZE - pointX,
-        dy: ty * OSM_TILE_SIZE - pointY,
-      });
-    }
-  }
-
-  return (
-    <div role="img" aria-label={alt} className="absolute inset-0">
-      {tiles.map((tile) => (
-        // eslint-disable-next-line @next/next/no-img-element
-        <img
-          key={tile.key}
-          src={tile.src}
-          alt=""
-          aria-hidden="true"
-          draggable={false}
-          loading="lazy"
-          className="absolute max-w-none select-none"
-          style={{
-            width: OSM_TILE_SIZE,
-            height: OSM_TILE_SIZE,
-            left: `calc(50% + ${tile.dx}px)`,
-            top: `calc(50% + ${tile.dy}px)`,
-          }}
-          onError={() => setFailed(true)}
-        />
-      ))}
-      <MapPin
-        className="absolute h-6 w-6 -translate-x-1/2 -translate-y-full text-red-600 fill-red-500/40 drop-shadow"
-        style={{ left: "50%", top: "50%" }}
-        aria-hidden="true"
-      />
-      <span className="absolute top-1 right-1 rounded bg-background/80 px-1 text-[9px] leading-tight text-muted-foreground">
-        {attribution}
-      </span>
-    </div>
-  );
-}
+// Corpo sem coordenada legível que nunca vira legenda: marcador interno ("[location]" do
+// Gupshup e da importação de histórico do WABA, "[location:undefined,undefined]").
+const LOCATION_PLACEHOLDER_BODY_RE = /^\[location(?::[^\]]*)?\]$/i;
 
 function LocationContent({ msg }: { msg: Message }) {
   const t = useTranslations("messageBubble");
-  const lat = msg.latitude;
-  const lng = msg.longitude;
-  // Parse coordinates from body if not in fields (some channels send "lat,lng" in body)
-  let parsedLat = lat;
-  let parsedLng = lng;
-  if (!parsedLat || !parsedLng) {
-    const coords = msg.body?.match(/([-\d.]+)[,\s]+([-\d.]+)/);
-    if (coords) { parsedLat = parseFloat(coords[1]); parsedLng = parseFloat(coords[2]); }
-  }
-  const mapsUrl = parsedLat && parsedLng
-    ? `https://www.google.com/maps?q=${parsedLat},${parsedLng}`
-    : msg.body?.startsWith("http") ? msg.body : "#";
+  // Coordenadas pelo corpo e pelo dataJson, nos formatos de todos os canais (as colunas
+  // latitude/longitude não existem no banco). Leitura memorizada por mensagem.
+  const loc = getMessageLocation(msg);
+  const rawBody = (msg.body || "").trim();
+  // Sem coordenada, o link é o próprio corpo só quando ele é um https inteiro; senão o
+  // cartão não é link (o antigo href="#" em nova aba reabria o painel).
+  const href = loc
+    ? buildGoogleMapsUrl(loc.lat, loc.lng)
+    : /^https:\/\/\S+$/i.test(rawBody) ? rawBody : null;
 
-  return (
-    <a href={mapsUrl} target="_blank" rel="noopener noreferrer" className="block rounded-lg border bg-muted/30 overflow-hidden max-w-[280px]">
+  let heading: string = t("locationLabel");
+  let detail: string | null = null;
+  if (loc) {
+    if (loc.label) heading = loc.label;
+    else if (loc.name) { heading = loc.name; detail = loc.address || null; }
+    else if (loc.address) heading = loc.address;
+  } else if (
+    // Texto curto vira legenda, como antes; base64, URL crua, aviso de mídia do sistema e
+    // marcador interno, nunca.
+    rawBody &&
+    rawBody.length <= 250 &&
+    !/^data:/i.test(rawBody) &&
+    !/https?:\/\//i.test(rawBody) &&
+    !rawBody.includes("Media download limited by the WhatsApp server") &&
+    !LOCATION_PLACEHOLDER_BODY_RE.test(rawBody)
+  ) {
+    detail = rawBody;
+  }
+
+  const content = (
+    <>
       {/* Miniatura por tiles do OpenStreetMap (sem chave de API) */}
       <div className="relative h-[120px] w-full bg-muted flex items-center justify-center overflow-hidden">
-        {parsedLat && parsedLng ? (
-          <OsmMapThumbnail lat={Number(parsedLat)} lng={Number(parsedLng)} alt={t("locationAlt")} attribution={t("mapAttribution")} />
+        {loc ? (
+          <OsmMapThumbnail lat={loc.lat} lng={loc.lng} alt={t("locationAlt")} attribution={t("mapAttribution")} />
         ) : (
           <MapPin className="h-12 w-12 text-muted-foreground" />
         )}
-        <div className="absolute inset-0 flex items-end justify-start p-2">
-          <span className="bg-background/80 backdrop-blur-sm rounded px-1.5 py-0.5 text-[10px] font-medium flex items-center gap-1">
-            <MapPin className="h-3 w-3 text-red-500" /> {t("viewOnMap")}
-          </span>
-        </div>
-      </div>
-      <div className="p-2">
-        <p className="text-xs font-medium">{t("locationLabel")}</p>
-        {msg.body && !msg.body.startsWith("http") && (
-          <p className="text-[10px] text-muted-foreground line-clamp-2 mt-0.5">{msg.body}</p>
+        {href && (
+          <div className="absolute inset-0 flex items-end justify-start p-2">
+            <span className="bg-background/80 backdrop-blur-sm rounded px-1.5 py-0.5 text-[10px] font-medium flex items-center gap-1">
+              <MapPin className="h-3 w-3 text-red-500" /> {t("viewOnMap")}
+            </span>
+          </div>
         )}
       </div>
-    </a>
+      <div className="p-2">
+        <p className="text-xs font-medium line-clamp-2 break-words">{heading}</p>
+        {detail && (
+          <p className="text-[10px] text-muted-foreground line-clamp-2 mt-0.5 break-words">{detail}</p>
+        )}
+      </div>
+    </>
+  );
+
+  const cardClass = "block rounded-lg border bg-muted/30 overflow-hidden max-w-[280px]";
+  return href ? (
+    <a href={href} target="_blank" rel="noopener noreferrer" className={cardClass}>{content}</a>
+  ) : (
+    <div className={cardClass}>{content}</div>
   );
 }
 
@@ -1775,13 +1724,21 @@ function CtaUrlContent({ msg }: { msg: Message }) {
   } catch {
     url = msg.body;
   }
+  // Botão com o link de convite do WebChat (D22): mostra o link como texto e o copiar.
+  const invite = typeof url === "string" && isWebchatInviteUrl(url) ? url : null;
   return (
     <div className="rounded-lg border bg-muted/30 p-3">
       <div className="flex items-center gap-2 mb-2">
         <Link2 className="h-5 w-5 text-blue-500" />
         <span className="text-sm font-medium">{t("link")}</span>
       </div>
-      {url && (
+      {invite ? (
+        <>
+          <p className="text-xs font-medium">{label}</p>
+          <p className="mt-1 text-xs break-all opacity-80">{invite}</p>
+          <WebchatInviteLinkActions urls={[invite]} />
+        </>
+      ) : url && (
         <a href={url} target="_blank" rel="noopener noreferrer"
           className="inline-flex items-center gap-1.5 rounded-md bg-primary text-primary-foreground px-3 py-1.5 text-xs">
           <ExternalLink className="h-3 w-3" />
@@ -1958,19 +1915,21 @@ function ButtonContent({ msg, onQuickSend }: { msg: Message; onQuickSend?: (text
 }
 
 function ListResponseContent({ msg }: { msg: Message }) {
+  const t = useTranslations("messageBubble");
   const isRowId = /^s\d+r\d+$/.test((msg.body || "").trim());
   const displayText = isRowId ? "" : (msg.body || "").trim();
   return (
     <div className="flex items-center gap-2 min-w-[120px]">
       <List className="h-4 w-4 shrink-0 opacity-70" />
       <span className="text-sm">
-        {displayText || <span className="italic opacity-60">Opção selecionada</span>}
+        {displayText || <span className="italic opacity-60">{t("optionSelected")}</span>}
       </span>
     </div>
   );
 }
 
 function ListContent({ msg, onQuickSend }: { msg: Message; onQuickSend?: (text: string) => void }) {
+  const t = useTranslations("messageBubble");
   const [modalOpen, setModalOpen] = useState(false);
 
   let sections: { title: string; rows: { title: string; description?: string }[] }[] = [];
@@ -2015,7 +1974,7 @@ function ListContent({ msg, onQuickSend }: { msg: Message; onQuickSend?: (text: 
   }
 
   const hasRows = sections.some(s => s.rows.length > 0);
-  const displayButton = buttonText || (hasRows ? "Ver opções" : "");
+  const displayButton = buttonText || (hasRows ? t("viewOptions") : "");
 
   const handleRowClick = (rowTitle: string) => {
     if (onQuickSend && rowTitle) {
@@ -2720,13 +2679,15 @@ function TemplateContent({ msg, onQuickSend }: { msg: Message; onQuickSend?: (te
       )}
       {/* Header: video */}
       {headerFormat === "VIDEO" && headerMediaSrc && (
-        <video controls className="max-w-[min(250px,100%)] rounded" preload="metadata">
+        <video controls className="w-full max-w-[250px] rounded" preload="metadata">
           <source src={headerMediaSrc} type="video/mp4" />
         </video>
       )}
       {/* Header: image */}
       {headerFormat === "IMAGE" && headerMediaSrc && (
-        <img src={headerMediaSrc} alt="" className="max-w-[min(250px,100%)] rounded" />
+        <div className="w-fit max-w-[250px]">
+          <img src={headerMediaSrc} alt="" className="max-w-full rounded" />
+        </div>
       )}
       {/* Header: document */}
       {headerFormat === "DOCUMENT" && headerMediaSrc && (
@@ -2850,14 +2811,26 @@ function parseInboundJson(raw?: string | null): Record<string, unknown> | null {
   }
 }
 
+type RegionFormatMoney = UseRegionResult["formatMoney"];
+
 // priceAmount1000 do WhatsApp = preco x 1000. Valores ja formatados ("R$ ...") passam direto.
-function formatWaThousandPrice(raw?: string | number | null): string {
+// O formato legado nao traz a moeda: sai na moeda e no formato do pais da empresa.
+function formatWaThousandPrice(raw: string | number | null | undefined, formatMoney: RegionFormatMoney): string {
   if (raw === null || raw === undefined || raw === "") return "";
   const s = String(raw).trim();
   if (s.startsWith("R$")) return s;
   const n = Number(s.replace(/[^\d.-]/g, ""));
   if (!Number.isFinite(n) || n === 0) return "";
-  return `R$ ${(n / 1000).toFixed(2).replace(".", ",")}`;
+  return formatMoney(n / 1000);
+}
+
+// Valor com a moeda da PROPRIA mensagem ("BRL 150", como Dialog360/Gupshup gravam o item
+// do pedido do catalogo): sai nessa moeda, no formato do pais da empresa. Texto ja
+// formatado ou em outro formato segue como veio.
+function formatMessageCurrencyText(raw: string, formatMoney: RegionFormatMoney): string {
+  const m = /^([A-Za-z]{3})\s+(-?\d+(?:\.\d+)?)$/.exec(String(raw || "").trim());
+  if (!m) return raw;
+  return formatMoney(Number(m[2]), { currency: m[1].toUpperCase() }) || raw;
 }
 
 // data: URIs nao podem passar por getMediaUrl (seria prefixado com API_URL).
@@ -2876,7 +2849,7 @@ interface ProductCardData {
   videoUrl: string;
 }
 
-function parseProductData(msg: Message): ProductCardData {
+function parseProductData(msg: Message, formatMoney: RegionFormatMoney): ProductCardData {
   // 1) dataJson normalizado (novo contrato dos canais)
   const dj = parseInboundJson(msg.dataJson);
   if (dj && (dj.title || dj.productName || dj.imageUrl || dj.thumbnailUrl)) {
@@ -2898,7 +2871,7 @@ function parseProductData(msg: Message): ProductCardData {
     return {
       name: (parts[1] || "").trim(),
       description: (parts[3] || "").trim(),
-      price: formatWaThousandPrice((parts[2] || "").trim()),
+      price: formatWaThousandPrice((parts[2] || "").trim(), formatMoney),
       imageUrl: "",
       url: (parts[4] || "").trim(),
       videoUrl: "",
@@ -2951,7 +2924,9 @@ function parseOrderData(msg: Message): { items: OrderItem[]; total: string; text
 
 function OrderContent({ msg }: { msg: Message }) {
   const t = useTranslations("messageBubble");
-  const { items, total, text } = parseOrderData(msg);
+  const { formatMoney } = useRegion();
+  const { items, total: rawTotal, text } = parseOrderData(msg);
+  const total = rawTotal ? formatMessageCurrencyText(rawTotal, formatMoney) : rawTotal;
 
   return (
     <div className="rounded-lg border bg-muted/30 p-3 space-y-2">
@@ -2964,7 +2939,7 @@ function OrderContent({ msg }: { msg: Message }) {
           {items.map((item, i) => (
             <div key={i} className="flex items-center justify-between text-xs">
               <span>{item.name} {item.quantity ? `x${item.quantity}` : ""}</span>
-              {item.price && <span className="text-muted-foreground">{item.price}</span>}
+              {item.price && <span className="text-muted-foreground">{formatMessageCurrencyText(String(item.price), formatMoney)}</span>}
             </div>
           ))}
           {total && <div className="border-t pt-1 text-xs font-medium text-right">{t("orderTotal", { total })}</div>}
@@ -2978,7 +2953,8 @@ function OrderContent({ msg }: { msg: Message }) {
 
 function ProductContent({ msg }: { msg: Message }) {
   const t = useTranslations("messageBubble");
-  const { name, description, price, imageUrl, url, videoUrl } = parseProductData(msg);
+  const { formatMoney } = useRegion();
+  const { name, description, price, imageUrl, url, videoUrl } = parseProductData(msg, formatMoney);
   // Imagem: dataJson.imageUrl tem prioridade; senao usa a midia da propria mensagem
   // (thumbnail persistido em storageUrl/mediaUrl pelos canais).
   const imgSrc = resolveProductImage(imageUrl) || getMediaUrl(msg);
@@ -2989,8 +2965,12 @@ function ProductContent({ msg }: { msg: Message }) {
         <Package className="h-5 w-5 text-blue-500" />
         <span className="text-sm font-medium">{t("product")}</span>
       </div>
-      {/* eslint-disable-next-line @next/next/no-img-element */}
-      {imgSrc && <img src={imgSrc} alt={name} className="rounded-lg mb-2 object-cover max-w-[min(200px,100%)] max-h-[120px]" />}
+      {imgSrc && (
+        <div className="mb-2 w-fit max-w-[200px]">
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img src={imgSrc} alt={name} className="rounded-lg object-cover max-w-full max-h-[120px]" />
+        </div>
+      )}
       {name && <p className="text-sm font-medium">{name}</p>}
       {price && <p className="text-sm font-semibold text-green-600">{price}</p>}
       {description && <p className="text-xs text-muted-foreground whitespace-pre-wrap">{description}</p>}
@@ -3090,6 +3070,8 @@ function AlbumContent({ msg, allMessages }: { msg: Message; allMessages?: Messag
   const currentItem = albumMsgs[lightboxIdx];
   const currentUrl = getMediaUrl(currentItem);
   const isCurrentVideo = currentItem?.mediaType?.includes("video");
+  const albumOriginalCaption = mediaCaption(msg);
+  const albumCaption = msg.edition || albumOriginalCaption;
 
   return (
     <div>
@@ -3132,7 +3114,12 @@ function AlbumContent({ msg, allMessages }: { msg: Message; allMessages?: Messag
         })}
       </div>
 
-      {(msg.edition ?? msg.body) && <TextContent body={msg.edition ?? msg.body} isEdited={msg.isEdited} originalBody={msg.edition ? msg.body : undefined} />}
+      {/* Mesma regra da imagem: sem preenchimento e quebrando na largura do grid. */}
+      {albumCaption && (
+        <div className="w-0 min-w-[max(100%,10rem)]">
+          <TextContent body={albumCaption} isEdited={msg.isEdited} originalBody={msg.edition ? albumOriginalCaption || undefined : undefined} />
+        </div>
+      )}
 
       {/* Lightbox */}
       <Dialog open={lightboxIdx >= 0} onOpenChange={(o) => { if (!o) { setLightboxIdx(-1); setRotation(0); setScale(1); setOffset({ x: 0, y: 0 }); } }}>
@@ -3302,12 +3289,23 @@ function TranscriptionContent({ msg }: { msg: Message }) {
 function NoteText({ text, className }: { text: string; className?: string }) {
   const [modalUrl, setModalUrl] = useState<string | null>(null);
   const parts = linkifyParts(text);
+  const inviteUrls = extractWebchatInviteUrls(text);
 
   return (
     <>
       <p className={className}>
         {parts.map((part, i) => {
           if (part.type === "text") return <React.Fragment key={i}>{part.value}</React.Fragment>;
+          // Link de convite do WebChat (D22): texto, nunca link; o copiar vem logo abaixo.
+          const invite = part.href.startsWith("mailto:") ? null : matchWebchatInviteUrl(part.value);
+          if (invite) {
+            return (
+              <React.Fragment key={i}>
+                <span className="break-all">{invite.url}</span>
+                {invite.tail}
+              </React.Fragment>
+            );
+          }
           const isMail = part.href.startsWith("mailto:");
           return (
             <a
@@ -3323,6 +3321,7 @@ function NoteText({ text, className }: { text: string; className?: string }) {
           );
         })}
       </p>
+      <WebchatInviteLinkActions urls={inviteUrls} />
       {modalUrl && <LinkModal url={modalUrl} onClose={() => setModalUrl(null)} />}
     </>
   );
@@ -3382,14 +3381,16 @@ function NotesContent({ msg }: { msg: Message }) {
       {hasMedia && msg.mediaUrl && (
         <div className="mb-2">
           {msg.mediaType?.includes("image") && (
-            // eslint-disable-next-line @next/next/no-img-element
-            <img src={getMediaUrl(msg)} alt="" className="rounded max-w-[min(200px,100%)] max-h-[120px] object-cover" />
+            <div className="w-fit max-w-[200px]">
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img src={getMediaUrl(msg)} alt="" className="rounded max-w-full max-h-[120px] object-cover" />
+            </div>
           )}
           {msg.mediaType?.includes("video") && (
-            <video controls src={getMediaUrl(msg)} className="max-w-[min(200px,100%)] rounded" />
+            <video controls src={getMediaUrl(msg)} className="w-full max-w-[200px] rounded" />
           )}
           {msg.mediaType?.includes("audio") && (
-            <audio controls src={getAudioUrl(msg)} className="max-w-[min(200px,100%)]" />
+            <audio controls src={getAudioUrl(msg)} className="w-full max-w-[200px]" />
           )}
         </div>
       )}
@@ -3397,9 +3398,9 @@ function NotesContent({ msg }: { msg: Message }) {
         <div className="mb-2">
           {noteIsImage && (
             <>
-              <button onClick={() => setNoteLightbox(true)} className="block relative group/img">
+              <button onClick={() => setNoteLightbox(true)} className="block relative group/img w-fit max-w-[200px]">
                 {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img src={getMediaUrl(noteAttachedUrl)} alt="" className="rounded max-w-[min(200px,100%)] max-h-[120px] object-cover" />
+                <img src={getMediaUrl(noteAttachedUrl)} alt="" className="rounded max-w-full max-h-[120px] object-cover" />
                 <div className="absolute inset-0 rounded bg-black/0 group-hover/img:bg-black/10 transition-colors flex items-center justify-center">
                   <ExternalLink className="h-5 w-5 text-white opacity-0 group-hover/img:opacity-100 transition-opacity drop-shadow-md" />
                 </div>
@@ -3446,10 +3447,10 @@ function NotesContent({ msg }: { msg: Message }) {
             </>
           )}
           {noteIsVideo && (
-            <video controls src={getMediaUrl(noteAttachedUrl)} className="max-w-[min(200px,100%)] rounded" />
+            <video controls src={getMediaUrl(noteAttachedUrl)} className="w-full max-w-[200px] rounded" />
           )}
           {noteIsAudio && (
-            <audio controls src={getAudioUrl(noteAttachedUrl)} className="max-w-[min(200px,100%)]" />
+            <audio controls src={getAudioUrl(noteAttachedUrl)} className="w-full max-w-[200px]" />
           )}
           {noteIsFile && (
             <a href={getMediaUrl(noteAttachedUrl)} target="_blank" rel="noopener noreferrer" className="flex items-center gap-1 text-xs text-primary underline break-all">
@@ -3476,12 +3477,214 @@ function NotesContent({ msg }: { msg: Message }) {
   );
 }
 
+// Motivo da divisória nova → explicação na dica (quem fez e o efeito no prazo de inatividade).
+const TRANSFER_HINT_BY_REASON: Record<string, { key: string; fallback: string }> = {
+  manual: {
+    key: "transferHintManual",
+    fallback: "Feita por alguém da equipe: não conta como resposta ao cliente, e o prazo do encerramento por inatividade volta a contar a partir daqui.",
+  },
+  api: {
+    key: "transferHintApi",
+    fallback: "Feita por uma integração pela API: não conta como resposta ao cliente, e o prazo do encerramento por inatividade volta a contar a partir daqui.",
+  },
+  offline: {
+    key: "transferHintOffline",
+    fallback: "Feita pelo sistema porque o atendente estava offline. Não conta como resposta ao cliente nem muda o prazo do encerramento por inatividade.",
+  },
+  distribution: {
+    key: "transferHintDistribution",
+    fallback: "Feita pela distribuição automática da fila. Não conta como resposta ao cliente nem muda o prazo do encerramento por inatividade.",
+  },
+  inactivity: {
+    key: "transferHintInactivity",
+    fallback: "Feita pelo encerramento por inatividade, que levou o atendimento ao chatbot. Não conta como resposta ao cliente.",
+  },
+  user_deleted: {
+    key: "transferHintUserDeleted",
+    fallback: "Feita pelo sistema porque o atendente foi excluído. Não conta como resposta ao cliente nem muda o prazo do encerramento por inatividade.",
+  },
+};
+
+// Dica da divisória: abre no toque/clique (o Tooltip do Radix não abre no celular). Sem motivo
+// (divisória antiga) fica só a linha do registro interno.
+function TransferHint({ reason }: { reason?: string | null }) {
+  const t = useTranslations("messageBubble");
+  const tRegion = useTranslations("regionSettings");
+  const text = (key: string, fallback: string): string => {
+    try {
+      if (t.has(key)) return t(key);
+    } catch {
+      // cai na reserva
+    }
+    return fallback;
+  };
+  const reasonHint = reason ? TRANSFER_HINT_BY_REASON[reason] : undefined;
+  return (
+    <Popover>
+      <PopoverTrigger asChild>
+        <button
+          type="button"
+          aria-label={tRegion("moreInfo")}
+          onClick={(e) => e.stopPropagation()}
+          className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full opacity-70 transition-opacity hover:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+        >
+          <Info className="h-3.5 w-3.5" />
+        </button>
+      </PopoverTrigger>
+      <PopoverContent
+        align="end"
+        onClick={(e) => e.stopPropagation()}
+        className="w-72 max-w-[calc(100vw-2rem)] space-y-1.5 p-3 text-xs leading-relaxed text-muted-foreground"
+      >
+        <p>{text("transferHintInternal", "Registro interno do atendimento: só a equipe vê e nunca é enviado ao contato.")}</p>
+        {reasonHint && <p>{text(reasonHint.key, reasonHint.fallback)}</p>}
+      </PopoverContent>
+    </Popover>
+  );
+}
+
+// Texto do atendente esperando para juntar com o próximo (WABA, lib/waba-agent-grouping):
+// relógio, "Enviar agora" e a dica (Popover: abre no toque, o Tooltip não abre no celular).
+function GroupingPendingBar({ idFront }: { idFront: string }) {
+  const t = useTranslations("messageBubble");
+  const tRegion = useTranslations("regionSettings");
+  return (
+    <div className="mt-1 flex flex-wrap items-center justify-end gap-x-1.5 gap-y-1 text-[11px] text-primary-foreground/80">
+      <span className="inline-flex min-w-0 items-center gap-1">
+        <Clock className="h-3 w-3 shrink-0 animate-pulse" />
+        <span className="min-w-0 break-words">{t("groupingPending")}</span>
+      </span>
+      <Popover>
+        <PopoverTrigger asChild>
+          <button
+            type="button"
+            aria-label={tRegion("moreInfo")}
+            onClick={(e) => e.stopPropagation()}
+            className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full opacity-70 transition-opacity hover:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+          >
+            <Info className="h-3.5 w-3.5" />
+          </button>
+        </PopoverTrigger>
+        <PopoverContent
+          align="end"
+          onClick={(e) => e.stopPropagation()}
+          className="w-72 max-w-[calc(100vw-2rem)] p-3 text-xs leading-relaxed text-muted-foreground"
+        >
+          {t("groupingHint")}
+        </PopoverContent>
+      </Popover>
+      <Button
+        variant="ghost"
+        size="sm"
+        onClick={(e) => { e.stopPropagation(); void flushByIdFront(idFront); }}
+        className="h-6 gap-1 bg-primary-foreground/15 px-2 text-[11px] font-medium text-primary-foreground hover:bg-primary-foreground/25 hover:text-primary-foreground"
+      >
+        <Send className="h-3 w-3" /> {t("groupingSendNow")}
+      </Button>
+    </div>
+  );
+}
+
+// Resposta a story do Instagram (dataJson.igStoryReply): o texto fica na bolha e o story
+// respondido vira esta linha. O link é da CDN da Meta e para de abrir quando o story expira.
+function InstagramStoryReplyLine({ storyReply, fromMe }: { storyReply: InstagramStoryReplyView; fromMe: boolean }) {
+  const t = useTranslations("messageBubble");
+  const tRegion = useTranslations("regionSettings");
+  return (
+    <div className={cn(
+      "flex flex-wrap items-center gap-x-1 text-[10px] italic mb-0.5",
+      fromMe ? "text-primary-foreground/80" : "text-muted-foreground/80"
+    )}>
+      <CircleDashed className="h-3 w-3 shrink-0" />
+      <span className="min-w-0 break-words">{t(fromMe ? "igStoryReplyFromMe" : "igStoryReply")}</span>
+      {storyReply.url && (
+        <>
+          <span aria-hidden="true">·</span>
+          <a
+            href={storyReply.url}
+            target="_blank"
+            rel="noopener noreferrer"
+            onClick={(e) => e.stopPropagation()}
+            className="underline underline-offset-2 hover:opacity-80"
+          >
+            {t("igStoryReplyView")}
+          </a>
+        </>
+      )}
+      <Popover>
+        <PopoverTrigger asChild>
+          <button
+            type="button"
+            aria-label={tRegion("moreInfo")}
+            onClick={(e) => e.stopPropagation()}
+            className="inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-full opacity-70 transition-opacity hover:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+          >
+            <Info className="h-3 w-3" />
+          </button>
+        </PopoverTrigger>
+        <PopoverContent
+          align="start"
+          onClick={(e) => e.stopPropagation()}
+          className="w-72 max-w-[calc(100vw-2rem)] space-y-1.5 p-3 text-xs not-italic leading-relaxed text-muted-foreground"
+        >
+          <p>{t("igStoryReplyHint")}</p>
+          {/* Mensagem da própria conta não passa por chatbot, IA nem automação. */}
+          {!fromMe && <p>{t("igStoryReplyHintBot")}</p>}
+        </PopoverContent>
+      </Popover>
+    </div>
+  );
+}
+
+// Divisória de transferência (docs/PLANO_HISTORICO_TRANSFERENCIAS_ATENDIMENTO.md). Com o dado
+// estruturado do backend novo (dataJson kind "ticket_transfer") o texto é montado no idioma
+// da tela: quem fez + hora, origem → destino e, se mudou, o canal. Sem ele (divisória antiga
+// ou backend antigo) fica o body, como sempre foi.
 function TransferContent({ msg }: { msg: Message }) {
   const t = useTranslations("messageBubble");
+  const { locale } = useLocale();
+  const notice = useMemo(() => readTicketTransferNotice({ dataJson: msg.dataJson }), [msg.dataJson]);
+
+  if (!notice) {
+    return (
+      <div className="flex items-center gap-2 rounded-lg border border-blue-500/40 bg-blue-500/10 p-2 text-xs text-blue-700 dark:border-blue-300/40 dark:bg-blue-300/15 dark:text-blue-100">
+        <CornerDownRight className="h-4 w-4" />
+        <span className="min-w-0 flex-1 [overflow-wrap:anywhere]">{msg.body || t("ticketTransferred")}</span>
+        <TransferHint />
+      </div>
+    );
+  }
+
+  // Chave ausente no idioma (ou erro de formatação) = reserva em português, nunca a chave crua.
+  const translate: TicketTransferTranslate = (key, values, fallback) => {
+    try {
+      if (t.has(key)) return t(key, values);
+    } catch {
+      // cai na reserva
+    }
+    if (!values) return fallback;
+    return fallback.replace(/\{(\w+)\}/g, (m, name: string) =>
+      values[name] === undefined || values[name] === null ? m : String(values[name])
+    );
+  };
+  const text = formatTicketTransferNotice(notice, translate);
+  const createdAt = msg.createdAt ? new Date(msg.createdAt) : null;
+  const timeLabel = createdAt && !Number.isNaN(createdAt.getTime())
+    ? createdAt.toLocaleTimeString(locale, { hour: "2-digit", minute: "2-digit" })
+    : "";
+
   return (
-    <div className="flex items-center gap-2 rounded-lg border border-blue-500/40 bg-blue-500/10 p-2 text-xs text-blue-700 dark:border-blue-300/40 dark:bg-blue-300/15 dark:text-blue-100">
-      <CornerDownRight className="h-4 w-4" />
-      <span>{msg.body || t("ticketTransferred")}</span>
+    <div className="flex items-start gap-2 rounded-lg border border-blue-500/40 bg-blue-500/10 p-2 text-xs text-blue-700 dark:border-blue-300/40 dark:bg-blue-300/15 dark:text-blue-100">
+      <CornerDownRight className="mt-px h-4 w-4 shrink-0" />
+      <div className="min-w-0 flex-1 space-y-0.5">
+        <p className="[overflow-wrap:anywhere]">
+          <span className="font-medium">{text.title}</span>
+          {timeLabel && <span className="whitespace-nowrap opacity-70">{` · ${timeLabel}`}</span>}
+        </p>
+        {text.path && <p className="[overflow-wrap:anywhere]">{text.path}</p>}
+        {text.channel && <p className="[overflow-wrap:anywhere] opacity-90">{text.channel}</p>}
+      </div>
+      <TransferHint reason={notice.reason} />
     </div>
   );
 }
@@ -3736,9 +3939,9 @@ function EmailSentContent({ body, fromMe, emailBody, date }: { body: string; fro
 </head>
 <body>
   <div class="email-header">
-    ${toStr ? `<p><strong>Para:</strong> ${esc(toStr)}</p>` : ""}
-    ${subject ? `<p><strong>Assunto:</strong> ${esc(subject)}</p>` : ""}
-    ${dateStr ? `<p><strong>Data:</strong> ${esc(dateStr)}</p>` : ""}
+    ${toStr ? `<p><strong>${esc(t("emailSentTo"))}:</strong> ${esc(toStr)}</p>` : ""}
+    ${subject ? `<p><strong>${esc(t("emailSentSubject"))}:</strong> ${esc(subject)}</p>` : ""}
+    ${dateStr ? `<p><strong>${esc(t("emailSentDate"))}:</strong> ${esc(dateStr)}</p>` : ""}
   </div>
   <div class="email-body">
     <pre style="white-space: pre-wrap; font-family: inherit; margin: 0;">${linkedBody}</pre>
@@ -3746,7 +3949,7 @@ function EmailSentContent({ body, fromMe, emailBody, date }: { body: string; fro
 </body>
 </html>`;
     setEmailHtml(html);
-  }, [sentBody, emailHtml, recipients, subject, date]);
+  }, [sentBody, emailHtml, recipients, subject, date, t]);
 
   if (!parsed) return <TextContent body={body} />;
   return (
@@ -3865,6 +4068,7 @@ function ButtonReplyContent({ msg }: { msg: Message }) {
 
 // ── call_permission_request / call_permission_reply ──────────────────────────
 function CallPermissionContent({ msg }: { msg: Message }) {
+  const t = useTranslations("messageBubble");
   const body = msg.body || "";
 
   // Mensagem enviada por nós (solicitação de permissão)
@@ -3875,8 +4079,8 @@ function CallPermissionContent({ msg }: { msg: Message }) {
           <ShieldCheck className="w-4 h-4 text-blue-600 dark:text-blue-400" />
         </span>
         <div className="flex flex-col min-w-0">
-          <span className="text-xs font-medium text-blue-700 dark:text-blue-300">Permissão de chamada</span>
-          <span className="text-xs text-muted-foreground">Solicitação enviada</span>
+          <span className="text-xs font-medium text-blue-700 dark:text-blue-300">{t("callPermissionTitle")}</span>
+          <span className="text-xs text-muted-foreground">{t("callPermissionRequestSent")}</span>
         </div>
       </div>
     );
@@ -3904,10 +4108,10 @@ function CallPermissionContent({ msg }: { msg: Message }) {
             "text-xs font-medium",
             accepted ? "text-green-700 dark:text-green-300" : "text-red-700 dark:text-red-300"
           )}>
-            Permissão de chamada
+            {t("callPermissionTitle")}
           </span>
           <span className="text-xs text-muted-foreground">
-            {accepted ? "Autorizada pelo usuário" : "Recusada pelo usuário"}
+            {accepted ? t("callPermissionAccepted") : t("callPermissionDeclined")}
           </span>
         </div>
       </div>
@@ -4321,6 +4525,8 @@ function MediaTemplateContent({ msg, onQuickSend }: { msg: Message; onQuickSend?
 
 // ── FB5 — ReceiptTemplateContent (Messenger receipt template) ────────────────
 function ReceiptTemplateContent({ msg }: { msg: Message }) {
+  const t = useTranslations("messageBubble");
+  const { formatMoney } = useRegion();
   const rawBody = msg.body || "";
   let orderNumber = "";
   let recipientName = "";
@@ -4355,18 +4561,25 @@ function ReceiptTemplateContent({ msg }: { msg: Message }) {
     }
   }
 
+  // Moeda do próprio recibo, no formato do país da empresa. Moeda ou valor fora do
+  // padrão (texto livre digitado) seguem como vieram.
+  const totalFormatted =
+    /^[A-Za-z]{3}$/.test(String(currency || "").trim()) && /^-?\d+(\.\d+)?$/.test(String(totalCost ?? "").trim())
+      ? formatMoney(Number(String(totalCost).trim()), { currency: String(currency).trim().toUpperCase() })
+      : "";
+
   return (
     <div className="rounded-lg border bg-muted/30 p-3 space-y-2 max-w-[280px]">
       <div className="flex items-center gap-2">
         <ShoppingBag className="h-5 w-5 text-green-600 shrink-0" />
-        <span className="text-sm font-medium">Recibo</span>
+        <span className="text-sm font-medium">{t("receiptTemplate.receipt")}</span>
       </div>
       {recipientName && (
         <p className="text-xs text-muted-foreground">{recipientName}</p>
       )}
       {orderNumber && (
         <div className="rounded-md bg-muted/50 px-3 py-2">
-          <p className="text-[10px] text-muted-foreground uppercase font-medium mb-0.5">Pedido</p>
+          <p className="text-[10px] text-muted-foreground uppercase font-medium mb-0.5">{t("receiptTemplate.orderNumber")}</p>
           <p className="text-sm font-bold tracking-wide">{orderNumber}</p>
         </div>
       )}
@@ -4382,7 +4595,7 @@ function ReceiptTemplateContent({ msg }: { msg: Message }) {
       )}
       {totalCost && (
         <p className="text-sm text-right font-semibold border-t pt-2">
-          Total: {currency} {totalCost}
+          {t("orderTotal", { total: totalFormatted || [currency, totalCost].filter(Boolean).join(" ") })}
         </p>
       )}
     </div>
@@ -4391,6 +4604,7 @@ function ReceiptTemplateContent({ msg }: { msg: Message }) {
 
 // ── FB8 — FeedbackResponseContent (resposta do usuario ao feedback) ─────────
 function FeedbackResponseContent({ msg }: { msg: Message }) {
+  const t = useTranslations("messageBubble");
   const rawBody = msg.body || "";
   let responses: { type: string; value: string; followUp?: string }[] = [];
 
@@ -4409,7 +4623,7 @@ function FeedbackResponseContent({ msg }: { msg: Message }) {
     <div className="rounded-lg border border-green-300 dark:border-green-800 bg-gradient-to-br from-green-50 to-emerald-50 dark:from-green-950/40 dark:to-emerald-950/40 p-3 space-y-2 max-w-[280px]">
       <div className="flex items-center gap-2">
         <Star className="h-5 w-5 text-green-600 dark:text-green-400 shrink-0 fill-green-400" />
-        <span className="text-sm font-semibold text-green-900 dark:text-green-100">Avaliação recebida</span>
+        <span className="text-sm font-semibold text-green-900 dark:text-green-100">{t("feedbackReceived")}</span>
       </div>
       {responses.map((r, i) => {
         const score = parseInt(r.value, 10);
@@ -4427,7 +4641,7 @@ function FeedbackResponseContent({ msg }: { msg: Message }) {
             </div>
             {isNps && !isNaN(score) && (
               <p className="text-[10px] text-muted-foreground">
-                {score >= 9 ? "Promotor" : score >= 7 ? "Neutro" : "Detrator"}
+                {score >= 9 ? t("npsPromoter") : score >= 7 ? t("npsPassive") : t("npsDetractor")}
               </p>
             )}
             {r.followUp && (
@@ -4444,6 +4658,7 @@ function FeedbackResponseContent({ msg }: { msg: Message }) {
 
 // ── FB7 — CustomerFeedbackContent (Messenger feedback template) ─────────────
 function CustomerFeedbackContent({ msg }: { msg: Message }) {
+  const t = useTranslations("messageBubble");
   const rawBody = msg.body || "";
   let title = "";
   let subtitle = "";
@@ -4471,9 +4686,9 @@ function CustomerFeedbackContent({ msg }: { msg: Message }) {
   }
 
   const typeLabel: Record<string, { emoji: string; desc: string }> = {
-    CSAT: { emoji: "⭐", desc: "5 estrelas" },
+    CSAT: { emoji: "⭐", desc: t("feedbackCsatDesc") },
     NPS: { emoji: "📊", desc: "0-10" },
-    CES: { emoji: "💪", desc: "Esforço do Cliente" },
+    CES: { emoji: "💪", desc: t("feedbackCesDesc") },
   };
   const label = typeLabel[questionType] || typeLabel.CSAT;
 
@@ -4481,7 +4696,7 @@ function CustomerFeedbackContent({ msg }: { msg: Message }) {
     <div className="rounded-lg border bg-gradient-to-br from-blue-50 to-indigo-50 dark:from-blue-950/40 dark:to-indigo-950/40 p-3 space-y-2 max-w-[280px]">
       <div className="flex items-center gap-2">
         <BarChart3 className="h-5 w-5 text-indigo-600 dark:text-indigo-400 shrink-0" />
-        <span className="text-sm font-semibold text-indigo-900 dark:text-indigo-100">Pesquisa de Satisfação</span>
+        <span className="text-sm font-semibold text-indigo-900 dark:text-indigo-100">{t("satisfactionSurvey")}</span>
       </div>
       {title && (
         <p className="text-sm font-medium leading-snug">{title}</p>
@@ -4506,6 +4721,7 @@ function CustomerFeedbackContent({ msg }: { msg: Message }) {
 
 // ── FB6 — CarouselTemplateContent (Messenger carousel template) ──────────────
 function CarouselTemplateContent({ msg }: { msg: Message }) {
+  const t = useTranslations("messageBubble");
   const rawBody = msg.body || "";
   let templateName = "";
   let cards: { title?: string; subtitle?: string; imageUrl?: string; image_url?: string; buttons?: { title?: string; url?: string }[] }[] = [];
@@ -4527,7 +4743,7 @@ function CarouselTemplateContent({ msg }: { msg: Message }) {
       <div className="space-y-1">
         <div className="flex items-center gap-2 mb-1">
           <Grid2X2 className="h-4 w-4 text-muted-foreground" />
-          <span className="text-xs text-muted-foreground font-medium">Carrossel</span>
+          <span className="text-xs text-muted-foreground font-medium">{t("carouselTemplate.carousel")}</span>
           {templateName && <span className="text-xs text-muted-foreground">— {templateName}</span>}
         </div>
         <div className="flex gap-2 overflow-x-auto pb-1 max-w-[300px]">
@@ -4558,7 +4774,7 @@ function CarouselTemplateContent({ msg }: { msg: Message }) {
       <div className="flex items-center gap-2">
         <Grid2X2 className="h-5 w-5 text-muted-foreground" />
         <div>
-          <p className="text-xs font-medium">Template Carrossel</p>
+          <p className="text-xs font-medium">{t("carouselTemplate.templateLabel")}</p>
           {templateName && <p className="text-[10px] text-muted-foreground">{templateName}</p>}
         </div>
       </div>
@@ -4684,6 +4900,9 @@ function PixButtonContent({ msg }: { msg: Message }) {
 }
 
 function RequestPaymentContent({ msg }: { msg: Message }) {
+  // Cobrança Pix/boleto da UAzapi: é sempre em real (BRL fica), só o formato segue o país da empresa.
+  const t = useTranslations("messageBubble");
+  const { formatMoney } = useRegion();
   let p: any = {};
   try { p = JSON.parse(msg.body); } catch {}
   const amount = typeof p.amount === "number" ? p.amount : 0;
@@ -4692,19 +4911,19 @@ function RequestPaymentContent({ msg }: { msg: Message }) {
       <div className="rounded-lg border bg-muted/20 overflow-hidden">
         <div className="px-3 py-2 border-b bg-muted/40 flex items-center gap-2">
           <Receipt className="h-4 w-4 text-muted-foreground" />
-          <p className="text-xs font-semibold truncate">{p.title || "Solicitação de pagamento"}</p>
+          <p className="text-xs font-semibold truncate">{p.title || t("requestPaymentTitle")}</p>
         </div>
         <div className="p-3 space-y-1">
           {p.text && <p className="text-xs whitespace-pre-wrap">{p.text}</p>}
           {p.itemName && <p className="text-[11px] text-muted-foreground">{p.itemName}</p>}
           {p.invoiceNumber && <p className="text-[10px] text-muted-foreground">#{p.invoiceNumber}</p>}
-          <p className="text-lg font-bold pt-1">R$ {amount.toFixed(2)}</p>
+          <p className="text-lg font-bold pt-1">{formatMoney(amount, { currency: "BRL" })}</p>
           {p.footer && <p className="text-[10px] text-muted-foreground">{p.footer}</p>}
         </div>
       </div>
       <div className={cn("flex items-center justify-center gap-1.5 py-2 mt-1 text-sm font-medium rounded-sm", msg.fromMe ? "bg-white/10 text-primary-foreground" : "bg-primary/8 text-primary")}>
         <Receipt className="h-3.5 w-3.5" />
-        <span>Revisar e pagar</span>
+        <span>{t("requestPaymentReview")}</span>
       </div>
     </div>
   );
@@ -4774,6 +4993,10 @@ function getMessageContent(msg: Message, allMessages?: Message[], useWave?: bool
   const templateTypes = ["templates", "templateMessage"];
   const orderTypes = ["order", "orderMessage"];
 
+  // Cartão "Formulário recebido" (PLANO_FORMULARIOS_ATENDIMENTO D4): bolha de sistema pelo
+  // gate isSystem. Vem antes de tudo, inclusive do ramo de notas, para nunca cair na caixa
+  // amarela da nota nem no texto genérico.
+  if (mt === "form_submission") return <FormSubmissionContent msg={msg} />;
   if (mt === "transcription") return <TranscriptionContent msg={msg} />;
   if (mt === "share") return <SharedPostContent msg={msg} />;
   // Aviso de disparo de agendada: chega com mediaType "notes" (por isso ja e
@@ -4887,8 +5110,10 @@ function getMessageContent(msg: Message, allMessages?: Message[], useWave?: bool
     } catch {}
   }
 
-  // Link preview always on — mesmo mensagens antigas e enviadas por mim
-  return <TextContent body={msg.edition ?? msg.body} isDeleted={msg.isDeleted} isEdited={msg.isEdited} originalBody={msg.edition ? msg.body : undefined} showLinkPreview />;
+  // Toda mensagem de texto com link mostra o domínio; a prévia só sai pelo "Ver prévia".
+  // `||`, não `??`: a coluna `edition` tem padrão '' no banco, e linha gravada sem ela (migração
+  // de origem antiga, importação por SQL) mostraria a bolha vazia. Edição vazia não existe.
+  return <TextContent body={msg.edition || msg.body} isDeleted={msg.isDeleted} isEdited={msg.isEdited} originalBody={msg.edition ? msg.body : undefined} showLinkPreview />;
 }
 
 // Renderiza apenas o conteúdo da mensagem (template/botões/mídia/etc.) sem o chrome
@@ -4899,8 +5124,23 @@ export function MessageContentView({ message, onQuickSend }: { message: Message;
 
 export const NON_FORWARDABLE_TYPES = new Set([
   "button", "list", "templates", "vcard", "contactMessage", "contactsArrayMessage",
-  "location", "locationMessage", "liveLocationMessage", "location_request", "cta_url", "reply_buttons",
+  "location_request", "cta_url", "reply_buttons",
+  // Cartão do formulário: só a equipe vê (encaminhar mandaria os dados a outro contato).
+  "form_submission",
+  // Divisória de transferência e notas internas (inclusive a de chamada): só a equipe vê. O
+  // menu da bolha nunca as oferece (bolha de sistema), mas o "encaminhar várias" consulta
+  // esta lista e mandaria o texto ao outro contato.
+  "transfer", "notes", "callNotes",
 ]);
+
+// Localização encaminha como texto com os links do Google Maps e do Waze, então só a que
+// tem coordenada legível; os demais tipos seguem a lista acima. Usado pelo menu da bolha
+// e pela caixa de seleção do "encaminhar várias".
+export function canForwardMessage(msg: Pick<Message, "mediaType" | "body" | "dataJson">): boolean {
+  const mt = msg.mediaType || "";
+  if (isLocationMediaType(mt)) return getMessageLocation(msg) !== null;
+  return !NON_FORWARDABLE_TYPES.has(mt);
+}
 
 interface MessageBubbleProps {
   message: Message;
@@ -4948,12 +5188,15 @@ function arePropsEqual(prev: MessageBubbleProps, next: MessageBubbleProps): bool
     a.isEdited !== b.isEdited ||
     a.isForwarded !== b.isForwarded ||
     a.sentVia !== b.sentVia ||
+    a.wabaPricingCategory !== b.wabaPricingCategory ||
     a.isStatusReply !== b.isStatusReply ||
+    a.dataJson !== b.dataJson ||
     a.translatedBody !== b.translatedBody ||
     a.translatedLang !== b.translatedLang ||
     a.reaction !== b.reaction ||
     a.reactionFromMe !== b.reactionFromMe ||
-    a.createdAt !== b.createdAt
+    a.createdAt !== b.createdAt ||
+    a.groupingPending !== b.groupingPending
   ) return false;
   // allMessages só é consumido por álbuns (AlbumContent) e webmail (WebmailContent).
   // Para as demais mensagens (texto, imagem única, áudio, etc.) a referência do array
@@ -4997,6 +5240,8 @@ function arePropsEqual(prev: MessageBubbleProps, next: MessageBubbleProps): bool
 
 export const MessageBubble = React.memo(function MessageBubble({ message: msg, allMessages, onReply, onForward, onForwardPrivate, onForwardOtherChannel, onDelete, onReact, onEdit, onStar, onPin, whatsapp, ticketId, onQuickSend, onRetryMessage, isGroupEnd }: MessageBubbleProps) {
   const t = useTranslations("messageBubble");
+  const tLoc = useTranslations("locationShare");
+  const tMm = useTranslations("wabaMarketingMessages");
   const { locale } = useLocale();
   const [editing, setEditing] = useState(false);
   const [editText, setEditText] = useState(msg.body);
@@ -5015,6 +5260,27 @@ export const MessageBubble = React.memo(function MessageBubble({ message: msg, a
   const isRestricted = isRestrictedUser();
   const { isLiveMode } = useLiveMode();
   const useWaveAudio = getConfigValue("audioModulo") === "enabled";
+  // Resposta a comentário do Instagram (pelo atendimento ou dada pela própria conta)
+  const igCommentReply = msg.fromMe ? readInstagramCommentReply(msg.dataJson) : null;
+  // Anúncio (ou link) de onde o contato veio e comentário em post patrocinado: só na
+  // mensagem recebida. O teste de texto evita o JSON.parse no dataJson das demais. A
+  // transcrição de áudio herda o dataJson do áudio no backend: sem card repetido nela.
+  const adReferral = useMemo(
+    () => (!msg.fromMe && msg.mediaType !== "transcription" ? readAdReferral(msg.dataJson) : null),
+    [msg.dataJson, msg.fromMe, msg.mediaType]
+  );
+  const commentAd = useMemo(
+    () =>
+      !msg.fromMe && typeof msg.dataJson === "string" && msg.dataJson.includes("\"igComment\"")
+        ? readInstagramCommentAd(msg.dataJson)
+        : null,
+    [msg.dataJson, msg.fromMe]
+  );
+  // Resposta a story do Instagram (a do cliente ou o eco da resposta da própria conta).
+  const storyReply = useMemo(
+    () => (msg.mediaType !== "transcription" ? readInstagramStoryReply(msg.dataJson) : null),
+    [msg.dataJson, msg.mediaType]
+  );
 
   useEffect(() => {
     if (editing && editTextareaRef.current) {
@@ -5086,10 +5352,20 @@ export const MessageBubble = React.memo(function MessageBubble({ message: msg, a
     }
   };
 
-  const isSystem = msg.mediaType === "notes" || msg.mediaType === "transfer" || msg.mediaType === "callNotes";
+  // Bolha de sistema: centralizada, sem o menu (responder, reagir, encaminhar, fixar,
+  // estrelar, apagar) e sem o responder por duplo clique (o retorno antecipado abaixo não
+  // tem o onDoubleClick). O cartão do formulário entra aqui: citar ou reagir mandaria ao
+  // provedor um id ("form:<id>") que não existe nele.
+  const isSystem = msg.mediaType === "notes" || msg.mediaType === "transfer" || msg.mediaType === "callNotes" || msg.mediaType === "form_submission";
   // Canal híbrido (WABA com modo híbrido ativo): reagir e responder ficam
   // desabilitados — o roteamento híbrido/transporte não suporta essas ações.
   const isHybridChannel = !!whatsapp?.hybridMode && whatsapp.hybridMode !== "disabled";
+  // Pendente do servidor anterior marcada como não enviada na migração de empresa: o id
+  // gravado nela não existe no provedor, então citar mandaria uma referência inválida.
+  const isMigrationUnsent = String(msg.statusError?.code ?? "") === "MIGRATION_NOT_SENT";
+  // Texto do atendente esperando para juntar (WABA): ainda não saiu, então responder,
+  // reagir, encaminhar, fixar, favoritar e apagar não têm mensagem no provedor/servidor.
+  const isGroupingPending = !!msg.groupingPending && !!msg.fromMe;
   // Mensagem de texto recebida por WABA Meta/Instagram/Messenger/Dialog360/Gupshup e
   // meow chega com mediaType "text" (o mesmo vale para o outbound do webchat) — sem ele
   // aqui, Copiar texto / Pergunte a IA / Traduzir sumiam do menu dessas mensagens,
@@ -5100,8 +5376,28 @@ export const MessageBubble = React.memo(function MessageBubble({ message: msg, a
   // nao funciona (Instagram, Messenger, webchat e echo do gupshup).
   const isEditableTextMessage = ["chat", "extendedTextMessage", "conversation"].includes(msg.mediaType || "chat");
   const isAudio = ["audio", "audioMessage"].includes(msg.mediaType || "");
-  const canForward = !NON_FORWARDABLE_TYPES.has(msg.mediaType || "") && !isRestricted;
+  const canForward = canForwardMessage(msg) && !isRestricted;
   const isStickerMsg = msg.mediaType === "sticker" || msg.mediaType === "stickerMessage" || msg.mediaType === "lottieStickerMessage";
+  // Localização: "Copiar link" e "Abrir no Waze" só com coordenada legível. Baixar e
+  // galeria ficam fora nos três tipos (a do WhatsApp Web guarda só uma miniatura em mediaUrl).
+  const isLocationMsg = isLocationMediaType(msg.mediaType);
+  const msgLocation = isLocationMsg ? getMessageLocation(msg) : null;
+
+  const handleCopyLocationLink = async () => {
+    if (!msgLocation) return;
+    try {
+      await navigator.clipboard.writeText(buildGoogleMapsUrl(msgLocation.lat, msgLocation.lng));
+      toast.success(t("copied"));
+    } catch {
+      toast.error(t("adReferralCopyFailed"));
+    }
+  };
+
+  // Aberto dentro do clique: no app (Android/iOS) e no PWA o link https abre o Waze instalado.
+  const handleOpenInWaze = () => {
+    if (!msgLocation) return;
+    window.open(buildWazeUrl(msgLocation.lat, msgLocation.lng), "_blank", "noopener,noreferrer");
+  };
 
   // Itens individuais do álbum não são renderizados separadamente — apenas o master (isAlbum: true) é exibido.
   // Álbum só existe para imagem/vídeo: o gate é restrito a esses tipos para que um albumId espúrio
@@ -5112,7 +5408,13 @@ export const MessageBubble = React.memo(function MessageBubble({ message: msg, a
   if (isSystem) {
     return (
       <div className="flex justify-center my-2">
-        <div className="max-w-[80%]">{getMessageContent(msg, allMessages, useWaveAudio, onQuickSend)}</div>
+        <div
+          className="max-w-[80%]"
+          onClickCapture={(e) => blockWebchatInviteAnchor(e, t("webchatInviteLinkWarning"))}
+          onAuxClickCapture={(e) => blockWebchatInviteAnchor(e, t("webchatInviteLinkWarning"))}
+        >
+          {getMessageContent(msg, allMessages, useWaveAudio, onQuickSend)}
+        </div>
       </div>
     );
   }
@@ -5123,7 +5425,7 @@ export const MessageBubble = React.memo(function MessageBubble({ message: msg, a
       // mensagem — animar aqui também duplicava o efeito (bolha "pulava" 2x).
       initial={false}
       className={cn("group flex gap-2 items-end", msg.fromMe ? "justify-end" : "justify-start")}
-      onDoubleClick={() => { if (!isHybridChannel) onReply?.(msg); }}
+      onDoubleClick={() => { if (!isHybridChannel && !isMigrationUnsent && !isGroupingPending) onReply?.(msg); }}
     >
       <div
         className={cn(
@@ -5155,6 +5457,13 @@ export const MessageBubble = React.memo(function MessageBubble({ message: msg, a
             "text-primary-foreground/80"
           )}>
             <Youtube className="h-3 w-3" /> {t("youtubeReply")}
+          </p>
+        )}
+
+        {igCommentReply && (
+          <p className="flex items-center gap-1 text-[10px] italic mb-0.5 text-primary-foreground/80">
+            <MessageCircle className="h-3 w-3" />
+            {t(igCommentReply.kind === "private" ? "igCommentReplyPrivate" : "igCommentReplyPublic")}
           </p>
         )}
 
@@ -5190,6 +5499,22 @@ export const MessageBubble = React.memo(function MessageBubble({ message: msg, a
           </p>
         )}
 
+        {/* Anúncio (ou link) de onde o contato veio, na 1ª mensagem do Instagram/Messenger */}
+        {adReferral && <AdReferralCard adReferral={adReferral} />}
+
+        {storyReply && <InstagramStoryReplyLine storyReply={storyReply} fromMe={!!msg.fromMe} />}
+
+        {/* Comentário em post patrocinado do Instagram */}
+        {commentAd && (
+          <p className="flex items-center gap-1 text-[10px] italic mb-0.5 text-muted-foreground/80">
+            <Megaphone className="h-3 w-3 shrink-0" />
+            <span className="min-w-0 break-words">
+              {t("igCommentOnAd")}
+              {commentAd.adTitle ? ` · ${commentAd.adTitle}` : ""}
+            </span>
+          </p>
+        )}
+
         {msg.quotedMsg && <QuotedMessageBlock msg={msg.quotedMsg} />}
 
         {msg.isDeleted && !isTextMessage && (
@@ -5222,7 +5547,11 @@ export const MessageBubble = React.memo(function MessageBubble({ message: msg, a
             </div>
           </div>
         ) : (
-          <div className={cn(msg.isDeleted && !isTextMessage && "opacity-60 grayscale")}>
+          <div
+            className={cn(msg.isDeleted && !isTextMessage && "opacity-60 grayscale")}
+            onClickCapture={(e) => blockWebchatInviteAnchor(e, t("webchatInviteLinkWarning"))}
+            onAuxClickCapture={(e) => blockWebchatInviteAnchor(e, t("webchatInviteLinkWarning"))}
+          >
             {getMessageContent(msg, allMessages, useWaveAudio, onQuickSend)}
           </div>
         )}
@@ -5270,30 +5599,12 @@ export const MessageBubble = React.memo(function MessageBubble({ message: msg, a
 
         {(() => {
           const mt = msg.mediaType || "";
-          const imageTypes = ["image", "imageMessage", "media"];
-          const videoTypes = ["video", "videoMessage"];
-          const docTypes = ["document", "documentMessage"];
-          // Tipos com renderer dedicado que ja exibem msg.body internamente — nao duplicar como label
-          const dedicatedRenderers = [
-            "transcription", "notes", "callNotes", "transfer", "location_request",
-            "cta_url", "cta_call", "vcard", "contactMessage", "contactsArrayMessage",
-            "location", "locationMessage", "liveLocationMessage", "interactive",
-            "interactiveMessage", "nfm_reply", "interactive_nfm_reply", "button_reply",
-            "button", "reply_buttons", "buttonMessage", "list", "listMessage",
-            "listResponseMessage", "poll", "pollCreationMessage", "pollCreationMessageV2",
-            "pollCreationMessageV3", "carousel", "pix_button", "request_payment",
-            "templates", "templateMessage", "templateBaileys", "order", "orderMessage",
-            "productMessage", "product", "adsMessage", "share",
-          ];
-          if (dedicatedRenderers.includes(mt)) return null;
-          const isImg = imageTypes.includes(mt) && msg.mediaUrl;
-          const isVid = videoTypes.includes(mt) && msg.mediaUrl;
-          const isDoc = docTypes.includes(mt) || (msg.mediaUrl && !imageTypes.includes(mt) && !videoTypes.includes(mt) && !["audio", "audioMessage", "sticker", "chat", "extendedTextMessage", "conversation", ""].includes(mt));
-          if (!isImg && !isVid && !isDoc) return null;
-          const isWebmail = mt === "webmail" || (mt === "document" && !!msg.mediaUrl?.match(/\.html?/i));
-          if (isWebmail) return null;
-          const caption = (isImg || isVid || isDoc) ? (msg.body && msg.body !== msg.fileName ? msg.body : null) : null;
-          const label = caption || msg.fileName || (isDoc ? (msg.body || null) : null);
+          // Imagem, video, album e documento ja mostram a legenda (e o documento, o nome)
+          // no proprio conteudo: esta linha so repetia o texto e, com nome de arquivo sem
+          // espaco, alargava a bolha. Sobra a figurinha que nao chega como "sticker".
+          if (!["stickerMessage", "lottieStickerMessage"].includes(mt) || !msg.mediaUrl) return null;
+          const caption = msg.body && msg.body !== msg.fileName ? msg.body : null;
+          const label = caption || msg.fileName || msg.body || null;
           if (!label) return null;
           return (
             <p className="text-[10px] italic text-current opacity-50 mt-0.5 break-all leading-tight max-w-[280px]">
@@ -5319,12 +5630,20 @@ export const MessageBubble = React.memo(function MessageBubble({ message: msg, a
           {msg.fromMe && msg.sentVia === "official_fallback" && (
             <span title={t("hybridFallbackTooltip")}><RouteOff className="h-2.5 w-2.5" /></span>
           )}
+          {/* A Meta confirmou que este template saiu pela Marketing Messages API (pricing.category = marketing_lite). */}
+          {msg.fromMe && msg.wabaPricingCategory === "marketing_lite" && (
+            <span title={tMm("bubbleTooltip")} aria-label={tMm("bubbleBadge")} role="img">
+              <Megaphone className="h-2.5 w-2.5" aria-hidden="true" />
+            </span>
+          )}
           <span className="text-[10px]">
             {new Date(msg.createdAt).toLocaleTimeString(locale, { hour: "2-digit", minute: "2-digit" })}
             {msg.queue?.queue && ` - ${msg.queue.queue}`}
           </span>
           <AckIcon ack={msg.ack} fromMe={msg.fromMe} statusError={msg.statusError} />
         </div>
+
+        {isGroupingPending && <GroupingPendingBar idFront={String(msg.id)} />}
 
         {/* Barra de progresso de upload — só para a mensagem otimista local (id front-*)
             enquanto a mídia sobe. Some quando uploadProgress vira 100/undefined. Cores
@@ -5382,33 +5701,33 @@ export const MessageBubble = React.memo(function MessageBubble({ message: msg, a
               <svg className="h-3 w-3" fill="currentColor" viewBox="0 0 16 16"><circle cx="3" cy="8" r="1.5"/><circle cx="8" cy="8" r="1.5"/><circle cx="13" cy="8" r="1.5"/></svg>
             </Button>
           </DropdownMenuTrigger>
-          <DropdownMenuContent side={msg.fromMe ? "left" : "right"} align="start">
-            {onReply && !isSystem && (
+          <DropdownMenuContent side={msg.fromMe ? "left" : "right"} align="start" className="max-h-[var(--radix-dropdown-menu-content-available-height)] overflow-y-auto">
+            {onReply && !isSystem && !isMigrationUnsent && !isGroupingPending && (
               <DropdownMenuItem onClick={() => onReply(msg)} disabled={isHybridChannel}>
                 <Reply className="mr-2 h-4 w-4" /> {t("reply")}
               </DropdownMenuItem>
             )}
-            {onReact && !isSystem && (
+            {onReact && !isSystem && !isMigrationUnsent && !isGroupingPending && (
               <DropdownMenuItem onSelect={() => setEmojiPickerOpen(true)} disabled={isHybridChannel}>
                 <SmilePlus className="mr-2 h-4 w-4" /> {t("react")}
               </DropdownMenuItem>
             )}
-            {onForward && canForward && !isSystem && (
+            {onForward && canForward && !isSystem && !isGroupingPending && (
               <DropdownMenuItem onClick={() => onForward(msg)}>
                 <Forward className="mr-2 h-4 w-4" /> {t("forward")}
               </DropdownMenuItem>
             )}
-            {onForwardOtherChannel && canForward && !isSystem && (
+            {onForwardOtherChannel && canForward && !isSystem && !isGroupingPending && (
               <DropdownMenuItem onClick={() => onForwardOtherChannel(msg)}>
                 <Forward className="mr-2 h-4 w-4" /> {t("forwardOtherChannel")}
               </DropdownMenuItem>
             )}
-            {onForwardPrivate && canForward && !isSystem && (
+            {onForwardPrivate && canForward && !isSystem && !isGroupingPending && (
               <DropdownMenuItem onClick={() => onForwardPrivate(msg)}>
                 <Forward className="mr-2 h-4 w-4" /> {t("forwardPrivateChat")}
               </DropdownMenuItem>
             )}
-            {msg.fromMe && isEditableTextMessage && onEdit && !["dialog360", "gupshup", "waba"].includes(String(msg.channel || "").toLowerCase()) && (
+            {msg.fromMe && isEditableTextMessage && onEdit && !isMigrationUnsent && !["dialog360", "gupshup", "waba"].includes(String(msg.channel || "").toLowerCase()) && (
               <DropdownMenuItem onClick={() => { setEditText(msg.body); setEditing(true); }}>
                 <Pencil className="mr-2 h-4 w-4" /> {t("edit")}
               </DropdownMenuItem>
@@ -5420,13 +5739,23 @@ export const MessageBubble = React.memo(function MessageBubble({ message: msg, a
                 <Copy className="mr-2 h-4 w-4" /> {t("copyText")}
               </DropdownMenuItem>
             )}
-            {onStar && !isSystem && (
+            {msgLocation && (
+              <>
+                <DropdownMenuItem onClick={handleCopyLocationLink}>
+                  <Link2 className="mr-2 h-4 w-4" /> {tLoc("copyLink")}
+                </DropdownMenuItem>
+                <DropdownMenuItem onClick={handleOpenInWaze}>
+                  <Navigation className="mr-2 h-4 w-4" /> {tLoc("openInWaze")}
+                </DropdownMenuItem>
+              </>
+            )}
+            {onStar && !isSystem && !isGroupingPending && (
               <DropdownMenuItem onClick={() => onStar(msg)}>
                 <Star className={cn("mr-2 h-4 w-4", msg.isStarred && "fill-yellow-400 text-yellow-400")} />
                 {msg.isStarred ? t("unstar") : t("star")}
               </DropdownMenuItem>
             )}
-            {onPin && !isSystem && (
+            {onPin && !isSystem && !isGroupingPending && (
               <DropdownMenuItem onClick={() => onPin(msg)}>
                 <Pin className={cn("mr-2 h-4 w-4", msg.isPinned && "fill-blue-400 text-blue-400")} />
                 {msg.isPinned ? t("unpin") : t("pin")}
@@ -5459,7 +5788,7 @@ export const MessageBubble = React.memo(function MessageBubble({ message: msg, a
                 </DropdownMenuSubContent>
               </DropdownMenuSub>
             )}
-            {msg.mediaUrl && (
+            {msg.mediaUrl && !isLocationMsg && (
               <>
                 <DropdownMenuSeparator />
                 <DropdownMenuItem onClick={() => downloadFile(getMediaUrl(msg), msg.fileName || (msg.mediaUrl ? msg.mediaUrl.split(/[\\/]/).pop() : undefined) || "arquivo")}>
@@ -5471,7 +5800,7 @@ export const MessageBubble = React.memo(function MessageBubble({ message: msg, a
                 </DropdownMenuItem>
               </>
             )}
-            {onDelete && msg.fromMe && !isSystem && (
+            {onDelete && msg.fromMe && !isSystem && !isGroupingPending && (
               <>
                 <DropdownMenuSeparator />
                 <DropdownMenuItem onClick={() => onDelete(msg)} className="text-destructive">

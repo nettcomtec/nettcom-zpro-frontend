@@ -1,5 +1,7 @@
 import { AxiosError } from "axios";
-import api from "@/lib/api";
+import api, { BACKGROUND_REQUEST } from "@/lib/api";
+import { uiT } from "@/lib/ui-t";
+import { getBackendErrorCode } from "@/lib/backend-error-code";
 
 export interface GalleryItem {
   id: number;
@@ -9,6 +11,8 @@ export interface GalleryItem {
   /** URL de thumbnail otimizado (~240px webp). Pode estar ausente para nao-imagens ou cache nao gerado. */
   thumbUrl?: string | null;
   size?: number;
+  /** Pasta do arquivo (null = "Sem pasta"). Ausente em backend sem pastas. */
+  folderId?: number | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -28,6 +32,7 @@ interface RawGalleryItem {
   mediaUrl?: string;
   url?: string;
   thumbUrl?: string | null;
+  folderId?: number | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -53,11 +58,12 @@ function normalizeGalleryItem(raw: RawGalleryItem): GalleryItem {
 
   return {
     id: raw.id,
-    name: raw.originalName || raw.fileName || raw.name || "Arquivo",
+    name: raw.originalName || raw.fileName || raw.name || uiT("gallery.fileFallback", undefined, "Arquivo"),
     type: mimeType,
     url: raw.mediaUrl || raw.url || raw.filePath || "",
     thumbUrl: raw.thumbUrl ?? null,
     size: raw.fileSize || raw.size,
+    folderId: typeof raw.folderId === "number" ? raw.folderId : null,
     createdAt: raw.createdAt,
     updatedAt: raw.updatedAt,
   };
@@ -94,18 +100,127 @@ export async function fetchGalleryBlob(item: GalleryItem): Promise<Blob> {
   return data as Blob;
 }
 
+/** Filtro de pasta: "all" (ou ausente) = todos; "none" = sem pasta; número = a pasta. */
+export type GalleryFolderFilterValue = "all" | "none" | number;
+
 export async function fetchGallery(params?: {
   pageNumber?: number;
   searchParam?: string;
   fileType?: string;
+  /** Só vai na requisição quando definido ("all" = todos, como sem o parâmetro). */
+  folderId?: GalleryFolderFilterValue;
 }) {
   const { data } = await api.get("/gallery", { params });
   const raw: RawGalleryItem[] = data?.galleries || data?.gallery || (Array.isArray(data) ? data : []);
+  const echo = data?.folderFilter;
+  // Pasta pedida e resposta sem o eco = backend sem pastas (ex.: voltou de versão com a aba
+  // aberta) devolveu TODOS os arquivos. Nunca mostrar isso sob o chip da pasta: vira o mesmo
+  // erro de "pasta indisponível", que as telas já tratam voltando para "Todos".
+  if (params?.folderId !== undefined && params.folderId !== "all" && echo === undefined) {
+    throw { status: 409, data: { error: "ERR_GALLERY_FOLDERS_UNAVAILABLE" } };
+  }
   return {
     data: raw.map(normalizeGalleryItem),
     count: data?.count ?? raw.length,
     hasMore: data?.hasMore ?? false,
+    /** Eco do filtro de pasta entendido pelo backend; ausente = backend sem pastas. */
+    folderFilter: (echo === "all" || echo === "none" || typeof echo === "number" ? echo : undefined) as
+      | GalleryFolderFilterValue
+      | undefined,
   };
+}
+
+// ─── Pastas (PLANO_GALERIA_PASTAS) ───────────────────────────────────────────
+
+export interface GalleryFolder {
+  id: number;
+  name: string;
+  /** Quantidade de arquivos da pasta (segue o filtro de tipo pedido). */
+  count: number;
+}
+
+export interface GalleryFoldersState {
+  /** false = backend sem pastas (antigo, sem a migration ou desligado): nenhuma UI de pasta. */
+  available: boolean;
+  folders: GalleryFolder[];
+  unfiledCount: number;
+  totalCount: number;
+}
+
+export const EMPTY_GALLERY_FOLDERS: GalleryFoldersState = {
+  available: false,
+  folders: [],
+  unfiledCount: 0,
+  totalCount: 0,
+};
+
+/** Códigos do backend que significam "a pasta não existe mais" (outra aba/usuário excluiu). */
+export function isGalleryFolderMissingError(err: unknown): boolean {
+  const code = getBackendErrorCode(err);
+  return code === "ERR_GALLERY_FOLDER_NOT_FOUND" || code === "ERR_GALLERY_FOLDERS_UNAVAILABLE";
+}
+
+/**
+ * Pastas da galeria com a contagem de arquivos (filtrada pelo tipo). Chamada automática ao
+ * abrir a página/seletor: sem toast de "sem permissão" (a lista principal já avisa). NUNCA
+ * lança: erro, 404 (backend antigo) ou `available: false` → sem pastas.
+ */
+export async function fetchGalleryFolders(
+  params?: { fileType?: string },
+): Promise<GalleryFoldersState & { transientError?: boolean }> {
+  try {
+    const { data } = await api.get("/gallery-folders", {
+      params: params?.fileType ? { fileType: params.fileType } : undefined,
+      ...BACKGROUND_REQUEST,
+      skipNoPermissionToast: true,
+    });
+    if (!data || data.available !== true || !Array.isArray(data.folders)) return { ...EMPTY_GALLERY_FOLDERS };
+    const folders: GalleryFolder[] = (data.folders as unknown[])
+      .filter((f): f is GalleryFolder => !!f && typeof (f as GalleryFolder).id === "number")
+      .map((f) => ({ id: f.id, name: String(f.name ?? ""), count: Number(f.count) || 0 }));
+    return {
+      available: true,
+      folders,
+      unfiledCount: Number(data.unfiledCount) || 0,
+      totalCount: Number(data.totalCount) || 0,
+    };
+  } catch (err) {
+    // 404 (backend sem pastas) e 401/403 (sem acesso) = sem pastas de verdade. Rede, prazo e 5xx
+    // são passageiros: `transientError` deixa quem chamou manter o que já tinha na tela.
+    const status = (err as { status?: number; response?: { status?: number } } | null)?.status
+      ?? (err as { response?: { status?: number } } | null)?.response?.status;
+    const definitive = status === 404 || status === 401 || status === 403;
+    return { ...EMPTY_GALLERY_FOLDERS, transientError: !definitive };
+  }
+}
+
+export async function createGalleryFolder(name: string): Promise<GalleryFolder> {
+  const { data } = await api.post("/gallery-folders", { name });
+  return { id: Number(data?.id), name: String(data?.name ?? name), count: Number(data?.count) || 0 };
+}
+
+export async function renameGalleryFolder(id: number, name: string): Promise<{ id: number; name: string }> {
+  const { data } = await api.put(`/gallery-folders/${id}`, { name });
+  return { id: Number(data?.id ?? id), name: String(data?.name ?? name) };
+}
+
+/** Exclui a pasta; os arquivos dela voltam para "Sem pasta" (nada é apagado). */
+export async function deleteGalleryFolder(id: number): Promise<{ movedCount: number }> {
+  const { data } = await api.delete(`/gallery-folders/${id}`);
+  return { movedCount: Number(data?.movedCount) || 0 };
+}
+
+const MOVE_CHUNK = 500;
+
+/** Move arquivos para a pasta (ou para "Sem pasta" com null). Fatia em partes de 500. */
+export async function moveGalleryItems(ids: number[], folderId: number | null): Promise<{ moved: number }> {
+  let moved = 0;
+  for (let i = 0; i < ids.length; i += MOVE_CHUNK) {
+    const chunk = ids.slice(i, i + MOVE_CHUNK);
+    const { data } = await api.post("/gallery-folders/move", { galleryIds: chunk, folderId });
+    moved += Number(data?.moved) || 0;
+  }
+  return { moved };
 }
 
 export interface GalleryUsage {
@@ -131,8 +246,15 @@ export async function fetchGalleryItem(id: number) {
   return api.get(`/gallery/${id}`);
 }
 
-export async function uploadGalleryFile(file: File) {
+export interface GalleryUploadOptions {
+  /** Pasta de destino; null/ausente = "Sem pasta". Só vai no form quando é número. */
+  folderId?: number | null;
+}
+
+export async function uploadGalleryFile(file: File, opts?: GalleryUploadOptions) {
   const formData = new FormData();
+  // Antes de "files": o multer só entrega ao destination os campos que chegam antes do arquivo.
+  if (typeof opts?.folderId === "number") formData.append("folderId", String(opts.folderId));
   formData.append("files", file);
   return api.post("/gallery", formData, {
     headers: { "Content-Type": "multipart/form-data" },
@@ -155,6 +277,8 @@ export type UploadFailureCode =
   | "server_error"
   | "timeout"
   | "network"
+  /** A pasta de destino não existe mais (excluída em outra aba/por outro usuário). */
+  | "folder_missing"
   | "unknown";
 
 export interface UploadFailure {
@@ -176,6 +300,7 @@ function extractUploadFailureReason(err: unknown): { status?: number; code: Uplo
     const body = ax?.data ?? ax?.response?.data;
     const backendCode = (body && typeof body === "object" ? body.error || body.message : "") || "";
     if (backendCode === "ERR_GALLERY_QUOTA_EXCEEDED") return { status, code: "quota" };
+    if (isGalleryFolderMissingError(err)) return { status, code: "folder_missing" };
     if (status === 413 || backendCode === "FILE_TOO_LARGE") return { status, code: "too_large" };
     if (status === 415 || backendCode === "CHAT_FILE_TYPE_NOT_ALLOWED") return { status, code: "unsupported" };
     if (status === 401 || status === 403) return { status, code: "unauthorized" };
@@ -192,19 +317,29 @@ function extractUploadFailureReason(err: unknown): { status?: number; code: Uplo
 export async function uploadGalleryFiles(
   files: File[],
   onProgress?: (p: UploadProgress) => void,
+  opts?: GalleryUploadOptions,
 ) {
   let success = 0;
   const failed: UploadFailure[] = [];
   for (let i = 0; i < files.length; i++) {
     const file = files[i];
     try {
-      await uploadGalleryFile(file);
+      await uploadGalleryFile(file, opts);
       success++;
       onProgress?.({ index: i + 1, total: files.length, file, ok: true });
     } catch (err) {
       const { status, code } = extractUploadFailureReason(err);
       failed.push({ file, status, code });
       onProgress?.({ index: i + 1, total: files.length, file, ok: false });
+      // Pasta excluída no meio do lote: os próximos falhariam igual. Para aqui e marca os
+      // restantes com o mesmo motivo (a tela recarrega as pastas e volta a "Todos").
+      if (code === "folder_missing") {
+        for (let j = i + 1; j < files.length; j++) {
+          failed.push({ file: files[j], status, code });
+          onProgress?.({ index: j + 1, total: files.length, file: files[j], ok: false });
+        }
+        break;
+      }
     }
   }
   return { success, failed };

@@ -37,8 +37,10 @@ export async function fetchOpportunitiesByContact(
   });
 }
 
-export async function fetchOpportunity(oppId: number) {
-  return api.get(`/opportunities/${oppId}`);
+// `params` opcional: o quadro pede { include: "activeTicket" } (atendimento ativo do
+// contato). Backend antigo ignora o include e responde como antes.
+export async function fetchOpportunity(oppId: number, params?: Record<string, unknown>) {
+  return api.get(`/opportunities/${oppId}`, params ? { params } : undefined);
 }
 
 export async function createOpportunity(data: Record<string, unknown>) {
@@ -89,6 +91,30 @@ export async function fetchPipelineActionsByStage(stageId: number) {
 
 export async function fetchPipelineActionsByPipeline(pipelineId: number) {
   return api.get(`/pipeline-actions/pipeline/${pipelineId}`);
+}
+
+// Oportunidades abertas na etapa (alcance de uma ação de envio). null = sem número
+// (backend antigo sem a rota, erro, resposta inesperada): quem chama não mostra o aviso.
+export async function fetchPipelineActionStageAudience(stageId: number): Promise<number | null> {
+  try {
+    const res = await api.get(`/pipeline-actions/stage/${stageId}/audience`, BACKGROUND_REQUEST);
+    const open = Number(res.data?.open);
+    return Number.isInteger(open) && open >= 0 ? open : null;
+  } catch {
+    return null;
+  }
+}
+
+// Recursos opcionais das ações do funil. Só `wonTrigger === true` liga o gatilho "ao
+// marcar como Ganha": backend antigo responde 400 nesta rota (cai no `/:id`), backend
+// sem as colunas ou com o recurso desligado responde false — tudo isso esconde a opção.
+export async function fetchPipelineActionCapabilities(): Promise<{ wonTrigger: boolean }> {
+  try {
+    const res = await api.get("/pipeline-actions/capabilities", BACKGROUND_REQUEST);
+    return { wonTrigger: res.data?.wonTrigger === true };
+  } catch {
+    return { wonTrigger: false };
+  }
 }
 
 // Pipeline Actions

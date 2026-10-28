@@ -1,6 +1,6 @@
 "use client";
 
-import { formatCurrencyBRL, formatDate } from "@/lib/format";
+import { formatDate } from "@/lib/format";
 
 import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { Card, CardContent } from "@/components/ui/card";
@@ -34,6 +34,7 @@ import { useRouter } from "next/navigation";
 import {
   civilDayFromLocal, civilDayFromUTC, closingForecastToDateInput, dateInputToClosingForecastISO,
 } from "@/lib/opportunity-date";
+import { useRegion, type UseRegionResult } from "@/hooks/use-region";
 
 // Teto de oportunidades carregadas por mês (o servidor recorta pela previsão de fechamento)
 const MONTH_OPPORTUNITIES_CAP = 5000;
@@ -73,8 +74,9 @@ const STATUS_CLASSES: Record<string, string> = {
   lose: "bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200",
 };
 
-function formatCurrency(v?: number) {
-  return formatCurrencyBRL(Number(v || 0), {
+// Valor da oportunidade é gravado sem moeda: aparece na moeda e no formato do país da empresa.
+function formatCurrency(v: number | undefined, formatMoney: UseRegionResult["formatMoney"]) {
+  return formatMoney(Number(v || 0), {
     minimumFractionDigits: 0, maximumFractionDigits: 0,
   });
 }
@@ -539,6 +541,7 @@ function FunilCalendarPageContent() {
   const t = useTranslations("funilCalendarPage");
   const router = useRouter();
   const gcal = useOpportunityCalendarEvent();
+  const { formatMoney } = useRegion();
   const [loading, setLoading] = useState(true);
   const [currentMonth, setCurrentMonth] = useState(new Date());
   const [opportunities, setOpportunities] = useState<Opportunity[]>([]);
@@ -770,7 +773,7 @@ function FunilCalendarPageContent() {
                           style={stageColor
                             ? { backgroundColor: stageColor + "30", borderLeft: `2px solid ${stageColor}` }
                             : { backgroundColor: "hsl(var(--primary) / 0.12)", borderLeft: "2px solid hsl(var(--primary))" }}
-                          title={`${opp.name} — ${formatCurrency(opp.value)}`}>
+                          title={`${opp.name} — ${formatCurrency(opp.value, formatMoney)}`}>
                           <span className="font-medium truncate">{opp.name}</span>
                         </div>
                       );
@@ -839,7 +842,7 @@ function FunilCalendarPageContent() {
                         {t(`status.${statusKey}`)}
                       </span>
                       {opp.value != null && (
-                        <span className="text-sm font-semibold text-primary">{formatCurrency(opp.value)}</span>
+                        <span className="text-sm font-semibold text-primary">{formatCurrency(opp.value, formatMoney)}</span>
                       )}
                     </div>
                   </div>

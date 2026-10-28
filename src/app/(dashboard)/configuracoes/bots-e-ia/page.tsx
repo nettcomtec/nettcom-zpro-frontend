@@ -7,10 +7,14 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Brain } from "lucide-react";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
+import { Brain, Info } from "lucide-react";
 import { toast } from "sonner";
 import { fetchTenantById, updateTenantAiDefaultLanguage } from "@/services/tenants";
 import { useAuthStore } from "@/stores/auth-store";
+import { useRegion } from "@/hooks/use-region";
+import { regionStateFromTenant, type RegionState } from "@/lib/region";
+import { localeNames, type Locale } from "@/i18n/config";
 
 const AI_LANGUAGES = [
   { value: "pt", label: "Português" },
@@ -28,6 +32,13 @@ const AI_LANGUAGES = [
   { value: "tr", label: "Türkçe (Turkish)" },
 ];
 
+/**
+ * Opção "Seguir a Região" (aiDefaultLanguage vazio → NULL no banco): a IA usa o idioma
+ * das mensagens ao cliente da empresa. O Select não aceita valor vazio, por isso o
+ * marcador; no save ele vira "".
+ */
+const FOLLOW_REGION = "__region__";
+
 export default function BotsEIaPage() {
   const t = useTranslations("botsEIaPage");
   const { user } = useAuthStore();
@@ -35,12 +46,29 @@ export default function BotsEIaPage() {
   const [loading, setLoading] = useState(true);
   const [aiDefaultLanguage, setAiDefaultLanguage] = useState("pt");
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Região da própria leitura da página (mais fresca); antes dela, a do store.
+  const storeRegion = useRegion().region;
+  const [pageRegion, setPageRegion] = useState<RegionState | null>(null);
+  const region = pageRegion || storeRegion;
+  // Backend antigo (sem Região): sem a opção, e vazio segue aparecendo como Português.
+  const followSupported = region.supported;
+  // Sem idioma definido na Região, o backend responde em Português (como hoje).
+  const effectiveLanguage = region.languageConfigured ? region.language : "pt";
+  const followLabel = t("followRegion", {
+    language: localeNames[effectiveLanguage as Locale] || effectiveLanguage,
+  });
 
   useEffect(() => {
     fetchTenantById(tenantId)
       .then(({ data }) => {
         const d = Array.isArray(data) ? data[0] : data;
-        setAiDefaultLanguage((d as Record<string, string>)?.aiDefaultLanguage || "pt");
+        const row = (d || {}) as Record<string, unknown>;
+        const ownRegion = regionStateFromTenant(row);
+        setPageRegion(ownRegion);
+        const saved = typeof row.aiDefaultLanguage === "string" ? row.aiDefaultLanguage.trim() : "";
+        // Campo vazio: com backend que conhece a Região é a opção "Seguir a Região"
+        // (nunca "pt"); sem ela, "pt" como sempre foi.
+        setAiDefaultLanguage(saved || (ownRegion ? FOLLOW_REGION : "pt"));
       })
       .catch(() => toast.error(t("errorLoad")))
       .finally(() => setLoading(false));
@@ -66,7 +94,7 @@ export default function BotsEIaPage() {
   const pageHelp = {
     description: t("helpDesc"),
     sections: [
-      { title: t("helpS0T"), items: [t("helpS0I0"), t("helpS0I1"), t("helpS0I2")] },
+      { title: t("helpS0T"), items: [t("helpS0I0"), t("helpS0I1"), followSupported ? t("helpS0I2Region") : t("helpS0I2")] },
       { title: t("helpS1T"), items: [t("helpS1I0"), t("helpS1I1")] },
     ],
   };
@@ -96,24 +124,51 @@ export default function BotsEIaPage() {
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="space-y-2">
-            <Label>{t("languageLabel")}</Label>
+            <div className="flex items-center gap-1.5">
+              <Label>{t("languageLabel")}</Label>
+              {followSupported && (
+                <TooltipProvider delayDuration={200}>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <button
+                        type="button"
+                        aria-label={t("followRegionTooltip")}
+                        className="text-muted-foreground hover:text-foreground"
+                      >
+                        <Info className="h-3.5 w-3.5" />
+                      </button>
+                    </TooltipTrigger>
+                    <TooltipContent className="max-w-xs text-xs font-normal">
+                      {t("followRegionTooltip")}
+                    </TooltipContent>
+                  </Tooltip>
+                </TooltipProvider>
+              )}
+            </div>
             <p className="text-sm text-muted-foreground">{t("languageDescription")}</p>
             <Select
               value={aiDefaultLanguage}
               onValueChange={(v) => {
                 setAiDefaultLanguage(v);
-                saveDebounced(v);
+                // "Seguir a Região" grava vazio (NULL): a IA acompanha o idioma da empresa.
+                saveDebounced(v === FOLLOW_REGION ? "" : v);
               }}
             >
               <SelectTrigger className="w-full max-w-xs">
                 <SelectValue placeholder={t("languagePlaceholder")} />
               </SelectTrigger>
               <SelectContent className="max-h-60">
+                {followSupported && <SelectItem value={FOLLOW_REGION}>{followLabel}</SelectItem>}
                 {AI_LANGUAGES.map((l) => (
                   <SelectItem key={l.value} value={l.value}>{l.label}</SelectItem>
                 ))}
               </SelectContent>
             </Select>
+            {followSupported && (
+              <p className="text-xs text-muted-foreground pl-3 border-l-2 border-amber-300 dark:border-amber-700/50">
+                {t("followRegionNote")}
+              </p>
+            )}
           </div>
           <p className="text-xs text-muted-foreground">{t("autoSave")}</p>
         </CardContent>

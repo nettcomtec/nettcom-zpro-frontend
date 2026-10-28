@@ -131,7 +131,7 @@ export default function EquipesPage() {
     const file = e.target.files?.[0];
     if (!file) return;
     if (file.size > MAX_PHOTO_SIZE) {
-      toast.error("A foto deve ter no máximo 5MB");
+      toast.error(t("photoTooLarge"));
       if (createPhotoInputRef.current) createPhotoInputRef.current.value = "";
       return;
     }
@@ -150,7 +150,7 @@ export default function EquipesPage() {
     const file = e.target.files?.[0];
     if (!file || !editing) return;
     if (file.size > MAX_PHOTO_SIZE) {
-      toast.error("A foto deve ter no máximo 5MB");
+      toast.error(t("photoTooLarge"));
       if (photoInputRef.current) photoInputRef.current.value = "";
       return;
     }
@@ -159,9 +159,9 @@ export default function EquipesPage() {
       const { data } = await uploadGroupProfilePicture(editing.id, file);
       setEditingPicture(data.profilePicture);
       setItems((prev) => prev.map((i) => i.id === editing.id ? { ...i, profilePicture: data.profilePicture } : i));
-      toast.success("Foto atualizada com sucesso");
+      toast.success(t("photoUpdated"));
     } catch {
-      toast.error("Erro ao atualizar foto");
+      toast.error(t("photoUpdateError"));
     } finally {
       setUploadingPhoto(false);
       if (photoInputRef.current) photoInputRef.current.value = "";
@@ -381,7 +381,7 @@ export default function EquipesPage() {
             <div className="flex items-center gap-4">
               <div className="relative group">
                 <Avatar className="h-16 w-16">
-                  <AvatarImage src={editing ? editingPicture : pendingPhotoPreview} alt="Foto da equipe" />
+                  <AvatarImage src={editing ? editingPicture : pendingPhotoPreview} alt={t("photoAlt")} />
                   <AvatarFallback className="text-xl bg-primary text-primary-foreground">
                     {editing
                       ? (editing.name || editing.group || "?").charAt(0).toUpperCase()
@@ -416,7 +416,7 @@ export default function EquipesPage() {
                 />
               </div>
               <p className="text-sm text-muted-foreground">
-                {editing ? "Clique na foto para alterar (máx. 5MB)" : "Clique para adicionar uma foto (máx. 5MB)"}
+                {editing ? t("photoHintEdit") : t("photoHintCreate")}
               </p>
             </div>
             <div className="space-y-2">

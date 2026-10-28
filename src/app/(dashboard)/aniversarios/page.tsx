@@ -35,6 +35,7 @@ import { TableDensityToggle } from "@/components/ui/table-density-toggle";
 import type { SortDir } from "@/hooks/use-sortable";
 import { SortableTableHead } from "@/components/ui/sortable-table-head";
 import { NewConversationDialog } from "@/components/layout/header";
+import { useAuthStore } from "@/stores/auth-store";
 import { useLocale } from "@/i18n/locale-provider";
 import { useLiveMode } from "@/hooks/use-live-mode";
 import { calculateAge, daysUntilBirthday, formatBirthdayDisplay, formatBirthdayInput } from "@/lib/birthday-format";
@@ -204,6 +205,8 @@ export default function AniversariosPage() {
   const t = useTranslations("aniversariosPage");
   const tErrors = useTranslations("errors");
   const allowed = usePageAccess("aniversarios", { adminSuperOnly: true });
+  // Antes do retorno antecipado: personalizado sem permissão de iniciar conversa não vê o botão (D12).
+  const canStartConversation = useAuthStore((s) => s.canStartConversation());
   if (!allowed) return <AccessDenied />;
   const { density, updateDensity, rowClassName, cellClassName } = useTableDensity();
   const { isLiveMode } = useLiveMode();
@@ -545,17 +548,19 @@ export default function AniversariosPage() {
                         )}
                       </TableCell>
                       <TableCell className={cellClassName}>
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          title={t("goToAttendance")}
-                          onClick={() => {
-                            setConversationContact(contact);
-                            setConversationOpen(true);
-                          }}
-                        >
-                          <MessageCircle className="h-4 w-4" />
-                        </Button>
+                        {canStartConversation && (
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            title={t("goToAttendance")}
+                            onClick={() => {
+                              setConversationContact(contact);
+                              setConversationOpen(true);
+                            }}
+                          >
+                            <MessageCircle className="h-4 w-4" />
+                          </Button>
+                        )}
                       </TableCell>
                     </TableRow>
                   ))}

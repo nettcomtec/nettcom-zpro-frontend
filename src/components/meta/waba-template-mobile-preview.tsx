@@ -1,6 +1,7 @@
 "use client";
 
 import { Phone, Camera, Globe, Receipt } from "lucide-react";
+import { useTranslations } from "next-intl";
 import { sanitize } from "@/lib/sanitize";
 import type { TemplateComponent } from "@/services/waba-meta";
 
@@ -9,6 +10,7 @@ import type { TemplateComponent } from "@/services/waba-meta";
  * Extraído de configuracoes/meta/page.tsx para reuso em massa/template e outros.
  */
 export function WabaTemplateMobilePreview({ template }: { template: any }) {
+  const t = useTranslations("metaTemplatePreview");
   if (!template) return null;
   const components: TemplateComponent[] = template.components || [];
   const header = components.find((c) => c.type === "HEADER");
@@ -82,7 +84,7 @@ export function WabaTemplateMobilePreview({ template }: { template: any }) {
                     {btn.type === "PHONE_NUMBER" && <Phone className="w-3 h-3 shrink-0" />}
                     {/* Cobrança (ORDER_DETAILS) — preview estático: só ícone e rótulo, sem ação. */}
                     {btn.type === "ORDER_DETAILS" && <Receipt className="w-3 h-3 shrink-0" />}
-                    <span>{btn.text || (btn.type === "URL" ? btn.url || "URL" : btn.type === "PHONE_NUMBER" ? btn.phone_number || "Telefone" : btn.type === "ORDER_DETAILS" ? "Pagar" : "Resposta Rápida")}</span>
+                    <span>{btn.text || (btn.type === "URL" ? btn.url || "URL" : btn.type === "PHONE_NUMBER" ? btn.phone_number || t("phoneFallback") : btn.type === "ORDER_DETAILS" ? t("payFallback") : t("quickReplyFallback"))}</span>
                   </div>
                 ))}
               </div>

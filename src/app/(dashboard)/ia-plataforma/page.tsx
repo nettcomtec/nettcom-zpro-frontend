@@ -71,7 +71,7 @@ export default function AiPlatformPage() {
     description: t("helpDesc"),
     sections: [
       { title: t("helpS0T"), items: [t("helpS0I0"), t("helpS0I1")] },
-      { title: t("helpS1T"), items: [t("helpS1I0"), t("helpS1I1")] },
+      { title: t("helpS1T"), items: [t("helpS1I0"), t("helpS1I1"), t("helpS1I2"), t("helpS1I3")] },
       { title: t("helpS2T"), items: [t("helpS2I0"), t("helpS2I1")] },
     ],
   };

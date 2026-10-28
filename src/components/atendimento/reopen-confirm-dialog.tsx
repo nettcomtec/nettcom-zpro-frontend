@@ -15,6 +15,7 @@ import { useAuthStore } from "@/stores/auth-store";
 import { updateTicket } from "@/services/tickets";
 import type { ExistingOpenTicket } from "@/lib/check-existing-open-ticket";
 import type { ReopenNotices } from "@/lib/reopen-notices";
+import { isNotViewAssignedRestricted } from "@/lib/not-view-assigned-scope";
 
 /**
  * Confirmação de reabertura de um ticket fechado.
@@ -52,13 +53,21 @@ export function ReopenConfirmDialog({
   const t = useTranslations("existingTicket");
   const router = useRouter();
   const { user } = useAuthStore();
+  const supervisorAdmin = useAuthStore((s) => s.supervisorAdmin);
   const [taking, setTaking] = React.useState(false);
 
   const profile = user?.profile ?? "";
   const isAdminLike = profile === "admin" || profile === "super" || profile === "superadmin";
-  const restricted = isRestrictedUser || (notViewAssignedTickets && profile === "user");
-  const canOpen = Boolean(sibling) && !restricted;
-  const canTake = Boolean(sibling) && isAdminLike;
+  const blockedByNotViewAssigned =
+    notViewAssignedTickets && isNotViewAssignedRestricted(user, supervisorAdmin);
+  const restricted = isRestrictedUser || blockedByNotViewAssigned;
+  const canOpen = Boolean(sibling) && !restricted && sibling?.accessible !== false;
+  // Assumir o atendimento de colega passa pela mesma trava do servidor.
+  const siblingOwnedByOther = sibling?.ownerHidden === true || (sibling?.ownerId != null && sibling.ownerId !== user?.userId);
+  const canTake = Boolean(sibling) && isAdminLike && sibling?.accessible !== false && !(blockedByNotViewAssigned && siblingOwnedByOther);
+  // ownerHidden: atendimento que este usuário não abre; o servidor omitiu atendente e fila.
+  const ownerOf = (s: ExistingOpenTicket) => (s.ownerHidden ? t("ownerHidden") : s.ownerName || t("noOwner"));
+  const queueOf = (s: ExistingOpenTicket) => (s.ownerHidden ? t("queueHidden") : s.queueName || t("noQueue"));
 
   // `sameChannel` vem do backend (pré-check batelado) e é a fonte primária; o
   // comparativo com targetWhatsappId cobre payloads que não populam a flag.
@@ -142,8 +151,8 @@ export function ReopenConfirmDialog({
                 {t("message", {
                   contact: sibling.contactName || "",
                   ticketId: String(sibling.ticketId),
-                  owner: sibling.ownerName || t("noOwner"),
-                  queue: sibling.queueName || t("noQueue"),
+                  owner: ownerOf(sibling),
+                  queue: queueOf(sibling),
                 })}
               </span>
             )}
@@ -214,11 +223,11 @@ export function ReopenConfirmDialog({
                   </Badge>
                   <span
                     className="text-xs text-muted-foreground truncate flex-1 min-w-0"
-                    title={`${s.ownerName || t("noOwner")} — ${s.queueName || t("noQueue")}`}
+                    title={`${ownerOf(s)} — ${queueOf(s)}`}
                   >
-                    {s.ownerName || t("noOwner")}
+                    {ownerOf(s)}
                   </span>
-                  {canOpen && (
+                  {!restricted && s.accessible !== false && (
                     <Button
                       variant="ghost"
                       size="sm"

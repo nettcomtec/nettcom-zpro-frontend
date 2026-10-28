@@ -1,18 +1,25 @@
 "use client";
 
+import { useState } from "react";
 import { useTranslations } from "next-intl";
-import { AlarmClock, Bot, CalendarClock, Plus, Trash2 } from "lucide-react";
+import {
+  AlarmClock, Bot, CalendarClock, HelpCircle, Loader2, Plus, Server, Settings2, Trash2,
+} from "lucide-react";
 
+import { cn } from "@/lib/utils";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
 
+import { useAuthStore } from "@/stores/auth-store";
 import {
   MAX_AI_AGENT_CONSULTS,
   type AiAgentBookingTool,
@@ -21,6 +28,14 @@ import {
   type AiAgentNativeTools,
   type AiAgentScheduleMessageTool,
 } from "@/services/ai-agents";
+import {
+  MAX_MCP_SERVERS_PER_AGENT,
+  MAX_MCP_TOOLS_PER_AGENT,
+  type McpServerToolView,
+  type McpServerView,
+} from "@/services/ai-mcp-servers";
+
+import { McpServersDialog } from "./mcp-servers-dialog";
 
 // Teto espelhado do backend (ExternalToolsZPRO.MAX_EXTERNAL_TOOLS): mais que
 // isso vira ruído no prompt e o agente passa a errar qual chamar.
@@ -56,6 +71,33 @@ export const generateConsultRowKey = (): string =>
 // passar disso o servidor corta em silêncio.
 const MAX_CONSULT_DESCRIPTION = 200;
 
+// v8 (D13-1) — ferramenta externa como o editor a guarda. Com `toolSecretMask`
+// anunciado a senha salva nunca chega à tela: `hasSecret` diz que ela existe e
+// `savedUrl` é o endereço gravado (trocar o endereço sem digitar a senha de
+// novo faz o servidor descartá-la). Os dois são só de TELA e nunca vão ao
+// servidor (o save monta a ferramenta campo a campo).
+export interface AgentExternalToolRow extends AiAgentExternalTool {
+  savedUrl?: string | null;
+}
+
+// v8 — servidor MCP escolhido para o agente. `serverId` nulo = linha
+// recém-adicionada, sem servidor escolhido: é rascunho e fica fora do save.
+// `tools` são os nomes ORIGINAIS das ferramentas no servidor. `rowKey` é só de
+// TELA e nunca vai ao servidor.
+export interface AgentMcpRow {
+  rowKey: string;
+  serverId: number | null;
+  tools: string[];
+}
+
+export const generateMcpRowKey = (): string =>
+  `m${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+
+// Ferramentas que o agente pode passar a usar: só as liberadas e iguais ao que
+// foi aprovado (as pausadas e as que saíram não vão à IA)
+const activeMcpTools = (server: McpServerView): McpServerToolView[] =>
+  (server.tools || []).filter(tool => tool.state === "active");
+
 // Bases usadas quando o agente ainda não tem nada gravado (servidor antigo
 // devolve `nativeTools: null`). Nunca são mutadas — só espalhadas.
 const EMPTY_BOOKING: AiAgentBookingTool = {
@@ -75,8 +117,12 @@ const clampScheduleDays = (value: number): number => {
 };
 
 interface AgentToolsTabProps {
-  tools: AiAgentExternalTool[];
-  onToolsChange: (tools: AiAgentExternalTool[]) => void;
+  tools: AgentExternalToolRow[];
+  onToolsChange: (tools: AgentExternalToolRow[]) => void;
+  // v8 (D13-1) — o servidor esconde a senha das ferramentas externas: campo
+  // nunca preenchido, "em branco = manter" e "Remover senha". Sem o anúncio
+  // (servidor antigo) o campo funciona exatamente como antes.
+  supportsToolSecretMask: boolean;
   // v5 — ferramentas nativas (agenda e mensagem agendada). O estado mora no
   // dialog, igual às ferramentas externas.
   nativeTools: AiAgentNativeTools | null;
@@ -109,11 +155,24 @@ interface AgentToolsTabProps {
   aiAgentsAvailable: boolean;
   currentAgentId: number | null;
   supportsAgentConsult: boolean;
+  // v8 — servidores MCP da empresa. A seção inteira só aparece com `mcp`
+  // anunciado. `mcpServers` vem pronto do editor: `null` = lista não carregada
+  // (erro ou sem acesso) e a seção fica SOMENTE LEITURA — o save não envia o
+  // campo. `onMcpServersReload(prune)` recarrega a lista; com `prune` tira do
+  // formulário o servidor que sumiu do cadastro (feito ao fechar o
+  // "Gerenciar servidores").
+  supportsMcp: boolean;
+  mcpTools: AgentMcpRow[];
+  onMcpToolsChange: (rows: AgentMcpRow[]) => void;
+  mcpServers: McpServerView[] | null;
+  mcpServersLoading: boolean;
+  onMcpServersReload: (prune: boolean) => void;
 }
 
 export function AgentToolsTab({
   tools,
   onToolsChange,
+  supportsToolSecretMask,
   nativeTools,
   onNativeToolsChange,
   bookingPages,
@@ -130,8 +189,21 @@ export function AgentToolsTab({
   aiAgentsAvailable,
   currentAgentId,
   supportsAgentConsult,
+  supportsMcp,
+  mcpTools,
+  onMcpToolsChange,
+  mcpServers,
+  mcpServersLoading,
+  onMcpServersReload,
 }: AgentToolsTabProps) {
   const t = useTranslations("aiAgents");
+
+  // D21 — cadastrar e aprovar servidores MCP é de quem gerencia agentes, nunca
+  // do perfil `user` (o servidor recusa de qualquer jeito; aqui só some o botão)
+  const profile = useAuthStore(s => s.user?.profile);
+  const hasAgentsManage = useAuthStore(s => s.hasPermission("ai_agents_manage"));
+  const canManageMcp = !!profile && profile !== "user" && hasAgentsManage;
+  const [mcpManageOpen, setMcpManageOpen] = useState(false);
 
   const updateTool = (index: number, patch: Partial<AiAgentExternalTool>) => {
     onToolsChange(tools.map((tool, i) => (i === index ? { ...tool, ...patch } : tool)));
@@ -311,6 +383,106 @@ export function AgentToolsTab({
       { rowKey: generateConsultRowKey(), aiAgentId: null, description: "" },
     ]);
   };
+
+  // ── Servidores MCP (v8) ──────────────────────────────────────────────────
+
+  const mcpListLoaded = mcpServers !== null;
+  const mcpServerById = new Map<number, McpServerView>(
+    (mcpServers || []).map(server => [server.id, server] as [number, McpServerView])
+  );
+  // Só servidor ATIVO entra na escolha (o inativo fica fora de todo atendimento)
+  const activeMcpServers = (mcpServers || []).filter(server => server.isActive);
+  const chosenMcpServerIds = new Set(
+    mcpTools.map(row => row.serverId).filter((id): id is number => !!id)
+  );
+  const freeMcpServers = activeMcpServers.filter(
+    server => !chosenMcpServerIds.has(server.id)
+  );
+  const draftMcpRows = mcpTools.filter(row => !row.serverId).length;
+  // O teto vale para TUDO o que está marcado, inclusive ferramenta pausada:
+  // acima dele o servidor recusaria o save inteiro
+  const mcpToolCount = mcpTools.reduce((sum, row) => sum + row.tools.length, 0);
+  const mcpAtToolLimit = mcpToolCount >= MAX_MCP_TOOLS_PER_AGENT;
+  // Linha nova só quando sobra servidor livre para ela (e para cada rascunho já
+  // aberto) — senão nasceria com o seletor vazio
+  const canAddMcp =
+    mcpListLoaded &&
+    mcpTools.length < MAX_MCP_SERVERS_PER_AGENT &&
+    freeMcpServers.length > draftMcpRows;
+
+  const updateMcpRow = (index: number, patch: Partial<AgentMcpRow>) => {
+    onMcpToolsChange(mcpTools.map((row, i) => (i === index ? { ...row, ...patch } : row)));
+  };
+
+  const removeMcpRow = (index: number) => {
+    onMcpToolsChange(mcpTools.filter((_, i) => i !== index));
+  };
+
+  const addMcpRow = () => {
+    if (!canAddMcp) return;
+    onMcpToolsChange([
+      ...mcpTools,
+      { rowKey: generateMcpRowKey(), serverId: null, tools: [] },
+    ]);
+  };
+
+  // A23 — o servidor chega com as ferramentas liberadas já marcadas, na ordem do
+  // cadastro, até o saldo do teto (com mais de 15 liberadas, as do fim ficam
+  // desmarcadas e o contador mostra)
+  const chooseMcpServer = (index: number, serverId: number) => {
+    const server = mcpServerById.get(serverId);
+    if (!server || !server.isActive || chosenMcpServerIds.has(serverId)) return;
+    const usedByOthers = mcpTools.reduce(
+      (sum, row, i) => (i === index ? sum : sum + row.tools.length),
+      0
+    );
+    const balance = Math.max(0, MAX_MCP_TOOLS_PER_AGENT - usedByOthers);
+    updateMcpRow(index, {
+      serverId,
+      tools: activeMcpTools(server)
+        .slice(0, balance)
+        .map(tool => tool.name),
+    });
+  };
+
+  const toggleMcpTool = (index: number, name: string, checked: boolean) => {
+    const row = mcpTools[index];
+    if (!row) return;
+    if (!checked) {
+      updateMcpRow(index, { tools: row.tools.filter(item => item !== name) });
+      return;
+    }
+    if (row.tools.includes(name) || mcpAtToolLimit) return;
+    updateMcpRow(index, { tools: [...row.tools, name] });
+  };
+
+  // Ferramenta marcada que deixou de estar liberada: pausada quando mudou no
+  // servidor (volta sozinha depois de aprovada de novo), senão saiu da lista
+  const mcpSavedToolReason = (server: McpServerView, name: string): string =>
+    (server.tools || []).find(tool => tool.name === name)?.state === "changed"
+      ? t("mcpToolPaused")
+      : t("mcpToolGone");
+
+  const closeMcpManage = (next: boolean) => {
+    setMcpManageOpen(next);
+    // Recarrega sempre ao fechar (cobre criar, excluir, aprovar e pausar) e tira
+    // do agente o servidor que foi excluído (A3/B6)
+    if (!next) onMcpServersReload(true);
+  };
+
+  // ── Senha das ferramentas externas (v8, D13-1) ───────────────────────────
+
+  // Senha salva que vale enquanto nada for digitado: só com o servidor que a
+  // esconde (sem o anúncio, o campo mostra a senha como sempre)
+  const isSecretKept = (tool: AgentExternalToolRow): boolean =>
+    supportsToolSecretMask &&
+    tool.hasSecret === true &&
+    !tool.secretClear &&
+    !(tool.secret || "").trim();
+
+  // O servidor só reaproveita a senha salva com o MESMO endereço
+  const isSecretUrlChanged = (tool: AgentExternalToolRow): boolean =>
+    typeof tool.savedUrl === "string" && tool.url.trim() !== tool.savedUrl.trim();
 
   return (
     <div className="space-y-5">
@@ -614,10 +786,311 @@ export function AgentToolsTab({
         </div>
       )}
 
-      {/* ── Ferramentas externas (inalteradas) ────────────────────────────── */}
+      {/* ── Servidores MCP (v8): ferramentas de servidores cadastrados pela
+          empresa e aprovadas uma a uma ─────────────────────────────────── */}
+      {supportsMcp && (
+        <div
+          className={
+            hasNativeSections || supportsAgentConsult
+              ? "space-y-3 border-t pt-5"
+              : "space-y-3"
+          }
+        >
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex min-w-0 items-center gap-1.5">
+              <p className="flex items-center gap-1.5 text-sm font-medium">
+                <Server className="h-4 w-4" />
+                {t("mcpSectionTitle")}
+              </p>
+              <Popover>
+                <PopoverTrigger asChild>
+                  <button
+                    type="button"
+                    className="inline-flex h-5 w-5 items-center justify-center rounded-full text-muted-foreground hover:text-foreground"
+                    aria-label={t("mcpSectionTitle")}
+                  >
+                    <HelpCircle className="h-4 w-4" />
+                  </button>
+                </PopoverTrigger>
+                {/* Altura presa à área visível (rolagem interna), como a ajuda
+                    do atraso na resposta */}
+                <PopoverContent
+                  side="top"
+                  align="start"
+                  collisionPadding={16}
+                  className="w-[360px] max-w-[calc(100vw-2rem)] overflow-y-auto text-xs"
+                  style={{
+                    maxHeight: "var(--radix-popover-content-available-height, 70vh)",
+                  }}
+                >
+                  <div className="space-y-2">
+                    <p className="text-sm font-semibold">{t("mcpSectionTitle")}</p>
+                    <p className="whitespace-pre-line text-muted-foreground">
+                      {t("mcpSectionHelp")}
+                    </p>
+                  </div>
+                </PopoverContent>
+              </Popover>
+              {mcpServersLoading && (
+                <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
+              )}
+            </div>
+            {canManageMcp && mcpListLoaded && (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="h-8 gap-1.5"
+                onClick={() => setMcpManageOpen(true)}
+              >
+                <Settings2 className="h-3.5 w-3.5" />
+                {t("mcpManageServers")}
+              </Button>
+            )}
+          </div>
+
+          {!mcpListLoaded ? (
+            // Lista não carregada: o que está salvo aparece só para leitura e o
+            // save não mexe nele
+            <>
+              {mcpTools
+                .filter(row => !!row.serverId)
+                .map(row => (
+                  <div key={row.rowKey} className="space-y-1 rounded-md border p-3">
+                    <p className="flex items-center gap-1.5 text-sm font-medium">
+                      <Server className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                      #{row.serverId}
+                    </p>
+                    {row.tools.length > 0 && (
+                      <p className="break-all font-mono text-xs text-muted-foreground">
+                        {row.tools.join(", ")}
+                      </p>
+                    )}
+                  </div>
+                ))}
+              {!mcpServersLoading && (
+                <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                  <p className="text-xs text-amber-600 dark:text-amber-400">
+                    {t("mcpReadOnlyNotice")}
+                  </p>
+                  <Button
+                    type="button"
+                    variant="link"
+                    size="sm"
+                    className="h-auto p-0 text-xs"
+                    onClick={() => onMcpServersReload(false)}
+                  >
+                    {t("mapRetry")}
+                  </Button>
+                </div>
+              )}
+            </>
+          ) : (
+            <>
+              {mcpTools.length === 0 && activeMcpServers.length === 0 && (
+                <p className="text-sm text-muted-foreground">{t("mcpNoServers")}</p>
+              )}
+
+              {mcpTools.map((row, index) => {
+                // Rascunho: só o seletor de servidor
+                if (!row.serverId) {
+                  return (
+                    <div key={row.rowKey} className="flex items-center gap-2 rounded-md border p-3">
+                      <div className="min-w-0 flex-1">
+                        <Select
+                          value=""
+                          onValueChange={value => {
+                            const id = Number(value);
+                            if (Number.isInteger(id) && id > 0) chooseMcpServer(index, id);
+                          }}
+                          disabled={freeMcpServers.length === 0}
+                        >
+                          <SelectTrigger>
+                            <SelectValue placeholder={t("mcpSelectServer")} />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {freeMcpServers.map(server => (
+                              <SelectItem key={server.id} value={String(server.id)}>
+                                {server.name}
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      </div>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon"
+                        className="h-9 w-9 shrink-0 text-destructive"
+                        onClick={() => removeMcpRow(index)}
+                        aria-label={t("mcpRemoveServer")}
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </Button>
+                    </div>
+                  );
+                }
+
+                const server = mcpServerById.get(row.serverId);
+                const serverActiveTools = server ? activeMcpTools(server) : [];
+                const activeNames = new Set(serverActiveTools.map(tool => tool.name));
+                // Marcadas que não estão mais liberadas: riscadas, com o motivo
+                const lostTools = row.tools.filter(name => !activeNames.has(name));
+                const title = !server
+                  ? `#${row.serverId} ${t("mcpServerRemoved")}`
+                  : server.isActive
+                    ? server.name
+                    : `${server.name} ${t("targetAiAgentInactive")}`;
+
+                return (
+                  <div key={row.rowKey} className="space-y-3 rounded-md border p-3">
+                    <div className="flex items-center justify-between gap-2">
+                      <p
+                        className={cn(
+                          "flex min-w-0 items-center gap-1.5 text-sm font-medium",
+                          !server && "text-muted-foreground"
+                        )}
+                      >
+                        <Server className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                        <span className="min-w-0 break-words">{title}</span>
+                      </p>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon"
+                        className="h-7 w-7 shrink-0 text-destructive"
+                        onClick={() => removeMcpRow(index)}
+                        aria-label={t("mcpRemoveServer")}
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </Button>
+                    </div>
+
+                    {!server ? (
+                      // Servidor excluído do cadastro: as ferramentas dele já
+                      // não valem (o servidor ignora o vínculo no save)
+                      row.tools.length > 0 && (
+                        <p className="break-all font-mono text-xs text-muted-foreground line-through">
+                          {row.tools.join(", ")}
+                        </p>
+                      )
+                    ) : (
+                      <div className="space-y-2">
+                        {serverActiveTools.length === 0 && (
+                          <p className="text-xs text-muted-foreground">
+                            {t("mcpNoActiveTools")}
+                          </p>
+                        )}
+                        {serverActiveTools.map((tool, toolIndex) => {
+                          const checked = row.tools.includes(tool.name);
+                          const checkboxId = `ai-agent-mcp-${row.rowKey}-${toolIndex}`;
+                          return (
+                            <div key={tool.name} className="flex items-start gap-2">
+                              <Checkbox
+                                id={checkboxId}
+                                className="mt-0.5"
+                                checked={checked}
+                                disabled={!checked && mcpAtToolLimit}
+                                onCheckedChange={value =>
+                                  toggleMcpTool(index, tool.name, value === true)
+                                }
+                              />
+                              <div className="min-w-0 flex-1 space-y-0.5">
+                                <div className="flex flex-wrap items-center gap-1.5">
+                                  <Label
+                                    htmlFor={checkboxId}
+                                    className="break-all font-mono text-xs font-normal leading-5"
+                                  >
+                                    {tool.name}
+                                  </Label>
+                                  {tool.altersData && (
+                                    <Badge
+                                      variant="warning-soft"
+                                      className="px-1.5 py-0 text-[10px] font-medium"
+                                    >
+                                      {t("mcpBadgeWrites")}
+                                    </Badge>
+                                  )}
+                                </div>
+                                {tool.descriptionForModel && (
+                                  <p
+                                    className="line-clamp-2 break-words text-xs text-muted-foreground"
+                                    title={tool.descriptionForModel}
+                                  >
+                                    {tool.descriptionForModel}
+                                  </p>
+                                )}
+                              </div>
+                            </div>
+                          );
+                        })}
+                        {lostTools.map(name => (
+                          <div key={`lost-${name}`} className="flex items-start gap-2">
+                            <div className="min-w-0 flex-1 space-y-0.5 pl-6">
+                              <p className="break-all font-mono text-xs text-muted-foreground line-through">
+                                {name}
+                              </p>
+                              <p className="text-xs text-amber-600 dark:text-amber-400">
+                                {mcpSavedToolReason(server, name)}
+                              </p>
+                            </div>
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="icon"
+                              className="h-7 w-7 shrink-0 text-destructive"
+                              onClick={() => toggleMcpTool(index, name, false)}
+                              aria-label={t("removeTool")}
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                            </Button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+
+              {mcpTools.length > 0 && (
+                <p
+                  className={cn(
+                    "text-xs",
+                    mcpAtToolLimit
+                      ? "text-amber-600 dark:text-amber-400"
+                      : "text-muted-foreground"
+                  )}
+                >
+                  {t("mcpToolsCounter", {
+                    count: mcpToolCount,
+                    max: MAX_MCP_TOOLS_PER_AGENT,
+                  })}
+                </p>
+              )}
+
+              <Button
+                type="button"
+                variant="outline"
+                onClick={addMcpRow}
+                className="gap-1.5"
+                disabled={!canAddMcp}
+              >
+                <Plus className="h-4 w-4" />
+                {t("mcpAddToAgent")}
+              </Button>
+            </>
+          )}
+
+          {canManageMcp && (
+            <McpServersDialog open={mcpManageOpen} onOpenChange={closeMcpManage} />
+          )}
+        </div>
+      )}
+
+      {/* ── Ferramentas externas ──────────────────────────────────────────── */}
       <div
         className={
-          hasNativeSections || supportsAgentConsult
+          hasNativeSections || supportsAgentConsult || supportsMcp
             ? "space-y-1.5 border-t pt-5"
             : "space-y-1.5"
         }
@@ -664,14 +1137,43 @@ export function AgentToolsTab({
               </div>
               <div className="space-y-1.5">
                 <Label>{t("toolSecret")}</Label>
+                {/* Com a senha escondida pelo servidor o campo nunca vem
+                    preenchido: em branco = manter a salva */}
                 <Input
                   type="password"
                   autoComplete="new-password"
                   value={tool.secret || ""}
                   onChange={e => updateTool(index, { secret: e.target.value })}
-                  placeholder={t("toolSecretPlaceholder")}
+                  placeholder={
+                    supportsToolSecretMask && tool.hasSecret === true && !tool.secretClear
+                      ? t("toolSecretKept")
+                      : t("toolSecretPlaceholder")
+                  }
                   maxLength={200}
                 />
+                {isSecretKept(tool) && (
+                  <div className="flex flex-wrap items-start justify-between gap-x-3 gap-y-1">
+                    <p
+                      className={cn(
+                        "min-w-0 flex-1 text-xs",
+                        isSecretUrlChanged(tool)
+                          ? "text-amber-600 dark:text-amber-400"
+                          : "text-muted-foreground"
+                      )}
+                    >
+                      {t("toolSecretUrlNote")}
+                    </p>
+                    <Button
+                      type="button"
+                      variant="link"
+                      size="sm"
+                      className="h-auto shrink-0 p-0 text-xs text-destructive"
+                      onClick={() => updateTool(index, { secret: "", secretClear: true })}
+                    >
+                      {t("toolSecretClear")}
+                    </Button>
+                  </div>
+                )}
               </div>
             </div>
 

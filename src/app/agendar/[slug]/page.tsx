@@ -16,6 +16,7 @@ import {
   type PublicBookingPage, type PublicEventType, type PublicSlot, type PublicProfessional,
 } from "@/services/booking-public";
 import { getBookingStrings, resolveBookingLang, intlLocale } from "@/lib/booking-strings";
+import { formatMoney, isCountryIso, DEFAULT_COUNTRY, DEFAULT_CURRENCY } from "@/lib/region";
 
 function localDayOf(iso: string, tz: string): string {
   // "YYYY-MM-DD" da data civil no fuso da página (en-CA = formato ISO).
@@ -47,15 +48,26 @@ function countryFromTimezone(tz: string | null | undefined): string {
   return (tz && map[tz]) || "BR";
 }
 
+// País da Região da empresa primeiro; o fuso da página só decide quando a Região é o
+// Brasil padrão ou não veio (backend antigo). O backend manda sempre a Região EFETIVA,
+// e "BR" é também o que sai quando nada foi configurado: sem esse corte, a página de
+// fuso Buenos Aires de empresa sem Região configurada trocaria a Argentina pelo Brasil.
+function phoneCountryFor(regionCountry: string | null | undefined, tz: string | null | undefined): string {
+  const iso = isCountryIso(regionCountry) ? regionCountry.toUpperCase() : null;
+  return iso && iso !== DEFAULT_COUNTRY ? iso : countryFromTimezone(tz);
+}
+
 function BookingPortal() {
   const params = useParams();
   const sp = useSearchParams();
   const slug = String((params as Record<string, string>)?.slug || "");
-  const lang = resolveBookingLang(sp.get("lang"));
-  const s = getBookingStrings(lang);
-  const locale = intlLocale(lang);
 
   const [data, setData] = useState<PublicBookingPage | null>(null);
+  // Idioma: ?lang → idioma da Região da empresa (só se configurado) → pt. Enquanto os
+  // dados não chegam a tela é só o carregando, então nada aparece em pt e troca depois.
+  const lang = resolveBookingLang(sp.get("lang"), data?.region);
+  const s = getBookingStrings(lang);
+  const locale = intlLocale(lang);
   const [loading, setLoading] = useState(true);
   const [notFound, setNotFound] = useState(false);
 
@@ -77,6 +89,12 @@ function BookingPortal() {
   const [result, setResult] = useState<{ startAt: string; location?: string | null; meetingLink?: string | null } | null>(null);
 
   const primary = data?.page.primaryColor || undefined;
+  // Preço na moeda da Região, no formato do país dela ("$ 1.234,50" na AR). Sem Região
+  // (backend antigo): BRL no formato do Brasil, "R$ 1.234,50".
+  const money = {
+    currency: data?.region?.currency || DEFAULT_CURRENCY,
+    country: data?.region?.country || DEFAULT_COUNTRY,
+  };
 
   useEffect(() => {
     let alive = true;
@@ -250,7 +268,7 @@ function BookingPortal() {
                   <div className="font-medium text-sm">{ev.name}</div>
                   <div className="text-xs text-muted-foreground mt-0.5 flex items-center gap-2 flex-wrap">
                     <span className="inline-flex items-center gap-1"><Clock className="h-3 w-3" />{ev.durationMinutes} {s.minLabel}</span>
-                    {ev.price != null && <span>· {new Intl.NumberFormat(locale, { style: "currency", currency: "BRL" }).format(ev.price)}</span>}
+                    {ev.price != null && <span>· {formatMoney(ev.price, money)}</span>}
                   </div>
                   {ev.description && <div className="text-xs text-muted-foreground mt-1 line-clamp-2">{ev.description}</div>}
                 </button>
@@ -356,7 +374,18 @@ function BookingPortal() {
               </div>
               <div className="grid gap-2">
                 <Label className="text-xs">{s.phoneLabel} *</Label>
-                <PhoneInput value={phone} onChange={setPhone} defaultCountry={countryFromTimezone(timezone)} />
+                <PhoneInput
+                  value={phone}
+                  onChange={setPhone}
+                  defaultCountry={phoneCountryFor(data.region?.country, timezone)}
+                  labels={{
+                    searchPlaceholder: s.phoneSearchPlaceholder,
+                    noResults: s.phoneNoResults,
+                    asTyped: s.phoneAsTyped,
+                    countryLabel: s.phoneCountryLabel,
+                  }}
+                  locale={lang}
+                />
               </div>
               <div className="grid gap-2">
                 <Label className="text-xs">{s.emailLabel}</Label>

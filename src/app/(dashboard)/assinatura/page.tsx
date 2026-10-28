@@ -449,7 +449,7 @@ export default function AssinaturaPage() {
             <Textarea
               value={domainInput}
               onChange={(e) => setDomainInput(e.target.value)}
-              placeholder="exemplo1.com, exemplo2.com"
+              placeholder={t("domainsInputPlaceholder")}
               rows={4}
             />
             <p className="text-xs text-muted-foreground">{t("domainsExample")}</p>

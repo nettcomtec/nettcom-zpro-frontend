@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect, useCallback, useRef } from "react";
+import React, { useState, useEffect, useLayoutEffect, useCallback, useRef } from "react";
 import { logger } from "@/lib/logger";
 import { formatTime as formatTimeIntl, formatDate as formatDateIntl } from "@/lib/format";
 import { useSearchParams } from "next/navigation";
@@ -18,6 +18,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { LinkPreviewCard } from "@/components/common/link-preview";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Separator } from "@/components/ui/separator";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -34,17 +35,22 @@ import { cn, getInitials } from "@/lib/utils";
 import { linkifyParts } from "@/lib/linkify";
 import { ProfilePicPreviewDialog, type ProfilePicPreview } from "@/components/shared/profile-pic-preview-dialog";
 import { useAuthStore } from "@/stores/auth-store";
+import { getSocket } from "@/lib/socket";
 import { useChatStore, getPrivateMessageTime, type PrivateMessage, type ChatUser, type ChatGroup } from "@/stores/chat-store";
 import {
   fetchPrivateMessages, sendPrivateMessage, markAsRead,
   deletePrivateMessage, editPrivateMessage, addReaction,
-  fetchOnlineUsers, fetchPrivateGroups, fetchUnreadCounts, fetchUnreadGroupCounts,
-  fetchGroupMembers,
+  fetchOnlineUsers, fetchPrivateGroups, fetchChatUnreadTotal,
+  fetchGroupMembers, type PrivateChatSearchResult,
 } from "@/services/private-chat";
+import { usePrivateChatMessageSearch } from "@/hooks/use-private-chat-message-search";
+import { MessageSearchResults } from "@/components/chat-privado/message-search-results";
+import { getBackendErrorCode } from "@/lib/backend-error-code";
 import { uploadGroupProfilePicture } from "@/services/teams";
 import { usePrivateCallStore } from "@/stores/private-call-store";
 import { usePrivateCallActions } from "@/components/private-call/private-call-provider";
 import { validateChatFile, formatMaxFileSize, namePastedFile, shouldDeferPasteToText } from "@/lib/chat-upload-validation";
+import { downloadMediaFile, fetchMediaBlob, mediaFileNameFromUrl } from "@/lib/media-fetch";
 import { toast } from "sonner";
 import { useTranslations } from "next-intl";
 import { usePageAccess } from "@/hooks/use-page-access";
@@ -64,85 +70,6 @@ function extractFirstUrl(text: string | null | undefined): string | null {
   return match ? match[0] : null;
 }
 
-interface LinkPreviewData {
-  url: string;
-  title?: string;
-  description?: string;
-  image?: string;
-  hostname?: string;
-}
-
-const LP_CACHE_PREFIX = "lp_cache_";
-const LP_CACHE_TTL = 1000 * 60 * 60 * 24;
-
-function lpReadCache(url: string): LinkPreviewData | null {
-  try {
-    const raw = localStorage.getItem(LP_CACHE_PREFIX + url);
-    if (!raw) return null;
-    const { data, ts } = JSON.parse(raw) as { data: LinkPreviewData; ts: number };
-    if (Date.now() - ts > LP_CACHE_TTL) { localStorage.removeItem(LP_CACHE_PREFIX + url); return null; }
-    return data;
-  } catch { return null; }
-}
-
-function lpWriteCache(url: string, data: LinkPreviewData) {
-  try { localStorage.setItem(LP_CACHE_PREFIX + url, JSON.stringify({ data, ts: Date.now() })); } catch { /* ignore */ }
-}
-
-function PrivateLinkPreview({ url }: { url: string }) {
-  const [data, setData] = useState<LinkPreviewData | null>(() => lpReadCache(url));
-  const [loading, setLoading] = useState(() => lpReadCache(url) === null);
-
-  useEffect(() => {
-    const cached = lpReadCache(url);
-    if (cached) { setData(cached); setLoading(false); return; }
-    let cancelled = false;
-    const timer = setTimeout(() => {
-      fetch(`/api/link-preview?url=${encodeURIComponent(url)}`)
-        .then((r) => r.json())
-        .then((d: LinkPreviewData) => { if (!cancelled) { lpWriteCache(url, d); setData(d); } })
-        .catch(() => { if (!cancelled) setData(null); })
-        .finally(() => { if (!cancelled) setLoading(false); });
-    }, 150);
-    return () => { cancelled = true; clearTimeout(timer); };
-  }, [url]);
-
-  if (loading) {
-    return (
-      <div className="mt-2 rounded-lg border bg-muted/20 overflow-hidden max-w-[260px]">
-        <div className="h-[60px] bg-muted/40 flex items-center justify-center">
-          <svg className="h-4 w-4 animate-spin text-muted-foreground/50" viewBox="0 0 24 24" fill="none">
-            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
-          </svg>
-        </div>
-        <div className="p-2 space-y-1.5">
-          <div className="h-2 bg-muted rounded animate-pulse w-1/3" />
-          <div className="h-3 bg-muted rounded animate-pulse w-3/4" />
-        </div>
-      </div>
-    );
-  }
-
-  if (!data || (!data.title && !data.image)) return null;
-
-  return (
-    <a href={url} target="_blank" rel="noopener noreferrer"
-      className="mt-2 block rounded-lg border bg-muted/20 overflow-hidden max-w-[260px] hover:bg-muted/30 transition-colors">
-      {data.image && (
-        // eslint-disable-next-line @next/next/no-img-element
-        <img src={data.image} alt="" className="w-full h-[120px] object-cover"
-          onError={(e) => { (e.target as HTMLImageElement).style.display = "none"; }} />
-      )}
-      <div className="p-2 space-y-0.5">
-        {data.hostname && <p className="text-[10px] text-muted-foreground uppercase tracking-wide">{data.hostname}</p>}
-        {data.title && <p className="text-xs font-semibold line-clamp-2 leading-snug">{data.title}</p>}
-        {data.description && <p className="text-[11px] text-muted-foreground line-clamp-2">{data.description}</p>}
-      </div>
-    </a>
-  );
-}
-
 interface SelectedContact {
   id: number;
   name: string;
@@ -152,8 +79,6 @@ interface SelectedContact {
   isGroup?: boolean;
   profilePicture?: string;
 }
-
-const chatPrivadoDownloading = new Set<string>();
 
 export default function ChatPrivadoPage() {
   const t = useTranslations("chatPrivadoPage");
@@ -172,7 +97,7 @@ export default function ChatPrivadoPage() {
     messages, setMessages, addMessage, removeMessage, updateMessage,
     users, setUsers, groups, setGroups, setUnreadCount,
     mentionGroupIds, clearMentionGroup, setActiveConversation,
-    socketUnreadByUser, clearSocketUnread,
+    socketUnreadByUser, socketUnreadByGroup, clearSocketUnread,
   } = useChatStore();
 
   const [loading, setLoading] = useState(true);
@@ -205,6 +130,21 @@ export default function ChatPrivadoPage() {
   const [mentionAtIndex, setMentionAtIndex] = useState(0);
   const [mentionSelectedIndex, setMentionSelectedIndex] = useState(0);
 
+  // ── Busca nas mensagens: a da lista lateral usa o mesmo campo do filtro por nome ──
+  const [convSearchOpen, setConvSearchOpen] = useState(false);
+  const [convSearch, setConvSearch] = useState("");
+  const globalSearch = usePrivateChatMessageSearch({ term: search, enabled: true });
+  const convSearchState = usePrivateChatMessageSearch({
+    term: convSearch,
+    scope: selectedContact ? { id: selectedContact.id, isGroup: !!selectedContact.isGroup } : null,
+    enabled: convSearchOpen && !!selectedContact,
+  });
+  const messageSearchUnavailable = globalSearch.unavailable || convSearchState.unavailable;
+  // Mensagem da busca a destacar assim que aparecer na tela (em vez de rolar para o fim).
+  const pendingJumpRef = useRef<number | null>(null);
+  // Só a carga mais recente vale: trocar de conversa com outra carga no ar misturava as listas.
+  const loadSeqRef = useRef(0);
+
   // ── Lightbox (imagem) e modal de arquivo ──
   const [lightboxUrl, setLightboxUrl] = useState("");
   const [lightboxOpen, setLightboxOpen] = useState(false);
@@ -224,33 +164,8 @@ export default function ChatPrivadoPage() {
     return () => window.removeEventListener("keydown", handler);
   }, [lightboxOpen]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const downloadFile = (url: string, name = "arquivo") => {
-    if (chatPrivadoDownloading.has(url)) return;
-    chatPrivadoDownloading.add(url);
-    const toastId = toast.loading(tCommon("downloadLoading"));
-    const isExternal = url.startsWith("http://") || url.startsWith("https://");
-    const opts: RequestInit = isExternal ? { credentials: "omit" } : { credentials: "include" };
-    fetch(url, opts)
-      .then((r) => r.blob())
-      .then((blob) => {
-        const a = document.createElement("a");
-        a.href = URL.createObjectURL(blob);
-        a.download = name;
-        a.click();
-        setTimeout(() => URL.revokeObjectURL(a.href), 2000);
-        toast.success(tCommon("downloadSuccess"), { id: toastId });
-      })
-      .catch(() => {
-        const a = document.createElement("a");
-        a.href = url;
-        a.download = name;
-        a.click();
-        toast.success(tCommon("downloadSuccess"), { id: toastId });
-      })
-      .finally(() => {
-        chatPrivadoDownloading.delete(url);
-      });
-  };
+  // Mesmo "Baixar" do atendimento: porcentagem no aviso e erro de verdade quando falha.
+  const downloadFile = (url: string, name = "arquivo") => downloadMediaFile(url, name);
 
   // ── Scroll refs ──
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -258,7 +173,8 @@ export default function ChatPrivadoPage() {
   const prevConvKeyRef = useRef<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
-  const deepLinkHandled = useRef(false);
+  // Chave do último link tratado ("u:<id>"/"g:<id>"); null = sem link na URL.
+  const deepLinkHandled = useRef<string | null>(null);
 
   // ── Pagination ──
   const [hasMoreMessages, setHasMoreMessages] = useState(false);
@@ -293,13 +209,41 @@ export default function ChatPrivadoPage() {
     });
   }, []);
 
+  // Rola até a mensagem pendente da busca e pisca o destaque. Tenta por alguns quadros: a
+  // lista nova pode ainda não ter sido desenhada quando a chamada acontece.
+  const runPendingJump = useCallback(() => {
+    const target = pendingJumpRef.current;
+    if (target == null) return;
+    const attempt = (n: number) => {
+      if (pendingJumpRef.current !== target) return;
+      const el = scrollRef.current?.querySelector(`[data-msg-id="${target}"]`);
+      if (!el) {
+        if (n < 10) requestAnimationFrame(() => attempt(n + 1));
+        else pendingJumpRef.current = null;
+        return;
+      }
+      pendingJumpRef.current = null;
+      el.scrollIntoView({ block: "center" });
+      el.classList.add("msg-highlight");
+      setTimeout(() => el.classList.remove("msg-highlight"), 1800);
+    };
+    requestAnimationFrame(() => attempt(0));
+  }, []);
+
   useEffect(() => {
     return () => { setActiveConversation(null); };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  useEffect(() => {
-    if (isLoadingMoreRef.current) {
+  // Layout effect de propósito: roda no commit, antes de qualquer quadro. Como efeito passivo,
+  // o React podia rodá-lo DEPOIS do destaque da busca, e o "rolar para o fim" desfazia o salto.
+  useLayoutEffect(() => {
+    if (pendingJumpRef.current != null) {
+      // Abertura pela busca: a mensagem encontrada manda na rolagem, não o fim da conversa.
+      isLoadingMoreRef.current = false;
+      prevConvKeyRef.current = selectedContact ? `${selectedContact.isGroup ? "g" : "u"}:${selectedContact.id}` : null;
+      runPendingJump();
+    } else if (isLoadingMoreRef.current) {
       // Restore scroll position after prepending older messages
       requestAnimationFrame(() => {
         if (scrollRef.current) {
@@ -358,45 +302,91 @@ export default function ChatPrivadoPage() {
     })();
   }, [setUsers, setGroups, user?.userId]);
 
+  // Leitura feita em outra aba/aparelho (ou "Marcar tudo como lido" no sino): tira o
+  // contador da conversa na lista sem precisar recarregar.
+  useEffect(() => {
+    const tenantId = user?.tenantId;
+    const me = user?.userId;
+    if (!tenantId || !me) return;
+    const socket = getSocket();
+    const zeroAll = (prev: Record<number, number>) =>
+      Object.values(prev).some((n) => n > 0)
+        ? Object.fromEntries(Object.keys(prev).map((k) => [k, 0])) as Record<number, number>
+        : prev;
+    const onRead = (evt: { action?: string; data?: { allRead?: boolean; readerId?: number; receiverId?: number; senderId?: number; isGroup?: boolean | string } }) => {
+      const d = evt?.data;
+      if (evt?.action !== "update" || !d) return;
+      if (d.allRead) {
+        if (d.readerId != null && Number(d.readerId) !== me) return;
+        setUnreadMap(zeroAll);
+        setUnreadGroupMap(zeroAll);
+        return;
+      }
+      if (Number(d.readerId ?? d.receiverId) !== me) return;
+      const peerId = Number(d.senderId);
+      if (!peerId) return;
+      const clear = (prev: Record<number, number>) => (prev[peerId] ? { ...prev, [peerId]: 0 } : prev);
+      if (d.isGroup === true || d.isGroup === "true") setUnreadGroupMap(clear);
+      else setUnreadMap(clear);
+    };
+    socket.on(`${tenantId}:unread-msg-private-msg`, onRead);
+    return () => { socket.off(`${tenantId}:unread-msg-private-msg`, onRead); };
+  }, [user?.tenantId, user?.userId]);
+
   // ─────────────────────────────────────
   // Load messages
   // ─────────────────────────────────────
-  const loadMessages = useCallback(async (contactId: number, isGroup: boolean) => {
+  // `targetMessageId` (resultado da busca): a página 1 já vem com as páginas até a mensagem,
+  // que é destacada no lugar de rolar para o fim.
+  const loadMessages = useCallback(async (contactId: number, isGroup: boolean, targetMessageId?: number) => {
+    const seq = ++loadSeqRef.current;
     try {
       isLoadingMoreRef.current = false;
+      pendingJumpRef.current = null;
       setHasMoreMessages(false);
       setCurrentPage(1);
-      const { data } = await fetchPrivateMessages(contactId, isGroup, 1);
-      const msgs = Array.isArray(data) ? data : data?.msgs || data?.messages || [];
+      const { data } = await fetchPrivateMessages(contactId, isGroup, 1, targetMessageId);
+      if (seq !== loadSeqRef.current) return;
+      const msgs: PrivateMessage[] = Array.isArray(data) ? data : data?.msgs || data?.messages || [];
+      const jump = targetMessageId ? (data as { target?: string })?.target : undefined;
+      const found = !!targetMessageId && jump === "found" && msgs.some((m) => Number(m.id) === targetMessageId);
+      if (found) pendingJumpRef.current = targetMessageId!;
       setMessages(msgs);
       setHasMoreMessages(!!(data as { hasMore?: boolean })?.hasMore);
-      scrollToBottom();
+      // Páginas que o servidor mandou de uma vez: o "Carregar mais" segue da seguinte, mesmo
+      // quando o alvo escapou (mensagem nova chegou entre a localização e a listagem).
+      setCurrentPage(Number((data as { pageNumber?: number })?.pageNumber) || 1);
+      if (found) {
+        runPendingJump();
+      } else {
+        scrollToBottom();
+        if (targetMessageId) toast.info(jump === "tooOld" ? t("searchJumpTooOld") : t("searchJumpNotFound"));
+      }
       await markAsRead(contactId, isGroup);
       if (isGroup) setUnreadGroupMap((prev) => ({ ...prev, [contactId]: 0 }));
       else setUnreadMap((prev) => ({ ...prev, [contactId]: 0 }));
-      clearSocketUnread(contactId);
-
-      const [privateRes, groupRes] = await Promise.all([
-        fetchUnreadCounts(),
-        fetchUnreadGroupCounts().catch(() => ({ data: { count: 0 } })),
-      ]);
-      const privateCount = Number((privateRes.data as { count?: number })?.count) || 0;
-      const g = groupRes.data as { count?: number | { count?: number } };
-      const groupCount = Number(g?.count && typeof g.count === "object" ? g.count?.count : g?.count) || 0;
-      setUnreadCount(privateCount + groupCount);
-    } catch {
-      toast.error(t("loadMessagesError"));
+      clearSocketUnread(contactId, isGroup);
+      setUnreadCount(await fetchChatUnreadTotal());
+    } catch (err) {
+      if (seq !== loadSeqRef.current) return;
+      toast.error(getBackendErrorCode(err) === "ERR_PRIVATE_GROUP_NOT_MEMBER" ? t("notTeamMember") : t("loadMessagesError"));
     }
-  }, [setMessages, setUnreadCount, scrollToBottom, clearSocketUnread]);
+  }, [setMessages, setUnreadCount, scrollToBottom, clearSocketUnread, runPendingJump]);
 
   const loadMoreMessages = useCallback(async () => {
     if (!selectedContact || loadingMore || !hasMoreMessages) return;
+    const seq = loadSeqRef.current;
     try {
       setLoadingMore(true);
       prevScrollHeightRef.current = scrollRef.current?.scrollHeight ?? 0;
       isLoadingMoreRef.current = true;
       const nextPage = currentPage + 1;
       const { data } = await fetchPrivateMessages(selectedContact.id, !!selectedContact.isGroup, nextPage);
+      // Outra conversa (ou a mesma recarregada pela busca) entrou no meio: estas são da anterior.
+      if (seq !== loadSeqRef.current) {
+        isLoadingMoreRef.current = false;
+        return;
+      }
       const olderMsgs = Array.isArray(data) ? data : data?.msgs || data?.messages || [];
       if (olderMsgs.length > 0) {
         setMessages([...olderMsgs, ...useChatStore.getState().messages]);
@@ -411,48 +401,27 @@ export default function ChatPrivadoPage() {
     }
   }, [selectedContact, loadingMore, hasMoreMessages, currentPage, setMessages]);
 
-  // ─────────────────────────────────────
-  // Deep-link via searchParams
-  // ─────────────────────────────────────
-  const contactIdParam = searchParams.get("contactId");
-  const groupIdParam = searchParams.get("groupId");
-
-  useEffect(() => {
-    if (loading || deepLinkHandled.current) return;
-    const cId = contactIdParam ? Number(contactIdParam) : null;
-    const gId = groupIdParam ? Number(groupIdParam) : null;
-    if (cId && !Number.isNaN(cId)) {
-      const u = (users as ChatUser[]).find((x) => x.id === cId || (x as { userId?: number }).userId === cId);
-      if (u) {
-        deepLinkHandled.current = true;
-        setTab("users");
-        const contact: SelectedContact = { id: (u as { id?: number }).id ?? (u as unknown as { userId: number }).userId, name: u.name, email: u.email, status: u.status, isOnline: u.isOnline, isGroup: false, profilePicture: (u as { profilePicture?: string }).profilePicture };
-        setSelectedContact(contact); setEditingMsg(null); setText(""); loadMessages(contact.id, false);
-      }
-    } else if (gId && !Number.isNaN(gId)) {
-      const g = (groups as ChatGroup[]).find((x) => x.id === gId || (x as { groupId?: number }).groupId === gId);
-      if (g) {
-        deepLinkHandled.current = true;
-        setTab("groups");
-        const id = (g as { id?: number }).id ?? (g as unknown as { groupId: number }).groupId;
-        const contact: SelectedContact = { id, name: g.name, isGroup: true, profilePicture: g.profilePicture };
-        setSelectedContact(contact); setEditingMsg(null); setText(""); loadMessages(id, true);
-      }
-    }
-  }, [loading, contactIdParam, groupIdParam, users, groups, loadMessages]);
-
   // ESC closes the active conversation
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
+      // Com a busca da conversa aberta, o ESC fecha só a busca.
+      if (e.key === "Escape" && convSearchOpen && !messageSearchUnavailable && selectedContact && !forwardMsg && !profilePicPreview) {
+        setConvSearchOpen(false);
+        setConvSearch("");
+        return;
+      }
       if (e.key === "Escape" && selectedContact && !forwardMsg && !profilePicPreview) {
         setSelectedContact(null);
+        // Conversa fechada não pode seguir "ativa": a mensagem nova não ganharia contador
+        // e seria marcada como lida sem estar na tela.
+        setActiveConversation(null);
         setEditingMsg(null);
         setText("");
       }
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [selectedContact, forwardMsg, profilePicPreview]);
+  }, [selectedContact, forwardMsg, profilePicPreview, setActiveConversation, convSearchOpen, messageSearchUnavailable]);
 
   // ─────────────────────────────────────
   // Group photo upload
@@ -482,13 +451,18 @@ export default function ChatPrivadoPage() {
 
   // Message actions
   // ─────────────────────────────────────
-  const handleSelectContact = (contact: SelectedContact) => {
+  const handleSelectContact = (contact: SelectedContact, targetMessageId?: number) => {
+    // Gravação em andamento é da conversa anterior: parar sem enviar (ao parar, o áudio
+    // sairia para a conversa nova, que é a que estaria selecionada).
+    if (isRecordingAudio) handleCancelRecordingAudio();
     setSelectedContact(contact);
     setEditingMsg(null);
     setReplyTo(null);
     setText("");
     setPendingFiles([]);
     setMentionQuery(null);
+    setConvSearchOpen(false);
+    setConvSearch("");
     setActiveConversation({ id: contact.id, isGroup: !!contact.isGroup });
     if (contact.isGroup) {
       clearMentionGroup(contact.id);
@@ -504,8 +478,90 @@ export default function ChatPrivadoPage() {
           .catch(() => {});
       }
     }
-    loadMessages(contact.id, !!contact.isGroup);
+    loadMessages(contact.id, !!contact.isGroup, targetMessageId);
   };
+
+  // Clique num resultado da busca: abre a conversa (ou fica nela) e leva até a mensagem.
+  const openSearchResult = (result: PrivateChatSearchResult) => {
+    const conv = result.conversation;
+    const sameConversation = !!selectedContact && !!selectedContact.isGroup === conv.isGroup && selectedContact.id === conv.id;
+    if (sameConversation) {
+      if (useChatStore.getState().messages.some((m) => Number(m.id) === result.id)) {
+        pendingJumpRef.current = result.id;
+        runPendingJump();
+      } else {
+        loadMessages(conv.id, conv.isGroup, result.id);
+      }
+      return;
+    }
+    let contact: SelectedContact;
+    if (conv.isGroup) {
+      const g = (groups as ChatGroup[]).find((x) => x.id === conv.id);
+      contact = { id: conv.id, name: g?.name || conv.name, isGroup: true, profilePicture: g?.profilePicture || conv.profilePicture || undefined };
+    } else {
+      // Como no link direto: quem não está na lista (perdeu o Chat Privado, superadmin) não abre.
+      const u = (users as ChatUser[]).find((x) => x.id === conv.id);
+      if (!u) {
+        toast.info(t("searchConversationUnavailable"));
+        return;
+      }
+      contact = { id: u.id, name: u.name, email: u.email, status: u.status, isOnline: u.isOnline, isGroup: false, profilePicture: u.profilePicture };
+    }
+    setTab(conv.isGroup ? "groups" : "users");
+    handleSelectContact(contact, result.id);
+  };
+
+  const closeConvSearch = () => {
+    setConvSearchOpen(false);
+    setConvSearch("");
+  };
+
+  // ─────────────────────────────────────
+  // Deep-link via searchParams (?contactId= / ?groupId=)
+  // ─────────────────────────────────────
+  // Vale também com a página já aberta (aviso, ícone do topo, sino): troca de conversa
+  // pelo handleSelectContact, que limpa citação, anexos e menção da conversa anterior.
+  // Depois de tratado, o link sai da URL para o mesmo link funcionar de novo.
+  const contactIdParam = searchParams.get("contactId");
+  const groupIdParam = searchParams.get("groupId");
+
+  useEffect(() => {
+    if (loading) return;
+    const cId = contactIdParam ? Number(contactIdParam) : NaN;
+    const gId = groupIdParam ? Number(groupIdParam) : NaN;
+    const target =
+      Number.isInteger(cId) && cId > 0 ? { id: cId, isGroup: false }
+      : Number.isInteger(gId) && gId > 0 ? { id: gId, isGroup: true }
+      : null;
+    if (!target) { deepLinkHandled.current = null; return; }
+    const key = `${target.isGroup ? "g" : "u"}:${target.id}`;
+    if (deepLinkHandled.current === key) return;
+    deepLinkHandled.current = key;
+
+    let contact: SelectedContact | null = null;
+    if (!target.isGroup) {
+      const u = (users as ChatUser[]).find((x) => x.id === target.id || (x as { userId?: number }).userId === target.id);
+      if (u) contact = { id: (u as { id?: number }).id ?? (u as unknown as { userId: number }).userId, name: u.name, email: u.email, status: u.status, isOnline: u.isOnline, isGroup: false, profilePicture: (u as { profilePicture?: string }).profilePicture };
+    } else {
+      const g = (groups as ChatGroup[]).find((x) => x.id === target.id || (x as { groupId?: number }).groupId === target.id);
+      if (g) contact = { id: (g as { id?: number }).id ?? (g as unknown as { groupId: number }).groupId, name: g.name, isGroup: true, profilePicture: g.profilePicture };
+    }
+    // Conversa pedida já aberta: só tira o link (o rascunho fica). Fora da lista
+    // (remetente sem Chat Privado, equipe desativada): fica a lista e um aviso de como
+    // limpar o contador (o aviso fixo já saiu no clique; o contador continua).
+    const alreadyOpen = !!selectedContact && !!selectedContact.isGroup === target.isGroup
+      && (selectedContact.id === target.id || selectedContact.id === contact?.id);
+    if (!alreadyOpen && contact) {
+      setTab(target.isGroup ? "groups" : "users");
+      handleSelectContact(contact);
+    } else if (!alreadyOpen) {
+      toast.info(t("deepLinkUnavailable"));
+    }
+    window.history.replaceState(null, "", "/chat-privado");
+  // handleSelectContact e selectedContact ficam fora: a função é recriada a cada render e
+  // os dois só valem no instante do link; a chave tratada impede repetir o mesmo link.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loading, contactIdParam, groupIdParam, users, groups]);
 
   const handleSend = async () => {
     if (!selectedContact) return;
@@ -610,7 +666,13 @@ export default function ChatPrivadoPage() {
     try {
       await deletePrivateMessage(msgId);
       removeMessage(msgId);
-    } catch {
+    } catch (err: unknown) {
+      // 404 = a mensagem já não existe (apagada em outra aba ou aparelho): só some da tela.
+      const e = err as { status?: number; response?: { status?: number } };
+      if ((e?.status ?? e?.response?.status) === 404) {
+        removeMessage(msgId);
+        return;
+      }
       toast.error(t("deleteMessageError"));
     }
   };
@@ -632,11 +694,7 @@ export default function ChatPrivadoPage() {
       } else {
         const token = typeof window !== "undefined" ? localStorage.getItem("token") : null;
         const parsed = token ? JSON.parse(token) : null;
-        const res = await fetch(forwardMsg.mediaUrl!, {
-          headers: parsed ? { Authorization: `Bearer ${parsed}` } : {},
-        });
-        if (!res.ok) throw new Error("download failed");
-        const blob = await res.blob();
+        const blob = await fetchMediaBlob(forwardMsg.mediaUrl!, { authToken: parsed });
         const file = new File([blob], forwardMsg.mediaName || forwardMsg.text || "arquivo", { type: blob.type });
         const fd = new FormData();
         fd.append("medias", file);
@@ -831,9 +889,8 @@ export default function ChatPrivadoPage() {
     setTimeout(() => inputRef.current?.focus(), 0);
   };
 
-  // URLs/e-mails viram links clicaveis. O card de preview so aparece quando o
-  // /api/link-preview devolve titulo ou imagem — links internos (ERP, boleto,
-  // painel) nao geram preview e ficariam sem nenhuma forma de abrir.
+  // URLs/e-mails viram links clicaveis. A previa so sai pelo "Ver previa" e links
+  // internos (ERP, boleto, painel) nem geram previa — o link precisa abrir sem ela.
   const renderLinkified = (rawText: string, isMe: boolean, keyPrefix: string): React.ReactNode[] =>
     linkifyParts(rawText).map((part, i) =>
       part.type === "text" ? (
@@ -882,8 +939,14 @@ export default function ChatPrivadoPage() {
   // ─────────────────────────────────────
   // Computed
   // ─────────────────────────────────────
-  const totalUnreadUsers = Object.values(unreadMap).reduce((a, b) => a + b, 0);
-  const totalUnreadGroups = Object.values(unreadGroupMap).reduce((a, b) => a + b, 0);
+  const sumValues = (map: Record<number, number>) => Object.values(map).reduce((a, b) => a + b, 0);
+  const totalUnreadUsers = sumValues(unreadMap) + sumValues(socketUnreadByUser);
+  const totalUnreadGroups = sumValues(unreadGroupMap) + sumValues(socketUnreadByGroup);
+
+  // Contagem do carregamento + mensagens que chegaram depois por socket
+  const groupUnreadOf = (g: ChatGroup) =>
+    ((unreadGroupMap[g.id] ?? unreadGroupMap[(g as { groupId?: number }).groupId ?? 0]) || 0)
+    + (socketUnreadByGroup[g.id] ?? 0);
 
   // Merge mount-time unread counts with real-time socket counts
   const mergedUnreadMap = (users as ChatUser[]).reduce<Record<number, number>>((acc, u) => {
@@ -998,6 +1061,10 @@ export default function ChatPrivadoPage() {
                     title: t("helpS2T"),
                     items: [t("helpS2I0"), t("helpS2I1"), t("helpS2I2")],
                   },
+                  {
+                    title: t("helpS3T"),
+                    items: [t("helpS3I0"), t("helpS3I1"), t("helpS3I2"), t("helpS3I3")],
+                  },
                 ]}
               />
               {canAudit && (
@@ -1014,7 +1081,23 @@ export default function ChatPrivadoPage() {
             </div>
             <div className="relative">
               <Search className="absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-              <Input value={search} onChange={(e) => setSearch(e.target.value)} placeholder={t("searchPlaceholder")} className="pl-8 h-8 text-sm" />
+              <Input
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder={messageSearchUnavailable ? t("searchPlaceholder") : t("searchPlaceholderAll")}
+                title={messageSearchUnavailable ? undefined : t("searchAllTip")}
+                className={cn("pl-8 h-8 text-sm", search && "pr-8")}
+              />
+              {search && (
+                <button
+                  type="button"
+                  onClick={() => setSearch("")}
+                  title={t("searchClear")}
+                  className="absolute right-1.5 top-1/2 -translate-y-1/2 flex h-5 w-5 items-center justify-center rounded text-muted-foreground hover:bg-accent hover:text-foreground"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              )}
             </div>
           </div>
 
@@ -1049,12 +1132,16 @@ export default function ChatPrivadoPage() {
                   </div>
                 ))}
               </div>
-            ) : tab === "users" ? (
+            ) : (<>{tab === "users" ? (
               filteredUsers.length === 0 ? (
+                globalSearch.active ? (
+                  <p className="px-3.5 pt-3 pb-1 text-xs text-muted-foreground">{t("noUsers")}</p>
+                ) : (
                 <div className="flex flex-col items-center justify-center py-12 text-muted-foreground">
                   <User className="h-8 w-8 mb-2 opacity-40" />
                   <p className="text-sm">{t("noUsers")}</p>
                 </div>
+                )
               ) : (
                 <div className="p-1">
                   {filteredUsers.map((u) => {
@@ -1106,10 +1193,14 @@ export default function ChatPrivadoPage() {
               )
             ) : (
               filteredGroups.length === 0 ? (
+                globalSearch.active ? (
+                  <p className="px-3.5 pt-3 pb-1 text-xs text-muted-foreground">{t("noTeams")}</p>
+                ) : (
                 <div className="flex flex-col items-center justify-center py-12 text-muted-foreground">
                   <Users2 className="h-8 w-8 mb-2 opacity-40" />
                   <p className="text-sm">{t("noTeams")}</p>
                 </div>
+                )
               ) : (
                 <div className="p-1">
                   {filteredGroups.map((g) => (
@@ -1140,9 +1231,9 @@ export default function ChatPrivadoPage() {
                             @
                           </Badge>
                         )}
-                        {((unreadGroupMap[g.id] ?? unreadGroupMap[(g as { groupId?: number }).groupId ?? 0]) || 0) > 0 && (
+                        {groupUnreadOf(g) > 0 && (
                           <Badge variant="destructive" className="h-5 min-w-[20px] shrink-0 rounded-full px-1.5 text-[10px]">
-                            {unreadGroupMap[g.id] ?? unreadGroupMap[(g as { groupId?: number }).groupId ?? 0]}
+                            {groupUnreadOf(g)}
                           </Badge>
                         )}
                       </div>
@@ -1151,6 +1242,27 @@ export default function ChatPrivadoPage() {
                 </div>
               )
             )}
+            {globalSearch.active ? (
+              <>
+                <Separator className="my-1" />
+                <MessageSearchResults
+                  title={t("searchMessagesSection")}
+                  results={globalSearch.results}
+                  tokens={globalSearch.tokens}
+                  loading={globalSearch.loading}
+                  loadingMore={globalSearch.loadingMore}
+                  hasMore={globalSearch.hasMore}
+                  error={globalSearch.error}
+                  myUserId={user?.userId}
+                  showConversation
+                  onSelect={openSearchResult}
+                  onLoadMore={globalSearch.loadMore}
+                />
+              </>
+            ) : search.trim() && !messageSearchUnavailable ? (
+              <p className="px-3.5 py-2 text-[11px] text-muted-foreground">{t("searchMinChars")}</p>
+            ) : null}
+            </>)}
           </ScrollArea>
         </div>
 
@@ -1195,6 +1307,17 @@ export default function ChatPrivadoPage() {
                     )}
                   </div>
                 </div>
+                {!messageSearchUnavailable && (
+                  <Button
+                    variant={convSearchOpen ? "secondary" : "ghost"}
+                    size="icon"
+                    className="h-8 w-8"
+                    onClick={() => (convSearchOpen ? closeConvSearch() : setConvSearchOpen(true))}
+                    title={t("searchInConversationTip")}
+                  >
+                    <Search className="h-4 w-4" />
+                  </Button>
+                )}
                 {/* Members button — only for group chats */}
                 {selectedContact.isGroup ? (
                   <Popover open={membersPopoverOpen} onOpenChange={setMembersPopoverOpen}>
@@ -1285,6 +1408,45 @@ export default function ChatPrivadoPage() {
                   </div>
                 )}
               </div>
+
+              {/* Busca dentro da conversa */}
+              {convSearchOpen && !messageSearchUnavailable && (
+                <div className="border-b bg-background px-3 py-2 shrink-0">
+                  <div className="flex items-center gap-2">
+                    <div className="relative flex-1">
+                      <Search className="absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+                      <Input
+                        autoFocus
+                        value={convSearch}
+                        onChange={(e) => setConvSearch(e.target.value)}
+                        placeholder={t("searchInConversation")}
+                        className="pl-8 h-8 text-sm"
+                      />
+                    </div>
+                    <Button variant="ghost" size="icon" className="h-8 w-8 shrink-0" onClick={closeConvSearch} title={t("searchClose")}>
+                      <X className="h-4 w-4" />
+                    </Button>
+                  </div>
+                  {convSearchState.active ? (
+                    <div className="mt-1 max-h-[40vh] overflow-y-auto -mx-1">
+                      <MessageSearchResults
+                        results={convSearchState.results}
+                        tokens={convSearchState.tokens}
+                        loading={convSearchState.loading}
+                        loadingMore={convSearchState.loadingMore}
+                        hasMore={convSearchState.hasMore}
+                        error={convSearchState.error}
+                        myUserId={user?.userId}
+                        showConversation={false}
+                        onSelect={openSearchResult}
+                        onLoadMore={convSearchState.loadMore}
+                      />
+                    </div>
+                  ) : convSearch.trim() ? (
+                    <p className="px-1 pt-1.5 text-[11px] text-muted-foreground">{t("searchMinChars")}</p>
+                  ) : null}
+                </div>
+              )}
 
               {/* Messages — fixed height, scrollable */}
               <div className="relative flex-1 min-h-0">
@@ -1395,7 +1557,7 @@ export default function ChatPrivadoPage() {
                           {msg.text && (
                             <div>
                               <p className="whitespace-pre-wrap break-words">{renderTextWithMentions(msg.text, isMe)}</p>
-                              {(() => { const url = extractFirstUrl(msg.text); return url ? <PrivateLinkPreview url={url} /> : null; })()}
+                              {(() => { const url = extractFirstUrl(msg.text); return url ? <LinkPreviewCard url={url} size="sm" /> : null; })()}
                             </div>
                           )}
                           <div className={cn("flex items-center gap-1 mt-1 justify-end", isMe ? "text-primary-foreground/60" : "text-muted-foreground")}>
@@ -1679,7 +1841,7 @@ export default function ChatPrivadoPage() {
               <button className="text-white/80 hover:text-white rounded-full bg-white/10 p-1.5" onClick={(e) => { e.stopPropagation(); setLightboxScale((s) => Math.min(5, s + 0.5)); }}><ZoomIn className="h-4 w-4" /></button>
               <button className="text-white/80 hover:text-white rounded-full bg-white/10 p-1.5" onClick={(e) => { e.stopPropagation(); setLightboxScale((s) => { const next = Math.max(1, s - 0.5); if (next === 1) setLightboxOffset({ x: 0, y: 0 }); return next; }); }}><ZoomOut className="h-4 w-4" /></button>
             </div>
-            <button type="button" className="text-white/80 hover:text-white rounded-full bg-white/10 p-1.5" onClick={() => lightboxUrl && downloadFile(lightboxUrl)}><Download className="h-4 w-4" /></button>
+            <button type="button" className="text-white/80 hover:text-white rounded-full bg-white/10 p-1.5" onClick={() => lightboxUrl && downloadFile(lightboxUrl, mediaFileNameFromUrl(lightboxUrl))}><Download className="h-4 w-4" /></button>
           </div>
           <div className="flex-1 flex items-center justify-center overflow-hidden bg-black/90 relative" onClick={() => { if (lightboxScale <= 1) closeLightbox(); }}>
             {lightboxScale !== 1 && <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-10 rounded-full bg-black/50 px-3 py-1 text-xs text-white/80 select-none pointer-events-none">{Math.round(lightboxScale * 100)}%</div>}

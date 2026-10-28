@@ -17,39 +17,36 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, Di
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tooltip, TooltipContent, TooltipTrigger, TooltipProvider } from "@/components/ui/tooltip";
-import { Plus, MoreVertical, Pencil, Trash2, Globe, Eye, EyeOff, Copy, Check, Mail, Calendar as CalendarIcon, Youtube } from "lucide-react";
+import { Plus, MoreVertical, Pencil, Trash2, Globe, Eye, EyeOff, Copy, Check, Mail, Calendar as CalendarIcon, Youtube, Building2, Lock, ShieldX } from "lucide-react";
 import { toast } from "sonner";
 import {
   fetchAppGoogles,
   createAppGoogle,
   updateAppGoogle,
-  deleteAppGoogle
+  deleteAppGoogle,
+  type AppGoogleDTO,
 } from "@/services/superadmin";
 import { fetchTenants } from "@/services/tenants";
 import { useAuthStore } from "@/stores/auth-store";
 import { getGoogleCanonicalCallbackUrl } from "@/config/oauth-proxy";
+import { getBackendErrorCode } from "@/lib/backend-error-code";
 
-interface AppGoogle {
-  id: number;
-  clientId?: string;
-  clientSecret?: string;
-  gmailEnabled?: boolean;
-  calendarEnabled?: boolean;
-  youtubeEnabled?: boolean;
-  gmailScopes?: string | null;
-  calendarScopes?: string | null;
-  youtubeScopes?: string | null;
-  youtubePollIntervalSeconds?: number;
-  description?: string;
-  tenantId?: number | null;
-  isActive?: boolean;
-}
+type AppGoogle = AppGoogleDTO;
 
 interface Tenant { id: number; name: string; }
 
 const GMAIL_SCOPES_DEFAULT = "https://www.googleapis.com/auth/gmail.send https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/gmail.modify";
 const CALENDAR_SCOPES_DEFAULT = "https://www.googleapis.com/auth/calendar https://www.googleapis.com/auth/calendar.events";
 const YOUTUBE_SCOPES_DEFAULT = "https://www.googleapis.com/auth/youtube.force-ssl";
+// Perfil da Empresa: escopo único e fixo (o Google não tem escopo só de leitura).
+const BUSINESS_SCOPE = "https://www.googleapis.com/auth/business.manage";
+// O backend devolve o segredo assim para quem não é superadmin; salvar vazio mantém o gravado.
+const SECRET_MASK = "********";
+
+const httpStatusOf = (err: unknown): number | undefined => {
+  const e = err as { status?: number; response?: { status?: number } } | null;
+  return e?.status ?? e?.response?.status;
+};
 
 function CopyButton({ value }: { value: string }) {
   const t = useTranslations("appGooglePage");
@@ -88,12 +85,18 @@ export default function AppGooglePage() {
   const t = useTranslations("appGooglePage");
   const user = useAuthStore((s) => s.user);
   const isSuperadmin = user?.profile === "superadmin";
+  // Escrita: superadmin e admin (o personalizado com Configurações gerais só lê).
+  const canWrite = isSuperadmin || user?.profile === "admin";
   const [apps, setApps] = useState<AppGoogle[]>([]);
   const [tenants, setTenants] = useState<Tenant[]>([]);
   const [loading, setLoading] = useState(true);
+  const [noPermission, setNoPermission] = useState(false);
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<Partial<AppGoogle>>({});
   const [saving, setSaving] = useState(false);
+
+  // App global (sem empresa) só o superadmin altera; o admin altera o da própria empresa.
+  const rowEditable = (a: AppGoogle) => canWrite && (isSuperadmin || (a.tenantId !== null && a.tenantId !== undefined));
 
   const set = (k: keyof AppGoogle, v: unknown) => setEditing((p) => ({ ...p, [k]: v }));
 
@@ -105,8 +108,20 @@ export default function AppGooglePage() {
     try {
       const { data } = await fetchAppGoogles();
       setApps(Array.isArray(data) ? data : []);
-    } catch { toast.error(t("errorLoad")); }
+      setNoPermission(false);
+    } catch (err) {
+      // Perfil sem leitura (atendente, supervisor): tela própria em vez de "erro ao carregar".
+      if (getBackendErrorCode(err) === "ERR_NO_PERMISSION" || httpStatusOf(err) === 403) setNoPermission(true);
+      else toast.error(t("errorLoad"));
+    }
     finally { setLoading(false); }
+  }
+
+  function saveErrorText(err: unknown, fallbackKey: string): string {
+    const code = getBackendErrorCode(err);
+    if (code === "ERR_NO_PERMISSION" || httpStatusOf(err) === 403) return t("noPermission");
+    if (code === "ERR_GOOGLE_BUSINESS_UNAVAILABLE") return t("businessUnavailable");
+    return t(fallbackKey);
   }
 
   async function loadTenants() {
@@ -129,6 +144,8 @@ export default function AppGooglePage() {
       gmailEnabled: true,
       calendarEnabled: true,
       youtubeEnabled: true,
+      // Perfil da Empresa nasce desligado: só funciona com a API aprovada pelo Google.
+      businessEnabled: false,
       gmailScopes: "",
       calendarScopes: "",
       youtubeScopes: "",
@@ -140,13 +157,14 @@ export default function AppGooglePage() {
   }
 
   function openEdit(a: AppGoogle) {
-    setEditing({ ...a });
+    // Segredo mascarado pelo backend: o campo abre vazio e vazio = mantém o salvo.
+    setEditing({ ...a, clientSecret: a.clientSecret === SECRET_MASK ? "" : (a.clientSecret || "") });
     setOpen(true);
   }
 
   async function handleSave() {
-    if (!editing.clientId || !editing.clientSecret) {
-      toast.error(t("clientIdSecretRequired"));
+    if (!editing.clientId || (!editing.id && !editing.clientSecret)) {
+      toast.error(editing.id ? t("clientIdRequired") : t("clientIdSecretRequired"));
       return;
     }
     setSaving(true);
@@ -158,6 +176,10 @@ export default function AppGooglePage() {
             void _tid;
             return { ...rest } as Record<string, unknown>;
           })();
+      // Edição com o segredo em branco (ou a máscara): não manda o campo, o salvo fica.
+      if (editing.id && (!editing.clientSecret || editing.clientSecret === SECRET_MASK)) {
+        delete payload.clientSecret;
+      }
       if (editing.id) {
         await updateAppGoogle(editing.id, payload);
         toast.success(t("appUpdated"));
@@ -167,14 +189,14 @@ export default function AppGooglePage() {
       }
       setOpen(false);
       load();
-    } catch { toast.error(t("errorSave")); }
+    } catch (err) { toast.error(saveErrorText(err, "errorSave")); }
     finally { setSaving(false); }
   }
 
   async function handleDelete(a: AppGoogle) {
     if (!confirm(t("deleteConfirm", { clientId: a.clientId || "" }))) return;
     try { await deleteAppGoogle(a.id); toast.success(t("deleted")); load(); }
-    catch { toast.error(t("errorDelete")); }
+    catch (err) { toast.error(saveErrorText(err, "errorDelete")); }
   }
 
   const tenantName = (id?: number | null) => {
@@ -191,19 +213,27 @@ export default function AppGooglePage() {
           help={{
             description: t("helpDesc"),
             sections: [
-              { title: t("helpCoverageTitle"), items: [t("helpCoverageGmail"), t("helpCoverageCalendar"), t("helpCoverageYouTube")] },
+              { title: t("helpCoverageTitle"), items: [t("helpCoverageGmail"), t("helpCoverageCalendar"), t("helpCoverageYouTube"), t("helpCoverageBusiness")] },
               { title: t("helpS0T"), items: [t("helpS0I0"), t("helpS0I1"), t("helpS0I2")] },
               { title: t("helpS1T"), items: [t("helpS1I0"), t("helpS1I1"), t("helpS1I2")] },
+              {
+                title: t("helpBusinessTitle"),
+                items: [t("helpBusinessI0"), t("helpBusinessI1"), t("helpBusinessI2"), t("helpBusinessI3"), t("helpBusinessI4"), t("helpBusinessI5")],
+              },
               { title: t("helpFallbackTitle"), items: [t("helpFallbackInfo"), t("helpFallbackPlatform"), t("helpFallbackOwn")] },
             ],
           }}
         >
-          <Button size="sm" onClick={openCreate}><Plus className="mr-2 h-4 w-4" /> {t("newApp")}</Button>
+          {canWrite && !noPermission && (
+            <Button size="sm" onClick={openCreate}><Plus className="mr-2 h-4 w-4" /> {t("newApp")}</Button>
+          )}
         </PageHeader>
 
-        {loading ? <Skeleton className="h-64 w-full" /> : apps.length === 0 ? (
+        {loading ? <Skeleton className="h-64 w-full" /> : noPermission ? (
+          <EmptyState icon={ShieldX} title={t("noPermissionTitle")} description={t("noPermissionDesc")} />
+        ) : apps.length === 0 ? (
           <EmptyState icon={Globe} title={t("emptyTitle")} description={t("emptyDescription")}>
-            <Button onClick={openCreate}><Plus className="mr-2 h-4 w-4" />{t("newApp")}</Button>
+            {canWrite && <Button onClick={openCreate}><Plus className="mr-2 h-4 w-4" />{t("newApp")}</Button>}
           </EmptyState>
         ) : (
           <Card><CardContent className="p-0 overflow-x-auto">
@@ -227,6 +257,7 @@ export default function AppGooglePage() {
                         {a.gmailEnabled && <Badge variant="outline" className="gap-1"><Mail className="h-3 w-3" />Gmail</Badge>}
                         {a.calendarEnabled && <Badge variant="outline" className="gap-1"><CalendarIcon className="h-3 w-3" />Calendar</Badge>}
                         {a.youtubeEnabled && <Badge variant="outline" className="gap-1"><Youtube className="h-3 w-3" />YouTube</Badge>}
+                        {a.businessEnabled === true && <Badge variant="outline" className="gap-1"><Building2 className="h-3 w-3" />{t("businessBadge")}</Badge>}
                       </div>
                     </TableCell>
                     <TableCell>{a.description || "---"}</TableCell>
@@ -241,13 +272,30 @@ export default function AppGooglePage() {
                     )}
                     <TableCell><Badge variant={a.isActive ? "success" : "secondary"}>{a.isActive ? t("active") : t("inactive")}</Badge></TableCell>
                     <TableCell>
-                      <DropdownMenu>
-                        <DropdownMenuTrigger asChild><Button variant="ghost" size="icon"><MoreVertical className="h-4 w-4" /></Button></DropdownMenuTrigger>
-                        <DropdownMenuContent align="end">
-                          <DropdownMenuItem onClick={() => openEdit(a)}><Pencil className="mr-2 h-4 w-4" />{t("edit")}</DropdownMenuItem>
-                          <DropdownMenuItem className="text-destructive" onClick={() => handleDelete(a)}><Trash2 className="mr-2 h-4 w-4" />{t("delete")}</DropdownMenuItem>
-                        </DropdownMenuContent>
-                      </DropdownMenu>
+                      {rowEditable(a) ? (
+                        <DropdownMenu>
+                          <DropdownMenuTrigger asChild><Button variant="ghost" size="icon"><MoreVertical className="h-4 w-4" /></Button></DropdownMenuTrigger>
+                          <DropdownMenuContent align="end">
+                            <DropdownMenuItem onClick={() => openEdit(a)}><Pencil className="mr-2 h-4 w-4" />{t("edit")}</DropdownMenuItem>
+                            <DropdownMenuItem className="text-destructive" onClick={() => handleDelete(a)}><Trash2 className="mr-2 h-4 w-4" />{t("delete")}</DropdownMenuItem>
+                          </DropdownMenuContent>
+                        </DropdownMenu>
+                      ) : (
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <span
+                              tabIndex={0}
+                              aria-label={a.tenantId === null || a.tenantId === undefined ? t("readOnlyGlobal") : t("readOnly")}
+                              className="inline-flex h-9 w-9 items-center justify-center text-muted-foreground"
+                            >
+                              <Lock className="h-4 w-4" />
+                            </span>
+                          </TooltipTrigger>
+                          <TooltipContent className="max-w-xs">
+                            {a.tenantId === null || a.tenantId === undefined ? t("readOnlyGlobal") : t("readOnly")}
+                          </TooltipContent>
+                        </Tooltip>
+                      )}
                     </TableCell>
                   </TableRow>
                 ))}
@@ -289,7 +337,12 @@ export default function AppGooglePage() {
 
               <div className="space-y-1.5">
                 <Label>Client Secret</Label>
-                <PasswordInput value={editing.clientSecret || ""} onChange={(v) => set("clientSecret", v)} placeholder="GOCSPX-..." />
+                <PasswordInput
+                  value={editing.clientSecret || ""}
+                  onChange={(v) => set("clientSecret", v)}
+                  placeholder={editing.id ? t("secretKeptPlaceholder") : "GOCSPX-..."}
+                />
+                {editing.id && <p className="text-xs text-muted-foreground">{t("secretKeptHint")}</p>}
               </div>
 
               <div className="space-y-1.5">
@@ -321,6 +374,24 @@ export default function AppGooglePage() {
                   <Switch checked={editing.youtubeEnabled !== false} onCheckedChange={(v) => set("youtubeEnabled", v)} />
                   <Youtube className="h-4 w-4 text-muted-foreground" />
                   <Label>YouTube</Label>
+                </div>
+                <div className="space-y-2">
+                  <div className="flex items-center gap-3">
+                    {/* Só liga com true explícito: backend antigo não manda o campo. */}
+                    <Switch checked={editing.businessEnabled === true} onCheckedChange={(v) => set("businessEnabled", v)} />
+                    <Building2 className="h-4 w-4 text-muted-foreground" />
+                    <Label>{t("businessServiceLabel")}</Label>
+                  </div>
+                  {editing.businessEnabled === true && (
+                    <div className="space-y-1.5 pl-0 sm:pl-12">
+                      <p className="text-xs text-muted-foreground">{t("businessServiceHint")}</p>
+                      <div className="flex items-center gap-2">
+                        <Input value={BUSINESS_SCOPE} readOnly className="font-mono text-xs bg-muted cursor-default" />
+                        <CopyButton value={BUSINESS_SCOPE} />
+                      </div>
+                      <p className="text-xs text-amber-600 dark:text-amber-400">{t("businessServiceWarning")}</p>
+                    </div>
+                  )}
                 </div>
               </div>
 

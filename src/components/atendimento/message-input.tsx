@@ -11,16 +11,19 @@ import {
   BarChart2, MessageSquare, ExternalLink, Menu, Search,
   Package, ShoppingCart, ShieldCheck, GalleryHorizontalEnd, Layers,
   Receipt, Phone, List, Tag, FolderOpen, Forward, Clock,
-  StickyNote, CheckCircle2, Copy, Info, ChevronDown, Route,
+  StickyNote, CheckCircle2, Copy, Info, ChevronDown, Route, AlertTriangle,
+  Megaphone, MessageSquareShare,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { useWhatsappStore } from "@/stores/whatsapp-store";
 import UazapiInteractiveDialog from "./uazapi-interactive-dialog";
-import { sendUazapiMenu } from "@/services/uazapi-interactive";
+import { sendUazapiMenu, checkUazapiQuote } from "@/services/uazapi-interactive";
 import { sendEvoGoMenu } from "@/services/evogo-interactive";
 import { ProductPickerDialog } from "./product-picker-dialog";
+import { WebchatInviteSendDialog } from "./webchat-invite-send-dialog";
+import { isWebchatInviteSendChannel, useWebchatInviteMessage } from "@/hooks/use-webchat-invite-message";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import {
@@ -47,11 +50,25 @@ import type { Message } from "@/stores/ticket-store";
 import { useTicketStore } from "@/stores/ticket-store";
 import { useAuthStore } from "@/stores/auth-store";
 import { useChatDraftStore } from "@/stores/chat-draft-store";
-import { fetchGallery, fetchGalleryBlob, getGalleryPreviewUrl, type GalleryItem } from "@/services/gallery";
+import { fetchGallery, fetchGalleryBlob, getGalleryPreviewUrl, isGalleryFolderMissingError, type GalleryFolderFilterValue, type GalleryItem } from "@/services/gallery";
 import { GalleryPickerWithUploadDialog, wabaHeaderFormatToGalleryParams } from "@/components/gallery/gallery-picker-with-upload-dialog";
+import { GalleryFolderFilter } from "@/components/gallery/gallery-folder-filter";
+import { useGalleryFolders } from "@/hooks/use-gallery-folders";
 import { matchesAllTerms } from "@/lib/text-search";
 import { handleTicketAccessDenied } from "@/lib/ticket-access-denied";
-import { listMedia, getMediaComments, type InstagramMedia, type InstagramComment } from "@/services/instagram";
+import { isMetaTokenUnauthorized, metaRateLimitedMessage } from "@/lib/backend-error-code";
+import { uazapiQuoteWillBeDropped } from "@/lib/uazapi-quote-window";
+import { matchQuickReplyTemplate, parseQuickReplyTemplate, type QuickReplyTemplateRef } from "@/lib/quick-reply-template";
+import { parseQuickReplyLocationMessage } from "@/lib/location-message";
+import { SendLocationDialog } from "./send-location-dialog";
+import { locationValueFrom, type LocationPickerValue, type LocationPoint } from "./location-picker-fields";
+import { usePageAccess } from "@/hooks/use-page-access";
+import { canManagePublicQuickReplies, type FastReply } from "@/services/fast-reply";
+import { useFreeEntryWindow } from "@/hooks/use-free-entry-window";
+import { formatDateTime } from "@/lib/format";
+import { getMediaComments, type InstagramComment } from "@/services/instagram";
+import { useInstagramMediaPages } from "@/hooks/use-instagram-media-pages";
+import { InstagramMediaThumb } from "@/components/instagram/instagram-media-thumb";
 import { listPagePosts, getPostComments, type FacebookPost, type FacebookComment } from "@/services/facebook";
 import {
   GenericTemplateBuilder, buildGenericElements, hasValidGenericElement, emptyGenericElement,
@@ -107,6 +124,7 @@ import { toast } from "sonner";
 import { useTranslations } from "next-intl";
 import { cn, isValidHttpUrl } from "@/lib/utils";
 import { useLiveMode } from "@/hooks/use-live-mode";
+import { useRegion } from "@/hooks/use-region";
 import { useReadableToneColor } from "@/hooks/use-readable-tone-color";
 import { normalizeBrPhone } from "@/lib/phone-utils";
 import { EMOJI_CATEGORIES } from "@/lib/emoji-data";
@@ -117,10 +135,13 @@ import {
   matchTemplateCategory,
 } from "@/components/atendimento/template-category-filter";
 import { copilotUiLangPayload, suggestReply } from "@/services/copilot";
+import { clearCopilotAutoPause, isCopilotAutoPaused, noteCopilotAutoFailure } from "@/lib/copilot-auto-pause";
 import api, { BACKGROUND_REQUEST } from "@/lib/api";
 import { checkFileForChannel, checkGalleryItemForChannel } from "@/lib/channel-file-limits";
 import { buildSignedBody } from "@/lib/signature";
 import { WABA_LIMITS } from "@/lib/waba-text-limits";
+import { fetchMediaBlob } from "@/lib/media-fetch";
+import { notifyUnreadablePickedFile, openPickedFileFallback, pickedFilesBudget, preparePickedFile, preparePickedFiles } from "@/lib/picked-file";
 // Cobranca (template ORDER_DETAILS) — caminho paralelo (D0 do plano).
 // Nada aqui roda para template comum/marketing/auth/carrossel/catalogo.
 import { OrderDetailsFields } from "@/components/common/order-details-fields";
@@ -137,13 +158,20 @@ import { templateBodyHasVariables } from "@/utils/template-builder";
 
 type WabaModalType =
   | "" | "buttons" | "list" | "templates" | "ctaurl"
-  | "replybuttons" | "address" | "locationreq" | "location" | "flow"
+  | "replybuttons" | "address" | "locationreq" | "flow"
   | "singleproduct" | "multiproduct" | "catalog" | "templateauth" | "carousel";
 
 type GroupModalType = "" | "ghost" | "mention" | "interactive";
 type InteractiveType = "quickReply" | "singleSelect" | "ctaButtons" | "menuText" | "poll" | "catalog" | "carousel" | "pixButton" | "ctaCopy" | "ctaUrl" | "ctaCall";
 
 type HeaderType = "text" | "image" | "video" | "document";
+
+// Canais em que o áudio do gravador chega ao cliente como mensagem de voz
+// (aviso da prévia; nos demais o canal não tem esse conceito).
+const VOICE_NOTE_CHANNELS = new Set([
+  "whatsapp", "baileys", "zapo", "evo", "evogo", "meow", "zapi", "uazapi",
+  "waba", "dialog360", "gupshup", "telegram",
+]);
 
 interface QuickReply {
   id: number;
@@ -154,10 +182,22 @@ interface QuickReply {
   voice?: string;
   userId?: number;
   isPublic?: boolean;
-  messageType?: "text" | "buttons" | "list" | "template";
+  // "location": coordenadas, nome e endereço dentro do próprio `message` (lib/location-message.ts).
+  messageType?: "text" | "buttons" | "list" | "template" | "location";
   buttonsJson?: string;
   listJson?: string;
   templateJson?: string;
+}
+
+// Arquivos da mensagem rápida: `mediasJson` (vários) e, sem ele, o `media` antigo (um só).
+function quickReplyMediaFilenames(reply: QuickReply): string[] {
+  if (reply.mediasJson) {
+    try {
+      const parsed = JSON.parse(reply.mediasJson);
+      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+    } catch {}
+  }
+  return reply.media ? [reply.media] : [];
 }
 
 interface MessageInputProps {
@@ -167,8 +207,9 @@ interface MessageInputProps {
   ticket?: Record<string, unknown>;
   replyTo: Message | null;
   onClearReply: () => void;
-  onSendText: (text: string, quotedMsg?: Message, opts?: { forceLinked?: boolean }) => void;
-  onSendMedia: (file: File, caption: string, quotedMsg?: Message, isSticker?: boolean) => void;
+  onSendText: (text: string, quotedMsg?: Message, opts?: { forceLinked?: boolean; webchatInvite?: boolean }) => void;
+  /** `allowGroupCaption`: envio de UM arquivo — no WABA o texto do atendente que esperava para juntar vira a legenda. */
+  onSendMedia: (file: File, caption: string, quotedMsg?: Message, isSticker?: boolean, opts?: { voice?: boolean; allowGroupCaption?: boolean }) => void | Promise<void>;
   onSendLocation: (lat: number, lng: number, name?: string, address?: string) => void;
   onScheduleMessage?: () => void;
   onMultiForward?: () => void;
@@ -222,8 +263,9 @@ function HeaderSection({
 }
 
 // Janela de atendimento da Meta (customer service window). É SEMPRE 24h e é ela que
-// libera texto livre — a janela de 72h dos anúncios (Free Entry Point) só define
-// gratuidade, não permissão. Ver docs/PLANO_JANELA_FEP_72H.md.
+// libera texto livre — a janela grátis dos anúncios (Free Entry Point, até 7 dias desde
+// 28/09/2026) só define gratuidade, não permissão: ela entra como aviso de custo
+// (useFreeEntryWindow), nunca no bloqueio da caixa. Ver docs/PLANO_JANELA_FEP_72H.md.
 const WINDOW_24H_MS = 24 * 60 * 60 * 1000;
 
 const COPILOT_PROVIDER_LABELS: Record<string, string> = {
@@ -284,6 +326,12 @@ export function MessageInput({
   const tChat = useTranslations("atendimentoChat");
   const tErrors = useTranslations("errors");
   const tOrder = useTranslations("orderDetails");
+  const tCommon = useTranslations("common");
+  const tInvite = useTranslations("webchatPage.inviteSend");
+  const tShare = useTranslations("locationShare");
+  // Região da empresa: moeda padrão do recibo do Messenger e textos ao cliente
+  // montados aqui (sem idioma configurado, `regionText` devolve o literal PT de hoje).
+  const { currency: regionCurrency, text: regionText, ensureTexts: ensureRegionTexts } = useRegion();
   // W3-B: senders BSP-agnostico — disponivel para call sites que precisem
   // rotear envio por whatsapp.type (waba | dialog360 | gupshup). As chamadas
   // sendWaba* legadas (UX existente WABA) permanecem inalteradas.
@@ -291,7 +339,12 @@ export function MessageInput({
     (ticket?.whatsapp as { type?: string } | undefined)?.type,
   );
   const { isLiveMode } = useLiveMode();
-  const { user, getConfigValue } = useAuthStore();
+  const { user, getConfigValue, isAdmin, isSuporte, hasPermission } = useAuthStore();
+  // "Salvar este local" da janela de localização: o mesmo acesso da tela de Mensagens
+  // rápidas (o hook só calcula, sem aviso nem redirecionamento) e o mesmo critério dela
+  // para a rápida "para toda a equipe".
+  const canSaveQuickReplies = usePageAccess("mensagens-rapidas", { allowIfNotSet: true });
+  const canSavePublicQuickReplies = canManagePublicQuickReplies({ user, isAdmin, isSuporte, hasPermission });
   // Boolean derivado (não o objeto planFeatures) para servir de dep de efeito sem
   // re-disparar quando o snapshot do plano é regravado com o mesmo conteúdo.
   const hasAiFeature = useAuthStore((s) => s.hasFeature("aiIntegrations"));
@@ -314,6 +367,10 @@ export function MessageInput({
   // BSPs (Gupshup / Dialog360) compartilham os mesmos formatos do WABA Meta —
   // gates de UI usam isWabaLike pra liberar templates, buttons, list, etc.
   const isWabaLike = isWaba || isGupshup || isDialog360;
+  // Envio BSP da localização pelo canal do ATENDIMENTO: o `senders` acima lê
+  // `ticket.whatsapp.type`, que falta no atendimento vindo da lista (whatsapp = {id, name})
+  // e mandaria Dialog360/Gupshup para a rota do WABA.
+  const locationSenders: ChannelSenderSet = useChannelSender(ch);
   const isWebchat = ch === "webchat" || ch.includes("webchat");
   const isHub = ch.includes("hub");
   const isInstagram = ch === "instagram";
@@ -331,8 +388,41 @@ export function MessageInput({
   const isHubWaba = ch === "hub_whatsapp_business_account";
   const isEmailChannel = isWebmail || isHubEmail; // canais que só enviam email
 
+  // UAzapi: a citação só chega ao celular se a UAzapi tiver a original (últimos 7
+  // dias, e nunca a que veio por outro canal). A janela local responde na hora; o
+  // backend confirma com a própria UAzapi. Rota ausente ou falha = fica a janela.
+  const [uazapiQuoteDropped, setUazapiQuoteDropped] = useState(false);
+  const uazapiQuoteCheckCacheRef = useRef(new Map<string, boolean>());
+  useEffect(() => {
+    if (!isUazapi || !replyTo) {
+      setUazapiQuoteDropped(false);
+      return;
+    }
+    const quotedId = String(replyTo.id);
+    // Bolha ainda não confirmada (sem id no WhatsApp): o servidor não a acha, nem pergunta.
+    if (quotedId.startsWith("front-")) {
+      setUazapiQuoteDropped(true);
+      return;
+    }
+    const cached = uazapiQuoteCheckCacheRef.current.get(quotedId);
+    if (cached !== undefined) {
+      setUazapiQuoteDropped(cached);
+      return;
+    }
+    setUazapiQuoteDropped(uazapiQuoteWillBeDropped(replyTo));
+    let cancelled = false;
+    checkUazapiQuote(ticketId, quotedId)
+      .then(({ data }) => {
+        if (cancelled || typeof data?.willQuote !== "boolean") return;
+        uazapiQuoteCheckCacheRef.current.set(quotedId, !data.willQuote);
+        setUazapiQuoteDropped(!data.willQuote);
+      })
+      .catch(() => { /* backend sem a rota ou fora: fica a janela de 7 dias */ });
+    return () => { cancelled = true; };
+  }, [isUazapi, replyTo, ticketId]);
+
   // Extract ticket data
-  const ticketData = ticket as { whatsapp?: { tokenAPI?: string; id?: number }; contact?: { number?: string; instagramPK?: string | number; messengerId?: string | number }; whatsappId?: number; isGroup?: boolean; lastMessageReceived?: string | number } | undefined;
+  const ticketData = ticket as { whatsapp?: { tokenAPI?: string; id?: number }; contact?: { number?: string; instagramPK?: string | number; messengerId?: string | number }; whatsappId?: number; contactId?: number; isGroup?: boolean; lastMessageReceived?: string | number } | undefined;
 
   const isGroup = !!ticketData?.isGroup;
   const supportsGhostMention = isNonWabaWpp && isGroup;
@@ -352,6 +442,9 @@ export function MessageInput({
   const supportsInteractive = (isBaileys || isZapo) && isInteractiveBaileysEnabled; // cta/menu/poll (+catalogo/carousel so baileys) — requer NEXT_PUBLIC_INTERACTIVE_BAILEYS=true
   const supportsInteractiveCore = isBaileys || isZapo; // Botoes / Lista / Botao PIX — liberado por default no WSocket fork
   const supportsSticker = ["whatsapp", "baileys", "meow", "evo", "evogo", "zapi", "uazapi", "zapo", "instagram", "waba", "gupshup", "dialog360"].includes(ch);
+  // Mesmos canais de LOCATION_CHANNEL_TYPES (backend, SendLocationZPRO): fora deles a rota
+  // recusa com ERR_LOCATION_NOT_SUPPORTED. O WABA Meta tem item próprio no menu WABA.
+  const supportsLocation = isDefaultWpp || isBaileys || isZapo || isEvo || isEvoGo || isMeow || isZapi || isUazapi || ch === "webchat" || isDialog360 || isGupshup;
   const supportsTyping = isDefaultWpp || isBaileys || isEvo || isEvoGo || isZapo || ch === "meow" || ch === "uazapi";
   const supportsAudio = !isWebchat;
   const supportsFiles = true;
@@ -449,6 +542,26 @@ export function MessageInput({
     const timer = setInterval(update, 1000);
     return () => clearInterval(timer);
   }, [windowChannels, ticketData?.lastMessageReceived]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Janela grátis do anúncio (WABA Meta / Dialog360) ──────────────────
+  // Aviso de CUSTO, paralelo ao contador de 24h: até o prazo que a Meta informou, toda
+  // mensagem sai sem custo, inclusive template. Nunca entra no isDisabled.
+  // whatsappId da COLUNA do atendimento primeiro: o ticket:update chega sem o objeto
+  // `whatsapp`, e depois de uma troca de canal o `whatsapp.id` hidratado pode ser o antigo.
+  const freeEntryExpiresAt = useFreeEntryWindow({
+    ticketId,
+    channel: ch,
+    contactId: ticketData?.contactId ?? null,
+    whatsappId: ticketData?.whatsappId ?? whatsappId,
+  });
+  // useMemo: o contador de 24h re-renderiza a caixa a cada segundo.
+  const freeEntryUntil = useMemo(
+    () =>
+      freeEntryExpiresAt
+        ? formatDateTime(freeEntryExpiresAt, { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })
+        : null,
+    [freeEntryExpiresAt]
+  );
 
   // Modo híbrido disponível: canal WABA em coexistência, com canal vinculado CONNECTED.
   // Habilita a oferta de "enviar pela conexão vinculada" quando a janela 24h fecha.
@@ -636,10 +749,18 @@ export function MessageInput({
   const [summaryResultOpen, setSummaryResultOpen] = useState(false);
   const [noteModal, setNoteModal] = useState(false);
   const [productPickerOpen, setProductPickerOpen] = useState(false);
+  // "Enviar convite do WebChat": só nos canais oficiais, fora de grupo, com o convite pronto na empresa.
+  const [webchatInviteOpen, setWebchatInviteOpen] = useState(false);
+  const webchatInvite = useWebchatInviteMessage(isWebchatInviteSendChannel(ch) && !isGroup);
   const [noteText, setNoteText] = useState("");
   const [noteSaving, setNoteSaving] = useState(false);
   const [noteFile, setNoteFile] = useState<File | null>(null);
   const [noteFilePreview, setNoteFilePreview] = useState<string | null>(null);
+  // Mídia da nota que o aparelho não deixou ler: o aviso fica DENTRO do diálogo
+  // (com ele aberto, o Radix bloqueia toque nos avisos da página).
+  const [noteFileUnreadable, setNoteFileUnreadable] = useState(false);
+  // Escolha em leitura quando o diálogo fecha: o anexo atrasado é descartado.
+  const notePickSeqRef = useRef(0);
   const [noteDropActive, setNoteDropActive] = useState(false);
   const [noteGalleryOpen, setNoteGalleryOpen] = useState(false);
   const [noteGalleryItems, setNoteGalleryItems] = useState<GalleryItem[]>([]);
@@ -695,12 +816,19 @@ export function MessageInput({
     setAutoSuggestion("");
     setAutoSuggestionDismissed(false);
     if (!copilotAutoSuggest || !ticketId) return;
+    // Provedor de IA falhou há pouco nesta aba: disparo automático suspenso por
+    // 10 min (senão cada mensagem recebida repetia a falha). O manual segue.
+    if (isCopilotAutoPaused("suggest")) return;
     let cancelled = false;
     setAutoSuggesting(true);
     suggestReply(ticketId).then((result) => {
+      // Provedor respondeu: encerra a pausa do disparo automático (mesmo se a
+      // tela já trocou de atendimento, a falha que a causou passou).
+      clearCopilotAutoPause("suggest");
       if (!cancelled) setAutoSuggestion(result.suggestion);
-    }).catch(() => {
+    }).catch((err: unknown) => {
       // silently fail — auto-suggest is optional
+      noteCopilotAutoFailure("suggest", err);
     }).finally(() => {
       if (!cancelled) setAutoSuggesting(false);
     });
@@ -724,7 +852,10 @@ export function MessageInput({
 
   // ── WABA modal state ──────────────────────────────────────────────────
   const [wabaModal, setWabaModal] = useState<WabaModalType>("");
-  const closeWaba = () => setWabaModal("");
+  // Cada abertura/fechamento da janela de templates invalida a pré-seleção da
+  // mensagem rápida que ainda esperava a lista carregar.
+  const templateOpenSeqRef = useRef(0);
+  const closeWaba = () => { templateOpenSeqRef.current += 1; setWabaModal(""); };
 
   // ── Group / Interactive modal state ───────────────────────────────────
   const [groupModal, setGroupModal] = useState<GroupModalType>("");
@@ -818,8 +949,6 @@ export function MessageInput({
   }>({ street1: "", street2: "", city: "", state: "", zip: "", country: "", type: "HOME" });
   // Location Request
   const [wLocReq, setWLocReq] = useState({ msg: "" });
-  // Location
-  const [wLoc, setWLoc] = useState({ lat: "", lng: "", name: "", addr: "" });
   // Flow
   const [wFlow, setWFlow] = useState<{
     headerType: HeaderType; headerText: string; headerLink: string;
@@ -843,7 +972,8 @@ export function MessageInput({
   const [igGeneric, setIgGeneric] = useState<{ elements: GenericTemplateElement[] }>({ elements: [emptyGenericElement()] });
   const [igText, setIgText] = useState("");
   const [igPrivate, setIgPrivate] = useState({ commentId: "", message: "" });
-  const [igPrivateMedia, setIgPrivateMedia] = useState<InstagramMedia[]>([]);
+  const igPrivateMediaPages = useInstagramMediaPages();
+  const igPrivateMedia = igPrivateMediaPages.items;
   const [igPrivateComments, setIgPrivateComments] = useState<InstagramComment[]>([]);
   const [igPrivateSelectedMedia, setIgPrivateSelectedMedia] = useState("");
   const [igPrivateLoading, setIgPrivateLoading] = useState(false);
@@ -881,11 +1011,22 @@ export function MessageInput({
   const [msgrReceipt, setMsgrReceipt] = useState({
     recipientName: '',
     orderNumber: '',
-    currency: 'BRL',
+    currency: regionCurrency,
     paymentMethod: '',
     totalCost: '',
     items: [{ title: '', price: '', quantity: '1' }]
   });
+  // Moeda do recibo nasce na moeda da empresa (BRL sem Região). Se a Região chega
+  // depois da montagem, o campo acompanha só enquanto o operador não o trocou.
+  const receiptCurrencyDefaultRef = useRef(regionCurrency);
+  useEffect(() => {
+    const prev = receiptCurrencyDefaultRef.current;
+    if (prev === regionCurrency) return;
+    receiptCurrencyDefaultRef.current = regionCurrency;
+    setMsgrReceipt((p) => (p.currency === prev ? { ...p, currency: regionCurrency } : p));
+  }, [regionCurrency]);
+  // Textos ao cliente da Região (voo único; só busca com idioma configurado).
+  useEffect(() => { void ensureRegionTexts(); }, [ensureRegionTexts]);
   const [msgrTag, setMsgrTag] = useState<{ tag: string; message: string }>({
     tag: 'ACCOUNT_UPDATE',
     message: ''
@@ -925,6 +1066,8 @@ export function MessageInput({
   const [loadingHubTemplates, setLoadingHubTemplates] = useState(false);
   const [selectedHubTemplate, setSelectedHubTemplate] = useState<WabaTemplate | null>(null);
   const [hubTemplateSearch, setHubTemplateSearch] = useState("");
+  const hubTemplateOpenSeqRef = useRef(0);
+  const closeHubTemplates = () => { hubTemplateOpenSeqRef.current += 1; setHubTemplateModal(false); setSelectedHubTemplate(null); };
 
   // Email modal
   const [emailModal, setEmailModal] = useState(false);
@@ -934,6 +1077,8 @@ export function MessageInput({
   const [emailSubject, setEmailSubject] = useState("");
   const [emailBody, setEmailBody] = useState("");
   const [emailAttachments, setEmailAttachments] = useState<{ filename: string; content: string; contentType?: string }[]>([]);
+  // Anexo que o aparelho não deixou ler: aviso DENTRO do diálogo do e-mail (modal).
+  const [emailAttachUnreadable, setEmailAttachUnreadable] = useState(false);
   const [loadingEmail, setLoadingEmail] = useState(false);
   const emailFileRef = useRef<HTMLInputElement>(null);
 
@@ -949,6 +1094,22 @@ export function MessageInput({
   const [galleryPage, setGalleryPage] = useState(1);
   const [galleryHasMore, setGalleryHasMore] = useState(false);
   const [galleryLoadingMore, setGalleryLoadingMore] = useState(false);
+  // Pastas da galeria (PLANO_GALERIA_PASTAS): "all" = todos, "none" = sem pasta, número = a pasta.
+  // A seleção já feita fica ao trocar de pasta (dá para juntar arquivos de pastas diferentes).
+  const tGalleryPage = useTranslations("galeriaPage");
+  const [galleryFolderFilter, setGalleryFolderFilter] = useState<GalleryFolderFilterValue>("all");
+  // Só busca as pastas com o modal aberto; a contagem segue o MESMO filtro de tipo da lista (D17).
+  const galleryFolders = useGalleryFolders({
+    enabled: galleryModal,
+    fileType: galleryFilter === "all" ? undefined : galleryFilter,
+  });
+  // Geração da lista: toda página 1 (e toda troca de pasta/abertura) cria uma nova; resposta
+  // de busca/tipo/pasta anterior (página 1 ou "Carregar mais") é descartada — nunca substitui
+  // nem é anexada à lista atual (o atendente mandaria o arquivo errado).
+  const galleryRequestIdRef = useRef(0);
+  // Filtros da página 1 que está na tela: o "Carregar mais" continua a MESMA lista, mesmo com
+  // o texto novo da busca ainda no debounce.
+  const galleryListParamsRef = useRef<Omit<NonNullable<Parameters<typeof fetchGallery>[0]>, "pageNumber"> | null>(null);
 
   // Template header gallery picker
   const [tplGalleryOpen, setTplGalleryOpen] = useState(false);
@@ -958,13 +1119,19 @@ export function MessageInput({
   const [captionFile, setCaptionFile] = useState<File | null>(null);
   const [captionText, setCaptionText] = useState("");
 
-  // Location dialog
-  const [locationModal, setLocationModal] = useState(false);
-  const [locLat, setLocLat] = useState("");
-  const [locLng, setLocLng] = useState("");
-  const [locName, setLocName] = useState("");
-  const [locAddr, setLocAddr] = useState("");
-  const [sendingLocation, setSendingLocation] = useState(false);
+  // Janela de envio de localização (docs/PLANO_LOCALIZACAO_ENVIO_ENCAMINHAR.md): os dois
+  // itens "Localização" (o geral e o do menu WABA) e a mensagem rápida de localização abrem
+  // a mesma janela. `route` escolhe a rota de envio e `initial` vem da mensagem rápida; os
+  // dois ficam como estão ao fechar (o título não troca durante a animação de saída).
+  const [locationDialogOpen, setLocationDialogOpen] = useState(false);
+  const [locationDialogTarget, setLocationDialogTarget] = useState<{
+    route: "general" | "waba";
+    initial: Partial<LocationPickerValue> | null;
+  }>({ route: "general", initial: null });
+  const openLocationDialog = (route: "general" | "waba", initial: Partial<LocationPickerValue> | null = null) => {
+    setLocationDialogTarget({ route, initial });
+    setLocationDialogOpen(true);
+  };
 
   // vCard dialog
   const [vcardModal, setVcardModal] = useState(false);
@@ -1059,8 +1226,13 @@ export function MessageInput({
   };
 
   // ── Effects ───────────────────────────────────────────────────────────
-  useEffect(() => {
+  // Recarregável: o "Salvar este local" da janela de localização chama de novo quando o
+  // servidor não devolve a linha criada. A sequência descarta a resposta de uma carga antiga.
+  const quickRepliesLoadSeqRef = useRef(0);
+  const loadQuickReplies = useCallback(() => {
+    const seq = ++quickRepliesLoadSeqRef.current;
     fetchQuickReplies().then(({ data }) => {
+      if (seq !== quickRepliesLoadSeqRef.current) return;
       const all: QuickReply[] = Array.isArray(data) ? data : [];
       const uid = user?.userId;
       // Públicas aparecem para todos; privadas só para o dono.
@@ -1074,6 +1246,9 @@ export function MessageInput({
       setQuickReplies(filtered);
     }).catch(() => {});
   }, [user?.userId]);
+  useEffect(() => {
+    loadQuickReplies();
+  }, [loadQuickReplies]);
 
   const filterRepliesByChannel = useCallback((replies: QuickReply[]) =>
     replies.filter((r) => {
@@ -1082,9 +1257,24 @@ export function MessageInput({
       if (mt === "buttons") return isBaileys || isZapo || isUazapi || isEvoGo || isWabaLike || isHubWaba;
       if (mt === "list")    return isBaileys || isZapo || isUazapi || isEvoGo || isWabaLike || isHubWaba;
       if (mt === "template") return isWabaLike || isHubWaba;
+      // Localização aparece em todo canal: sem envio de localização, vira texto com os links.
+      if (mt === "location") return true;
       return true;
     }),
   [isBaileys, isZapo, isUazapi, isEvoGo, isWabaLike, isHubWaba]);
+
+  // Mensagens rápidas de template: viram atalhos no topo da janela de templates,
+  // que abre também com a janela de 24h fechada (quando a caixa trava e o "/" não abre).
+  const templateQuickReplies = useMemo(() =>
+    quickReplies.flatMap((r) => {
+      if ((r.messageType ?? "text") !== "template") return [];
+      const ref = parseQuickReplyTemplate(r.templateJson);
+      return ref ? [{ id: r.id, key: (r.key || "").replace(/^\//, ""), ref }] : [];
+    }),
+  [quickReplies]);
+
+  // Atalhos já usados: o "Salvar este local" da janela de localização recusa repetido.
+  const quickReplyKeys = useMemo(() => quickReplies.map((r) => r.key || ""), [quickReplies]);
 
   useEffect(() => {
     if (text.startsWith("/")) {
@@ -1327,16 +1517,30 @@ export function MessageInput({
     }
     // Mensagem rápida estruturada preparada (botões/lista): dispara o envio interativo.
     // O corpo (body) vem do que estiver na caixa de texto — editável, igual à legenda da mídia.
+    // Os anexos dela saem antes, um por vez, e os botões/lista por último (ficam embaixo,
+    // onde o cliente clica) — só depois da validação, para não sair anexo sem os botões.
     if (pendingStructured) {
       const { reply, mt } = pendingStructured;
-      sendStructuredQuickReply(reply, mt, text.trim());
+      const filenames = tenantId ? [...pendingQrMedias] : [];
+      const isVoice = pendingQrVoice;
+      const quoted = replyTo ?? undefined;
+      sendStructuredQuickReply(reply, mt, text.trim(), filenames.length > 0
+        ? async () => {
+            await sendQuickReplyMedias(filenames, isVoice, quoted, true);
+            await new Promise((resolve) => setTimeout(resolve, 500));
+          }
+        : undefined);
       setPendingStructured(null);
+      cancelPendingQrMedia();
       setText(""); onClearReply(); textareaRef.current?.focus();
       return;
     }
     if (files.length > 0) {
       const caption = applySignature(text.trim());
-      files.forEach((file) => { onSendMedia(file, caption, replyTo ?? undefined); });
+      // Só o envio de UM arquivo leva o texto que esperava como legenda (WABA, D13):
+      // com vários, o texto sai antes, separado (os envios correm em paralelo).
+      const allowGroupCaption = files.length === 1;
+      files.forEach((file) => { onSendMedia(file, caption, replyTo ?? undefined, undefined, allowGroupCaption ? { allowGroupCaption: true } : undefined); });
       setFiles([]); setText(""); onClearReply(); textareaRef.current?.focus();
       cancelPendingQrMedia();
       return;
@@ -1387,26 +1591,7 @@ export function MessageInput({
     }
     // Send pending quick-reply media as SEPARATE messages with a small delay between each
     if (pendingQrMedias.length > 0 && tenantId) {
-      const filenames = [...pendingQrMedias];
-      const isVoice = pendingQrVoice;
-      const sendSequentially = async () => {
-        for (let i = 0; i < filenames.length; i++) {
-          if (i > 0) await new Promise((resolve) => setTimeout(resolve, 500));
-          const filename = filenames[i];
-          const mediaUrl = `${apiBaseUrl}/public/${tenantId}/fastreply/${filename}`;
-          try {
-            const resp = await fetch(mediaUrl);
-            if (!resp.ok) throw new Error("fetch failed");
-            const blob = await resp.blob();
-            const mime = blob.type || (isVoice ? "audio/mpeg" : "application/octet-stream");
-            const file = new File([blob], filename, { type: mime });
-            onSendMedia(file, "", replyTo ?? undefined);
-          } catch {
-            toast.error(t("errorLoadingQuickReplyMedia"));
-          }
-        }
-      };
-      sendSequentially();
+      sendQuickReplyMedias([...pendingQrMedias], pendingQrVoice, replyTo ?? undefined, false);
       cancelPendingQrMedia();
     }
     if (!trimmed && pendingQrMedias.length === 0) return;
@@ -1446,10 +1631,11 @@ export function MessageInput({
     }
   };
 
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
     e.target.value = "";
+    const ticketAtPick = useTicketStore.getState().currentTicket?.id;
     // Instagram so suporta image/video/audio — usuario pode burlar accept="image/*" pelo seletor.
     if (isInstagram) {
       const prefix = (file.type || "").split("/")[0];
@@ -1475,21 +1661,29 @@ export function MessageInput({
         return;
       }
     }
-    setFiles((prev) => [...prev, file].slice(0, 30));
+    // Android: imagem/vídeo do seletor de mídia pode chegar ilegível (vide lib/picked-file).
+    const ready = await preparePickedFile(file, pickedFilesBudget(files), { preparingMessage: t("pickedFilePreparing") });
+    if (!ready) {
+      notifyUnreadablePickedFile(t("pickedFileUnreadable"), t("pickedFileOpenFiles"), fileInputRef.current);
+      return;
+    }
+    if (useTicketStore.getState().currentTicket?.id !== ticketAtPick) return;
+    setFiles((prev) => [...prev, ready].slice(0, 30));
   };
 
   const handleConfirmCaption = () => {
     if (!captionFile) return;
-    onSendMedia(captionFile, applySignature(captionText), replyTo ?? undefined);
+    onSendMedia(captionFile, applySignature(captionText), replyTo ?? undefined, undefined, { allowGroupCaption: true });
     setCaptionModal(false);
     setCaptionFile(null);
     setCaptionText("");
     setText(""); onClearReply();
   };
 
-  const handleMultiFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleMultiFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const newFiles = Array.from(e.target.files || []);
     if (newFiles.length === 0) return;
+    const ticketAtPick = useTicketStore.getState().currentTicket?.id;
     const MAX_FILES = 30;
     const MAX_TOTAL_SIZE = Math.floor(1.9 * 1024 * 1024 * 1024);
     // Instagram so suporta image/video/audio — descartar documentos antes de stagear.
@@ -1530,18 +1724,46 @@ export function MessageInput({
       if (validFiles.length < filteredNewFiles.length)
         toast.warning(t("someFilesIgnoredTotal", { max: MAX_FILES, size: "1.9GB" }));
     }
-    if (validFiles.length > 0)
-      setFiles((prev) => [...prev, ...validFiles].slice(0, MAX_FILES));
     e.target.value = "";
+    if (validFiles.length === 0) return;
+    // Android: imagem/vídeo do seletor de mídia pode chegar ilegível (vide lib/picked-file).
+    const { ready, unreadable } = await preparePickedFiles(validFiles, pickedFilesBudget(files), { preparingMessage: t("pickedFilePreparing") });
+    if (unreadable > 0)
+      notifyUnreadablePickedFile(t("pickedFileUnreadable"), t("pickedFileOpenFiles"), multiFileInputRef.current);
+    if (useTicketStore.getState().currentTicket?.id !== ticketAtPick) return;
+    if (ready.length > 0)
+      setFiles((prev) => [...prev, ...ready].slice(0, MAX_FILES));
   };
 
   const removeFile = (index: number) => setFiles((prev) => prev.filter((_, i) => i !== index));
+
+  // Anexos da mensagem rápida, cada um como mensagem separada e 500 ms entre eles.
+  // waitEach = espera cada envio terminar antes do próximo (antes dos botões/lista).
+  const sendQuickReplyMedias = async (filenames: string[], isVoice: boolean, quotedMsg: Message | undefined, waitEach: boolean) => {
+    for (let i = 0; i < filenames.length; i++) {
+      if (i > 0) await new Promise((resolve) => setTimeout(resolve, 500));
+      const filename = filenames[i];
+      const mediaUrl = `${apiBaseUrl}/public/${tenantId}/fastreply/${filename}`;
+      try {
+        // Sem cópia local o backend redireciona para o S3/R2, e sem CORS a leitura direta falhava.
+        const blob = await fetchMediaBlob(mediaUrl, { credentials: "same-origin" });
+        const mime = blob.type || (isVoice ? "audio/mpeg" : "application/octet-stream");
+        const file = new File([blob], filename, { type: mime });
+        // "Mensagem de Voz" da resposta rápida: só os áudios dela vão como voz.
+        const sending = onSendMedia(file, "", quotedMsg, false, { voice: isVoice && mime.startsWith("audio/") });
+        if (waitEach) await sending;
+      } catch {
+        toast.error(t("errorLoadingQuickReplyMedia"));
+      }
+    }
+  };
 
   // Despacha a mensagem rápida estruturada (botões / lista) pelo canal correto.
   // Chamada a partir do handleSend (ao clicar em Enviar), não na seleção.
   // bodyOverride = corpo editado na caixa de texto. Reusa os mesmos senders dos
   // modais (sendWabaButtons/List, senders BSP, interactive baileys, uazapi-menu).
-  const sendStructuredQuickReply = async (reply: QuickReply, mt: "buttons" | "list", bodyOverride?: string) => {
+  // beforeDispatch = roda depois da validação e logo antes do envio (anexos da mensagem rápida).
+  const sendStructuredQuickReply = async (reply: QuickReply, mt: "buttons" | "list", bodyOverride?: string, beforeDispatch?: () => Promise<void>) => {
     // Mesma cura dos modais WABA: aqui o payload sai do wabaBase() sem passar por
     // nenhum guard, entao um ticket ainda sem tokenAPI (aceito pelo card da lista)
     // mandaria tokenApi vazio e o backend responderia ERR_WHATSAPP_TENANTID.
@@ -1562,6 +1784,7 @@ export function MessageInput({
         // Botões reply do WhatsApp exigem corpo não-vazio; usa o título do cartão como fallback.
         const body = applySignature(rawBody || (parsed.title || "").trim() || " ");
         const footer = (parsed.footer || "").trim();
+        await beforeDispatch?.();
         if (isWaba) {
           const payload: Record<string, string> = {};
           titles.forEach((tt, i) => { payload[`button${i + 1}`] = tt; });
@@ -1609,6 +1832,7 @@ export function MessageInput({
       if (!buttonText || sections.length === 0) { toast.warning(t("fillMsgListTitleSection")); return; }
       const body = applySignature(rawBody || listHeader || " ");
       const footer = (parsed.footer || "").trim();
+      await beforeDispatch?.();
       if (isWaba) {
         await sendWabaList({ ...wabaBase(), body, header: listHeader, footer, button_text: buttonText, sectionsJson: JSON.stringify(sections) });
       } else if (isGupshup) {
@@ -1655,11 +1879,43 @@ export function MessageInput({
     // só acontece ao clicar em Enviar. Canais sem path interativo (hub_waba etc.)
     // caem no comportamento de texto abaixo.
     if ((mt === "buttons" || mt === "list") && (isWaba || isGupshup || isDialog360 || isBaileys || isZapo || isUazapi || isEvoGo)) {
-      cancelPendingQrMedia(); // descarta mídia de uma seleção anterior — não se mistura com estruturada
+      // Anexos desta mensagem rápida (os de uma seleção anterior saem): vão antes dos
+      // botões/lista no Enviar. Antes eram descartados e só os botões chegavam.
+      const filenames = quickReplyMediaFilenames(reply);
+      setPendingQrMedias(filenames);
+      setPendingQrVoice(filenames.length > 0 && reply.voice === "enabled");
       setPendingStructured({ reply, mt });
       setText(reply.message && reply.message !== "null" ? reply.message : "");
       textareaRef.current?.focus();
       return;
+    }
+    // Template: nunca vira texto (era o "só chega a mensagem"). Abre a janela de
+    // envio de template com ele selecionado; as variáveis são preenchidas lá.
+    // A caixa só tinha o "/atalho" da busca, então é limpa.
+    if (mt === "template" && (isWabaLike || isHubWaba)) {
+      setPendingStructured(null);
+      cancelPendingQrMedia();
+      setText("");
+      const ref = parseQuickReplyTemplate(reply.templateJson);
+      if (!ref) { toast.warning(t("quickReplyTemplateInvalid")); return; }
+      if (isHubWaba) void openQuickReplyHubTemplate(ref);
+      else void openQuickReplyTemplate(ref);
+      return;
+    }
+    // Localização: abre a janela de envio já preenchida (não envia sozinha, como botões,
+    // lista e template). Só em canal com envio de localização e com a caixa livre; fora
+    // disso, ou com o texto salvo ilegível, cai no texto abaixo (os links vão para a caixa).
+    // WABA Meta vai pela rota dele; Dialog360, Gupshup e os demais pela geral, em que o
+    // servidor resolve o canal do atendimento.
+    if (mt === "location" && (supportsLocation || isWaba) && !isDisabled && !hybridTextOnly) {
+      const parsed = parseQuickReplyLocationMessage(reply.message);
+      if (parsed) {
+        setPendingStructured(null);
+        cancelPendingQrMedia();
+        setText("");
+        openLocationDialog(isWaba ? "waba" : "general", locationValueFrom(parsed));
+        return;
+      }
     }
     // Troca de intenção: se havia uma estruturada preparada, descarta.
     setPendingStructured(null);
@@ -1667,21 +1923,10 @@ export function MessageInput({
     // Mesmo sem texto precisa limpar a caixa: o que está lá é o token "/atalho"
     // da própria busca — sem isso ele seguiria junto como mensagem de texto.
     setText(reply.message && reply.message !== "null" ? reply.message : "");
-    // Resolve media filenames — prefer mediasJson (multiple), fallback to media (single)
-    let filenames: string[] = [];
-    if (reply.mediasJson) {
-      try {
-        const parsed = JSON.parse(reply.mediasJson);
-        if (Array.isArray(parsed) && parsed.length > 0) filenames = parsed;
-      } catch {}
-    }
-    if (filenames.length === 0 && reply.media) {
-      filenames = [reply.media];
-    }
-    if (filenames.length > 0) {
-      setPendingQrMedias(filenames);
-      setPendingQrVoice(reply.voice === "enabled");
-    }
+    // Só os anexos desta mensagem rápida: os de uma escolha anterior saem (antes ficavam e iam junto).
+    const filenames = quickReplyMediaFilenames(reply);
+    setPendingQrMedias(filenames);
+    setPendingQrVoice(filenames.length > 0 && reply.voice === "enabled");
     textareaRef.current?.focus();
   };
 
@@ -1855,7 +2100,8 @@ export function MessageInput({
 
   const sendAudioPreview = () => {
     if (!audioPreview) return;
-    onSendMedia(audioPreview.file, "", replyTo ?? undefined);
+    // Gravador: sempre mensagem de voz (o arquivo do clipe segue como cada canal já manda).
+    onSendMedia(audioPreview.file, "", replyTo ?? undefined, false, { voice: true });
     URL.revokeObjectURL(audioPreview.url);
     setAudioPreview(null);
     onClearReply();
@@ -1871,60 +2117,113 @@ export function MessageInput({
 
   // ── Gallery handlers ──────────────────────────────────────────────────
   const handleOpenGallery = () => {
+    // Nova abertura: descarta resposta em voo da abertura anterior.
+    galleryRequestIdRef.current++;
+    galleryListParamsRef.current = null;
+    setGalleryLoadingMore(false);
     setGallerySelected([]);
     setGalleryCaptions({});
     setGallerySearch("");
     setGalleryFilter("all");
+    setGalleryFolderFilter("all");
     setGalleryItems([]);
     setGalleryHasMore(false);
     setGalleryPage(1);
     setGalleryModal(true);
   };
 
+  // Troca de pasta: invalida na hora a resposta em voo da pasta anterior e esconde a lista
+  // antiga até a página 1 da nova chegar (o efeito abaixo refaz a página 1). A seleção fica.
+  const changeGalleryFolderFilter = (value: GalleryFolderFilterValue) => {
+    if (value === galleryFolderFilter) return;
+    galleryRequestIdRef.current++;
+    setGalleryLoadingMore(false);
+    setLoadingGallery(true);
+    setGalleryFolderFilter(value);
+  };
+
+  // Pasta excluída por outro usuário/aba: avisa, recarrega as pastas e volta para "Todos".
+  // Por ref (atualizada a cada render) para as respostas assíncronas usarem o estado mais recente.
+  const galleryFolderMissingRef = useRef<() => void>(() => undefined);
+  useEffect(() => {
+    galleryFolderMissingRef.current = () => {
+      toast.warning(tGalleryPage("folderMissing"));
+      if (galleryModal) void galleryFolders.refresh();
+      changeGalleryFolderFilter("all");
+    };
+  });
+
+  // As pastas sumiram (backend sem pastas ou falha ao carregar): o filtro não pode ficar preso
+  // numa pasta que não aparece mais na tela.
+  useEffect(() => {
+    if (!galleryFolders.loading && !galleryFolders.available && galleryFolderFilter !== "all") {
+      setGalleryFolderFilter("all");
+    }
+  }, [galleryFolders.loading, galleryFolders.available, galleryFolderFilter]);
+
   const loadMoreGallery = async () => {
-    if (galleryLoadingMore || !galleryHasMore) return;
+    const params = galleryListParamsRef.current;
+    if (galleryLoadingMore || !galleryHasMore || !params) return;
+    // Mesma geração da página 1 que está na tela: se a busca/tipo/pasta mudar no meio, a
+    // resposta é descartada (nunca anexa a página 2 de outra pasta à lista atual).
+    const reqId = galleryRequestIdRef.current;
     setGalleryLoadingMore(true);
     try {
       const nextPage = galleryPage + 1;
-      const { data, hasMore } = await fetchGallery({
-        pageNumber: nextPage,
-        searchParam: gallerySearch || undefined,
-        fileType: galleryFilter === "all" ? undefined : galleryFilter,
-      });
+      const { data, hasMore } = await fetchGallery({ pageNumber: nextPage, ...params });
+      if (reqId !== galleryRequestIdRef.current) return;
       setGalleryItems((prev) => [...prev, ...data]);
       setGalleryHasMore(hasMore);
       setGalleryPage(nextPage);
-    } catch {
-      toast.error(t("errorLoadingGallery"));
+    } catch (err) {
+      if (reqId !== galleryRequestIdRef.current) return;
+      if (isGalleryFolderMissingError(err)) galleryFolderMissingRef.current();
+      else toast.error(t("errorLoadingGallery"));
     } finally {
-      setGalleryLoadingMore(false);
+      if (reqId === galleryRequestIdRef.current) setGalleryLoadingMore(false);
     }
   };
 
-  // Debounced page-1 fetch on open + search/filter change (server-side).
+  // Debounced page-1 fetch on open + search/filter/folder change (server-side).
   useEffect(() => {
     if (!galleryModal) return;
     const delay = gallerySearch ? 300 : 0;
     const tid = setTimeout(async () => {
+      const reqId = ++galleryRequestIdRef.current;
+      setGalleryLoadingMore(false);
       setLoadingGallery(true);
+      // A pasta só vai na requisição fora de "Todos" (backend sem pastas nunca a recebe).
+      const params = {
+        searchParam: gallerySearch || undefined,
+        fileType: galleryFilter === "all" ? undefined : galleryFilter,
+        ...(galleryFolderFilter !== "all" ? { folderId: galleryFolderFilter } : {}),
+      };
       try {
-        const { data, hasMore } = await fetchGallery({
-          pageNumber: 1,
-          searchParam: gallerySearch || undefined,
-          fileType: galleryFilter === "all" ? undefined : galleryFilter,
-        });
+        const { data, hasMore } = await fetchGallery({ pageNumber: 1, ...params });
+        if (reqId !== galleryRequestIdRef.current) return;
+        galleryListParamsRef.current = params;
         setGalleryItems(data);
         setGalleryHasMore(hasMore);
         setGalleryPage(1);
-      } catch {
-        toast.error(t("errorLoadingGallery"));
+      } catch (err) {
+        if (reqId !== galleryRequestIdRef.current) return;
+        // Em qualquer falha a lista anterior sai da tela: com o chip de outra pasta/busca já
+        // marcado, o atendente poderia mandar um arquivo que não é o que está filtrando.
+        galleryListParamsRef.current = null;
+        setGalleryItems([]);
+        setGalleryHasMore(false);
+        if (isGalleryFolderMissingError(err)) {
+          galleryFolderMissingRef.current();
+        } else {
+          toast.error(t("errorLoadingGallery"));
+        }
       } finally {
-        setLoadingGallery(false);
+        if (reqId === galleryRequestIdRef.current) setLoadingGallery(false);
       }
     }, delay);
     return () => clearTimeout(tid);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [galleryModal, gallerySearch, galleryFilter]);
+  }, [galleryModal, gallerySearch, galleryFilter, galleryFolderFilter]);
 
   const handleSendGalleryFile = async () => {
     if (!gallerySelected.length) return;
@@ -2032,11 +2331,62 @@ export function MessageInput({
     } catch (err) { if (handleTicketAccessDenied(err, useTicketStore.getState().currentTicket?.id ?? 0, tChat("noTicketAccess"))) return; toast.error(t("errorSendingWabaList")); }
   };
 
+  // Abre a janela de templates. O clique dos botões chama sem argumento (o evento
+  // do clique NÃO pode chegar aqui como parâmetro: ver openQuickReplyTemplate).
   const handleOpenTemplates = async () => {
+    templateOpenSeqRef.current += 1;
     setWabaModal("templates");
     setSelectedTemplate(null);
     setTemplateSearch("");
-    if (wabaTemplates.length > 0) return;
+    await loadWabaTemplates();
+  };
+
+  // Mensagem rápida de template: mesma janela, com o template já escolhido
+  // (ou a lista filtrada pelo nome, quando falta decidir o idioma).
+  const openQuickReplyTemplate = async (ref: QuickReplyTemplateRef) => {
+    const seq = ++templateOpenSeqRef.current;
+    setWabaModal("templates");
+    setSelectedTemplate(null);
+    setTemplateSearch("");
+    const list = await loadWabaTemplates();
+    // Janela fechada/reaberta enquanto a lista carregava: não mexe em nada.
+    if (!list || seq !== templateOpenSeqRef.current) return;
+    applyQuickReplyTemplate(list, ref);
+  };
+
+  const applyQuickReplyTemplate = (list: WabaTemplate[], ref: QuickReplyTemplateRef) => {
+    const match = matchQuickReplyTemplate(list, ref);
+    if (match.kind === "found") {
+      setSelectedTemplate(match.template);
+      return;
+    }
+    if (match.kind === "notFound") {
+      // Lista vazia = a carga já avisou (ou a conexão não tem template nenhum).
+      if (list.length > 0) toast.warning(t("quickReplyTemplateNotFound", { name: ref.name }));
+      return;
+    }
+    // Existe com esse nome: mostra só ele na lista para o atendente escolher o idioma.
+    setTemplateCategoryFilter("all");
+    setTemplateSearch(match.name);
+    toast.info(match.kind === "languageMissing"
+      ? t("quickReplyTemplateLanguageMissing", { name: match.name, language: ref.language })
+      : t("quickReplyTemplatePickLanguage", { name: match.name }));
+  };
+
+  // Carrega a lista de templates da conexão uma vez por atendimento. Devolve a
+  // lista (já ordenada) ou null quando não deu para carregar — o aviso já saiu.
+  // Quem chega com uma carga no ar espera a MESMA: uma 2ª carga terminando depois
+  // reaplicaria a pré-seleção por cima do template que o atendente já escolheu.
+  const wabaTemplatesLoadRef = useRef<Promise<WabaTemplate[] | null> | null>(null);
+  const loadWabaTemplates = (): Promise<WabaTemplate[] | null> => {
+    if (wabaTemplates.length > 0) return Promise.resolve(wabaTemplates);
+    if (!wabaTemplatesLoadRef.current) {
+      wabaTemplatesLoadRef.current = fetchWabaTemplates().finally(() => { wabaTemplatesLoadRef.current = null; });
+    }
+    return wabaTemplatesLoadRef.current;
+  };
+
+  const fetchWabaTemplates = async (): Promise<WabaTemplate[] | null> => {
     setLoadingTemplates(true);
     try {
       // WABA lista por tokenAPI, e o ticket pode chegar sem ele (veio da lista,
@@ -2045,7 +2395,7 @@ export function MessageInput({
       // token curado fica no ref, entao o ENVIO logo em seguida ja o encontra.
       // BSPs (Gupshup/Dialog360) listam por whatsappId, entao nao precisam.
       const effectiveTokenApi = isGupshup || isDialog360 ? tokenApi : await ensureWabaToken();
-      if (!effectiveTokenApi && !(isGupshup || isDialog360)) { toast.warning(t("wabaTokenNotFound")); return; }
+      if (!effectiveTokenApi && !(isGupshup || isDialog360)) { toast.warning(t("wabaTokenNotFound")); return null; }
       // BSPs (Gupshup/Dialog360) usam suas próprias APIs de templates;
       // useChannelSender já injeta o getTemplates correto por canal.
       const list = senders?.getTemplates
@@ -2053,12 +2403,18 @@ export function MessageInput({
             isGupshup || isDialog360 ? whatsappId : effectiveTokenApi,
           )
         : await getWabaTemplates(effectiveTokenApi);
-      setWabaTemplates([...list].sort((a, b) => (a.name || "").toLowerCase().localeCompare((b.name || "").toLowerCase())));
+      const sorted: WabaTemplate[] = [...list].sort((a, b) => (a.name || "").toLowerCase().localeCompare((b.name || "").toLowerCase()));
+      setWabaTemplates(sorted);
+      return sorted;
     } catch (err: any) {
+      const rateLimitedText = metaRateLimitedMessage(err, tCommon);
+      if (rateLimitedText) { toast.error(rateLimitedText); return null; }
+      if (isMetaTokenUnauthorized(err)) { toast.error(tCommon("metaTokenInvalidReconnect")); return null; }
       const data = err?.response?.data;
       const upstreamStatus = data?.upstreamStatus ?? err?.response?.status;
       const reason = data?.message || data?.error || err?.message;
       toast.error(`${t("errorLoadingTemplates")}${upstreamStatus ? ` (HTTP ${upstreamStatus})` : ""}${reason ? `: ${reason}` : ""}`);
+      return null;
     }
     finally { setLoadingTemplates(false); }
   };
@@ -2425,25 +2781,29 @@ export function MessageInput({
     } catch (err) { if (handleTicketAccessDenied(err, useTicketStore.getState().currentTicket?.id ?? 0, tChat("noTicketAccess"))) return; toast.error(t("errorSendingWabaLocationReq")); }
   };
 
-  const handleSendWabaLocation = async () => {
-    if (!(await ensureWabaToken())) { toast.warning(t("wabaTokenNotFound")); return; }
-    const lat = parseFloat(wLoc.lat); const lng = parseFloat(wLoc.lng);
-    if (isNaN(lat) || isNaN(lng)) { toast.warning(t("invalidLatLng")); return; }
+  // Envio da janela de localização pela rota WABA/BSP (item do menu WABA e a mensagem
+  // rápida no WABA Meta). A janela só chama com coordenada válida. true = enviada (a
+  // janela fecha); false = fica aberta, com o aviso dado aqui.
+  const submitLocationWaba = async (point: LocationPoint): Promise<boolean> => {
+    if (!(await ensureWabaToken())) { toast.warning(t("wabaTokenNotFound")); return false; }
     try {
       const locPayload = {
-        latitude: lat, longitude: lng,
-        name: wLoc.name || undefined,
-        address: wLoc.addr || undefined,
+        latitude: point.lat, longitude: point.lng,
+        name: point.name || undefined,
+        address: point.address || undefined,
       };
       if (isGupshup || isDialog360) {
-        await senders.sendLocation({ ...bspBase(), ...locPayload });
+        await locationSenders.sendLocation({ ...bspBase(), ...locPayload });
       } else {
         await sendWabaLocationMsg({ ...wabaBase(), ...locPayload });
       }
       toast.success(t("locationSent"));
-      setWLoc({ lat: "", lng: "", name: "", addr: "" });
-      closeWaba();
-    } catch (err) { if (handleTicketAccessDenied(err, useTicketStore.getState().currentTicket?.id ?? 0, tChat("noTicketAccess"))) return; toast.error(t("errorSendingLocation")); }
+      return true;
+    } catch (err) {
+      if (handleTicketAccessDenied(err, useTicketStore.getState().currentTicket?.id ?? 0, tChat("noTicketAccess"))) return false;
+      toast.error(t("errorSendingLocation"));
+      return false;
+    }
   };
 
   const handleSendWabaFlow = async () => {
@@ -2583,7 +2943,7 @@ export function MessageInput({
     if (!(await ensureWabaToken())) { toast.warning(t("wabaTokenNotFound")); return; }
     if (!wMultiProduct.catalogId.trim() || !wMultiProduct.productIds.trim() || !wMultiProduct.header.trim() || !wMultiProduct.body.trim()) { toast.warning(t("fillAllFields")); return; }
     try {
-      const sections = [{ title: wMultiProduct.sectionTitle || "Produtos", product_items: wMultiProduct.productIds.split(",").map((id) => ({ product_retailer_id: id.trim() })).filter((p) => p.product_retailer_id) }];
+      const sections = [{ title: wMultiProduct.sectionTitle || regionText("product.sectionTitle", undefined, "Produtos"), product_items: wMultiProduct.productIds.split(",").map((id) => ({ product_retailer_id: id.trim() })).filter((p) => p.product_retailer_id) }];
       if (isGupshup) {
         await senders.sendMultiProduct({
           ...bspBase(),
@@ -3055,7 +3415,7 @@ export function MessageInput({
         }
       });
       toast.success(t("messageSent"));
-      setMsgrReceipt({ recipientName: '', orderNumber: '', currency: 'BRL', paymentMethod: '', totalCost: '', items: [{ title: '', price: '', quantity: '1' }] });
+      setMsgrReceipt({ recipientName: '', orderNumber: '', currency: regionCurrency, paymentMethod: '', totalCost: '', items: [{ title: '', price: '', quantity: '1' }] });
       closeMsgr();
     } catch (err) { if (handleTicketAccessDenied(err, useTicketStore.getState().currentTicket?.id ?? 0, tChat("noTicketAccess"))) return; toast.error(t("errorSendingMessage")); } finally { setModalSending(false); }
   };
@@ -3112,18 +3472,25 @@ export function MessageInput({
   };
 
   // ── Location / vCard / Video Conference / Sticker handlers ───────────
-  const handleSendLocationDialog = async () => {
-    const lat = parseFloat(locLat);
-    const lng = parseFloat(locLng);
-    if (isNaN(lat) || isNaN(lng)) { toast.warning(t("invalidLatLng")); return; }
-    setSendingLocation(true);
+  // Envio da janela de localização pela rota geral (POST /messages/:id/location), em que o
+  // servidor resolve o canal do atendimento. Mesmo contrato do submitLocationWaba.
+  const submitLocationGeneral = async (point: LocationPoint): Promise<boolean> => {
     try {
-      await sendLocation(ticketId, { latitude: lat, longitude: lng, name: locName || undefined, address: locAddr || undefined });
+      await sendLocation(ticketId, { latitude: point.lat, longitude: point.lng, name: point.name || undefined, address: point.address || undefined });
       toast.success(t("locationSent"));
-      setLocationModal(false);
-      setLocLat(""); setLocLng(""); setLocName(""); setLocAddr("");
-    } catch (err) { if (handleTicketAccessDenied(err, useTicketStore.getState().currentTicket?.id ?? 0, tChat("noTicketAccess"))) return; toast.error(t("errorSendingLocation")); }
-    finally { setSendingLocation(false); }
+      return true;
+    } catch (err) {
+      if (handleTicketAccessDenied(err, useTicketStore.getState().currentTicket?.id ?? 0, tChat("noTicketAccess"))) return false;
+      toast.error(t("errorSendingLocation"));
+      return false;
+    }
+  };
+
+  // Mensagem rápida criada pelo "Salvar este local": entra na lista do "/" na hora; sem a
+  // linha devolvida pelo servidor, a lista é recarregada.
+  const handleLocationQuickReplySaved = (reply?: FastReply) => {
+    if (!reply) { loadQuickReplies(); return; }
+    setQuickReplies((prev) => (prev.some((r) => r.id === reply.id) ? prev : [...prev, reply]));
   };
 
   const handleSendVcard = async () => {
@@ -3170,11 +3537,23 @@ export function MessageInput({
     }
   };
 
-  const handleStickerFile = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleStickerFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    onSendMedia(file, "", undefined, true);
     e.target.value = "";
+    // O "Abrir arquivos" do aviso abaixo reabre este campo sem filtro de tipo.
+    if (file.type && !file.type.startsWith("image/")) {
+      toast.error(t("fileTypeNotAllowed", { name: file.name }));
+      return;
+    }
+    const ticketAtPick = useTicketStore.getState().currentTicket?.id;
+    const ready = await preparePickedFile(file, undefined, { preparingMessage: t("pickedFilePreparing") });
+    if (!ready) {
+      notifyUnreadablePickedFile(t("pickedFileUnreadable"), t("pickedFileOpenFiles"), stickerInputRef.current);
+      return;
+    }
+    if (useTicketStore.getState().currentTicket?.id !== ticketAtPick) return;
+    onSendMedia(ready, "", undefined, true);
   };
 
   // ── Group / Interactive handlers ──────────────────────────────────────
@@ -3399,6 +3778,8 @@ export function MessageInput({
         subject: emailSubject.trim(),
         text: emailBody,
         ticketId: ticketId,
+        // Variáveis ({{name}}, {{user}}...) trocadas no servidor com os dados do atendimento.
+        applyVariables: true,
         ...(cc.length > 0 ? { cc } : {}),
         ...(bcc.length > 0 ? { bcc } : {}),
         ...(emailAttachments.length > 0 ? { attachments: emailAttachments } : {}),
@@ -3407,19 +3788,22 @@ export function MessageInput({
       });
       toast.success(t("emailSent"));
       setEmailModal(false);
-      setEmailTo(""); setEmailCc(""); setEmailBcc(""); setEmailSubject(""); setEmailBody(""); setEmailAttachments([]);
+      setEmailTo(""); setEmailCc(""); setEmailBcc(""); setEmailSubject(""); setEmailBody(""); setEmailAttachments([]); setEmailAttachUnreadable(false);
     } catch { toast.error(t("errorSendingEmail")); }
     finally { setLoadingEmail(false); }
   };
 
   const handleEmailAttachment = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files || []);
+    if (files.length > 0) setEmailAttachUnreadable(false);
     files.forEach((file) => {
       const reader = new FileReader();
       reader.onload = () => {
         const content = (reader.result as string).split(",")[1] || "";
         setEmailAttachments((prev) => [...prev, { filename: file.name, content, contentType: file.type || undefined }]);
       };
+      // Arquivo que o aparelho não deixa ler (seletor de mídia do Android) sumia sem aviso.
+      reader.onerror = () => setEmailAttachUnreadable(true);
       reader.readAsDataURL(file);
     });
     e.target.value = "";
@@ -3427,14 +3811,65 @@ export function MessageInput({
 
   // ── Hub WABA template handlers ────────────────────────────────────────
   const handleOpenHubTemplates = async () => {
+    hubTemplateOpenSeqRef.current += 1;
     setHubTemplateModal(true);
     setSelectedHubTemplate(null);
     setHubTemplateSearch("");
-    if (hubTemplates.length > 0) return;
+    await loadHubTemplates();
+  };
+
+  // Mensagem rápida de template no HUB: a lista daqui só tem template sem
+  // variável e sem mídia no cabeçalho; o que ficou de fora ganha aviso próprio.
+  const openQuickReplyHubTemplate = async (ref: QuickReplyTemplateRef) => {
+    const seq = ++hubTemplateOpenSeqRef.current;
+    setHubTemplateModal(true);
+    setSelectedHubTemplate(null);
+    setHubTemplateSearch("");
+    const list = await loadHubTemplates();
+    if (!list || seq !== hubTemplateOpenSeqRef.current) return;
+    applyQuickReplyHubTemplate(list, ref);
+  };
+
+  const applyQuickReplyHubTemplate = (list: WabaTemplate[], ref: QuickReplyTemplateRef) => {
+    const match = matchQuickReplyTemplate(list, ref);
+    if (match.kind === "found") {
+      setSelectedHubTemplate(match.template);
+      return;
+    }
+    // Aqui os atalhos ficam visíveis com um template já escolhido: sem limpar, o
+    // "Enviar template" seguiria mandando o anterior.
+    setSelectedHubTemplate(null);
+    if (match.kind === "notFound") {
+      if (matchQuickReplyTemplate(hubAllTemplatesRef.current, ref).kind !== "notFound") {
+        toast.warning(t("quickReplyTemplateHubUnsupported", { name: ref.name }));
+      } else if (list.length > 0) {
+        toast.warning(t("quickReplyTemplateNotFound", { name: ref.name }));
+      }
+      return;
+    }
+    setHubTemplateSearch(match.name);
+    toast.info(match.kind === "languageMissing"
+      ? t("quickReplyTemplateLanguageMissing", { name: match.name, language: ref.language })
+      : t("quickReplyTemplatePickLanguage", { name: match.name }));
+  };
+
+  // Lista crua do HUB (antes do filtro): só para dizer por que o atalho não abre.
+  const hubAllTemplatesRef = useRef<WabaTemplate[]>([]);
+  const hubTemplatesLoadRef = useRef<Promise<WabaTemplate[] | null> | null>(null);
+  const loadHubTemplates = (): Promise<WabaTemplate[] | null> => {
+    if (hubTemplates.length > 0) return Promise.resolve(hubTemplates);
+    if (!hubTemplatesLoadRef.current) {
+      hubTemplatesLoadRef.current = fetchHubTemplates().finally(() => { hubTemplatesLoadRef.current = null; });
+    }
+    return hubTemplatesLoadRef.current;
+  };
+
+  const fetchHubTemplates = async (): Promise<WabaTemplate[] | null> => {
     setLoadingHubTemplates(true);
     try {
       const { data } = await listHubTemplates({ whatsappId });
       const list: WabaTemplate[] = Array.isArray(data) ? data : [];
+      hubAllTemplatesRef.current = list;
  // Filter: no VIDEO/IMAGE/DOCUMENT headers, no {{}} variables (matches front legado buscarTemplateWabaHub)
       const filtered = list.filter((tmpl) => {
         const hasMediaHeader = tmpl.components?.some((c) =>
@@ -3444,7 +3879,8 @@ export function MessageInput({
         return !hasMediaHeader && !hasVars;
       });
       setHubTemplates(filtered);
-    } catch { toast.error(t("errorLoadingHubTemplates")); }
+      return filtered;
+    } catch { toast.error(t("errorLoadingHubTemplates")); return null; }
     finally { setLoadingHubTemplates(false); }
   };
 
@@ -3501,6 +3937,9 @@ if (data.model) setRewriteModel(data.model);
   };
 
   const applyNoteFile = (file: File | null) => {
+    // Colar/arrastar no meio de uma leitura vence a escolha que ainda lia.
+    notePickSeqRef.current++;
+    setNoteFileUnreadable(false);
     setNoteFile(file);
     if (!file) { setNoteFilePreview(null); return; }
     if (file.type.startsWith("image/")) {
@@ -3512,8 +3951,19 @@ if (data.model) setRewriteModel(data.model);
     }
   };
 
-  const handleNoteFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    applyNoteFile(e.target.files?.[0] ?? null);
+  const handleNoteFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0] ?? null;
+    if (!file) { applyNoteFile(null); return; }
+    const seq = ++notePickSeqRef.current;
+    // Android: imagem/vídeo do seletor de mídia pode chegar ilegível (vide lib/picked-file).
+    const ready = await preparePickedFile(file, undefined, { preparingMessage: t("pickedFilePreparing") });
+    if (seq !== notePickSeqRef.current) return;
+    if (!ready) {
+      e.target.value = "";
+      setNoteFileUnreadable(true);
+      return;
+    }
+    applyNoteFile(ready);
   };
 
   const handleNotePaste = (e: React.ClipboardEvent) => {
@@ -3558,6 +4008,8 @@ if (data.model) setRewriteModel(data.model);
   };
 
   const resetNoteDialog = () => {
+    notePickSeqRef.current++;
+    setNoteFileUnreadable(false);
     setNoteText("");
     setNoteFile(null);
     setNoteFilePreview(null);
@@ -3606,7 +4058,15 @@ if (data.model) setRewriteModel(data.model);
         if (!batch.length) break;
 
         for (const msg of batch) {
-          if (!msg.body?.trim() || msg.isDeleted || msg.mediaType === "notes") continue;
+          // Divisória de transferência e nota de ligação não são fala do atendente (o resumo
+          // pode ir ao cliente).
+          if (
+            !msg.body?.trim() ||
+            msg.isDeleted ||
+            msg.mediaType === "notes" ||
+            msg.mediaType === "transfer" ||
+            msg.mediaType === "callNotes"
+          ) continue;
           // Messages arrive ASC within each page; skip old ones instead of stopping
           if (cutoff > 0 && new Date(msg.createdAt).getTime() < cutoff) continue;
           collected.push(msg);
@@ -3739,6 +4199,14 @@ if (data.model) setRewriteModel(data.model);
                     <Paperclip className="h-3 w-3 mr-1" /> {t("addFile")}
                   </Button>
                 </div>
+                {emailAttachUnreadable && (
+                  <div role="alert" className="mb-1 flex flex-wrap items-center gap-2 rounded-md border border-destructive/40 bg-destructive/5 px-2 py-1.5 text-xs text-destructive">
+                    <span className="min-w-0 flex-1">{t("pickedFileUnreadable")}</span>
+                    <Button type="button" variant="outline" size="sm" className="h-7 shrink-0" onClick={() => openPickedFileFallback(emailFileRef.current)}>
+                      {t("pickedFileOpenFiles")}
+                    </Button>
+                  </div>
+                )}
                 {emailAttachments.length > 0 && (
                   <div className="space-y-1">
                     {emailAttachments.map((att, i) => (
@@ -3772,6 +4240,39 @@ if (data.model) setRewriteModel(data.model);
     <div className="flex items-center gap-2 px-4 py-2 border-b bg-blue-50 dark:bg-blue-950/30 text-xs text-blue-700 dark:text-blue-300">
       <Settings2 className="h-3.5 w-3.5 shrink-0" />
       <span>{wabaTemplateBannerText || t("wabaBanner")}</span>
+    </div>
+  ) : null;
+
+  // Janela grátis do anúncio: o "i" explica o funcionamento e os limites (mesmo texto
+  // na faixa, no aviso de janela encerrada e no seletor de templates). Popover e não
+  // Tooltip: o Tooltip não abre com toque, e no celular/PWA a explicação nunca apareceria.
+  const freeEntryHelp = freeEntryUntil ? (
+    <Popover>
+      <PopoverTrigger asChild>
+        <button
+          type="button"
+          aria-label={t("freeEntryHelpLabel")}
+          title={t("freeEntryHelpLabel")}
+          className="inline-flex shrink-0 align-middle text-muted-foreground hover:text-foreground"
+        >
+          <Info className="h-3.5 w-3.5" />
+        </button>
+      </PopoverTrigger>
+      <PopoverContent side="top" align="end" className="max-w-xs text-xs leading-relaxed">
+        {t("freeEntryHelp")}
+      </PopoverContent>
+    </Popover>
+  ) : null;
+  // O complemento entra no aviso de janela encerrada quando ele aparece; senão a faixa
+  // própria assume (janela de 24h aberta ou aviso de encerrada desligado pela empresa).
+  const closedBannerVisible = windowClosed && getConfigValue("windowClosedBanner") !== "disabled";
+  const showFreeEntryStrip = Boolean(freeEntryUntil) && !closedBannerVisible;
+  // Seletor de templates: na janela grátis, qualquer template (marketing incluso) sai sem custo.
+  const freeEntryTemplateNotice = freeEntryUntil ? (
+    <div className="flex items-center gap-2 rounded-md border border-success/30 bg-success/10 px-3 py-1.5 text-xs text-foreground">
+      <Megaphone className="h-3.5 w-3.5 shrink-0 text-success" />
+      <span className="min-w-0 flex-1">{t("freeEntryTemplatesNotice", { date: freeEntryUntil })}</span>
+      {freeEntryHelp}
     </div>
   ) : null;
 
@@ -3810,6 +4311,12 @@ if (data.model) setRewriteModel(data.model);
         <div className="max-w-3xl mx-auto px-4 py-4">
           <p className="text-sm font-medium mb-3">{t("listenBeforeSend")}</p>
           <audio controls src={audioPreview.url} className="w-full mb-3" />
+          {VOICE_NOTE_CHANNELS.has(ch) && (
+            <p className="flex items-start gap-1.5 text-xs text-muted-foreground mb-3">
+              <Mic className="h-3.5 w-3.5 shrink-0 mt-px" />
+              <span>{t("audioPreviewVoiceNote")}</span>
+            </p>
+          )}
           <div className="flex items-center gap-2 justify-end">
             <Button variant="outline" size="sm" onClick={discardAudioPreview} className="gap-1.5">
               <X className="h-4 w-4 text-destructive" /> {t("audioPreviewDiscard")}
@@ -3829,6 +4336,50 @@ if (data.model) setRewriteModel(data.model);
     if (templateSearch && !tp.name.toLowerCase().includes(templateSearch.toLowerCase())) return false;
     return true;
   });
+  // Só os atalhos cujo template existe nesta conexão (cada número tem os seus).
+  const wabaTemplateShortcuts = wabaTemplates.length === 0 ? [] :
+    templateQuickReplies.filter((q) => matchQuickReplyTemplate(wabaTemplates, q.ref).kind !== "notFound");
+  const hubTemplateShortcuts = hubTemplates.length === 0 ? [] :
+    templateQuickReplies.filter((q) => matchQuickReplyTemplate(hubTemplates, q.ref).kind !== "notFound");
+  const renderTemplateShortcuts = (
+    shortcuts: typeof templateQuickReplies,
+    onPick: (ref: QuickReplyTemplateRef) => void,
+  ) => (
+    <div className="space-y-1">
+      <div className="flex items-center gap-1 text-xs text-muted-foreground">
+        <Zap className="h-3 w-3 shrink-0" />
+        <span className="font-medium">{t("quickReplyTemplatesLabel")}</span>
+        <Popover>
+          <PopoverTrigger asChild>
+            <button
+              type="button"
+              aria-label={t("quickReplyTemplatesHelpLabel")}
+              title={t("quickReplyTemplatesHelpLabel")}
+              className="inline-flex shrink-0 text-muted-foreground hover:text-foreground"
+            >
+              <Info className="h-3.5 w-3.5" />
+            </button>
+          </PopoverTrigger>
+          <PopoverContent side="top" align="start" className="max-w-xs text-xs leading-relaxed">
+            {t("quickReplyTemplatesHelp")}
+          </PopoverContent>
+        </Popover>
+      </div>
+      <div className="flex flex-wrap gap-1.5 max-h-24 overflow-y-auto">
+        {shortcuts.map((q) => (
+          <button
+            key={q.id}
+            type="button"
+            onClick={() => onPick(q.ref)}
+            title={q.ref.language ? `${q.ref.name} · ${q.ref.language}` : q.ref.name}
+            className="inline-flex max-w-full items-center rounded-full border px-2.5 py-0.5 text-xs transition-colors hover:bg-accent"
+          >
+            <span className="truncate">/{q.key}</span>
+          </button>
+        ))}
+      </div>
+    </div>
+  );
 
   return (
     <div className="border-t pb-[env(safe-area-inset-bottom)]" onDrop={handleDrop} onDragOver={handleDragOver}>
@@ -3902,6 +4453,14 @@ if (data.model) setRewriteModel(data.model);
           <div className="flex-1 min-w-0">
             <span className="font-medium">{t("windowClosed")}</span>
             <span className="text-muted-foreground ml-1">{isInstagram ? t("windowClosedDescInstagram") : hybridLinkedReady ? t("hybridWindowClosedDesc") : t("windowClosedDesc")}</span>
+            {freeEntryUntil && (
+              // Texto na cor normal: verde sobre o âmbar do aviso fica ilegível no tema claro.
+              <span className="ml-1 inline-flex items-center gap-1 text-foreground">
+                <Megaphone className="h-3.5 w-3.5 shrink-0 text-success" />
+                <span className="font-medium">{t("freeEntryClosedComplement", { date: freeEntryUntil })}</span>
+                {freeEntryHelp}
+              </span>
+            )}
           </div>
           {hybridLinkedReady && (
             <Button
@@ -3967,12 +4526,47 @@ if (data.model) setRewriteModel(data.model);
         </div>
       )}
 
+      {showFreeEntryStrip && (
+        <div className="flex items-center gap-2 px-4 py-1.5 border-b text-xs text-foreground bg-success/10 border-success/30 [&>svg]:text-success">
+          <Megaphone className="h-3.5 w-3.5 shrink-0" />
+          <span className="min-w-0">
+            <span className="font-medium">{t("freeEntryStripTitle")}</span>
+            <span className="opacity-80 ml-1">{t("freeEntryStripUntil", { date: freeEntryUntil ?? "" })}</span>
+          </span>
+          {freeEntryHelp}
+        </div>
+      )}
+
       {replyTo && (
         <div className="flex items-center gap-2 px-4 py-2 border-b bg-muted/30">
-          <div className="h-8 w-1 rounded bg-primary" />
+          <div className="w-1 min-h-8 self-stretch rounded bg-primary" />
           <div className="flex-1 min-w-0">
             <p className={cn("text-xs font-medium text-primary", isLiveMode && !replyTo.fromMe && "live-blur-text")}>{replyTo.fromMe ? t("you") : replyTo.contact?.name || t("contact")}</p>
             <p className={cn("text-xs text-muted-foreground truncate", isLiveMode && "live-blur-text")}>{replyTo.body}</p>
+            {/* UAzapi só monta a citação com a mensagem original que ela guarda
+                (lib/uazapi-quote-window + /uazapi-quote-check). O envio segue liberado. */}
+            {isUazapi && uazapiQuoteDropped && (
+              <div className="mt-1 flex items-start gap-1.5 text-xs text-foreground/80">
+                <AlertTriangle className="h-3.5 w-3.5 shrink-0 mt-px text-warning" />
+                <span className="min-w-0">{t("uazapiQuoteTooOld")}</span>
+                <TooltipProvider>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <button
+                        type="button"
+                        aria-label={t("uazapiQuoteTooOldHelp")}
+                        className="shrink-0 mt-px text-muted-foreground hover:text-foreground"
+                      >
+                        <Info className="h-3.5 w-3.5" />
+                      </button>
+                    </TooltipTrigger>
+                    <TooltipContent className="max-w-xs">
+                      <p>{t("uazapiQuoteTooOldHelp")}</p>
+                    </TooltipContent>
+                  </Tooltip>
+                </TooltipProvider>
+              </div>
+            )}
           </div>
           <Button variant="ghost" size="icon" className="h-6 w-6 shrink-0" onClick={onClearReply}>
             <X className="h-3 w-3" />
@@ -4106,6 +4700,17 @@ if (data.model) setRewriteModel(data.model);
                           {r.voice === "enabled" ? t("quickReplyAudioBadge") : t("quickReplyMediaBadge")}
                         </Badge>
                       )}
+                      {r.messageType === "template" && (
+                        <Badge variant="outline" className="text-[10px] text-warning border-warning/40" title={t("quickReplyTemplateBadgeHint")}>
+                          {t("quickReplyTemplateBadge")}
+                        </Badge>
+                      )}
+                      {r.messageType === "location" && (
+                        <Badge variant="outline" className="text-[10px] text-success border-success/40" title={tShare("quickReplyTypeNote")}>
+                          <MapPin className="mr-0.5 h-2.5 w-2.5 shrink-0" aria-hidden="true" />
+                          {tShare("quickReplyBadge")}
+                        </Badge>
+                      )}
                     </div>
                     <span className="flex-1 min-w-0 line-clamp-4 whitespace-pre-wrap break-words leading-snug">{r.message}</span>
                   </button>
@@ -4157,7 +4762,7 @@ if (data.model) setRewriteModel(data.model);
               <div className="absolute inset-0 z-10 flex items-center justify-center gap-2 rounded-lg bg-background/80 border border-violet-400/40">
                 <Loader2 className="h-4 w-4 animate-spin text-violet-500" />
                 <span className="text-xs text-violet-600">
-                  {tR("rewriting")} com {rewriteProvider ? COPILOT_PROVIDER_LABELS[rewriteProvider] ?? rewriteProvider : "IA"}{rewriteModel ? ` (${rewriteModel})` : ""}...
+                  {t("rewritingWith", { action: tR("rewriting"), provider: rewriteProvider ? COPILOT_PROVIDER_LABELS[rewriteProvider] ?? rewriteProvider : t("rewritingProviderFallback") })}{rewriteModel ? ` (${rewriteModel})` : ""}...
                 </span>
               </div>
             )}
@@ -4367,9 +4972,11 @@ if (data.model) setRewriteModel(data.model);
                       <FileImage className="mr-2 h-4 w-4" /> {t("fromGallery")}
                     </DropdownMenuItem>
                     <DropdownMenuSeparator />
-                    <DropdownMenuItem onClick={() => setLocationModal(true)}>
-                      <MapPin className="mr-2 h-4 w-4" /> {t("locationItem")}
-                    </DropdownMenuItem>
+                    {supportsLocation && (
+                      <DropdownMenuItem onClick={() => openLocationDialog("general")}>
+                        <MapPin className="mr-2 h-4 w-4" /> {t("locationItem")}
+                      </DropdownMenuItem>
+                    )}
                     <DropdownMenuItem onClick={() => setVcardModal(true)}>
                       <Contact2 className="mr-2 h-4 w-4" /> {t("contactItem")}
                     </DropdownMenuItem>
@@ -4600,10 +5207,10 @@ if (data.model) setRewriteModel(data.model);
                         <MousePointerClick className="mr-2 h-4 w-4" /> Quick Reply
                       </DropdownMenuItem>
                       <DropdownMenuItem onClick={() => { setInteractiveType("singleSelect"); setGroupModal("interactive"); }} disabled={isDisabled}>
-                        <LayoutList className="mr-2 h-4 w-4" /> Lista (Select)
+                        <LayoutList className="mr-2 h-4 w-4" /> {t("singleSelectList")}
                       </DropdownMenuItem>
                       <DropdownMenuItem onClick={() => { setInteractiveType("pixButton"); setPixKey(whatsapp?.pixDefaultKey || ""); setPixType((whatsapp?.pixDefaultType as typeof pixType) || "EVP"); setPixName(whatsapp?.pixDefaultName || ""); setInteractiveBody(whatsapp?.pixDefaultMessage || ""); setGroupModal("interactive"); }} disabled={isDisabled}>
-                        <Receipt className="mr-2 h-4 w-4" /> Botão PIX
+                        <Receipt className="mr-2 h-4 w-4" /> {t("ibPixTitle")}
                       </DropdownMenuItem>
                     </>
                   )}
@@ -4615,7 +5222,7 @@ if (data.model) setRewriteModel(data.model);
                         <ExternalLink className="mr-2 h-4 w-4" /> CTA Buttons
                       </DropdownMenuItem>
                       <DropdownMenuItem onClick={() => { setInteractiveType("menuText"); setGroupModal("interactive"); }} disabled={isDisabled}>
-                        <Menu className="mr-2 h-4 w-4" /> Menu de texto
+                        <Menu className="mr-2 h-4 w-4" /> {t("textMenu")}
                       </DropdownMenuItem>
                       <DropdownMenuItem onClick={() => { setInteractiveType("poll"); setGroupModal("interactive"); }} disabled={isDisabled}>
                         <BarChart2 className="mr-2 h-4 w-4" /> {t("poll")}
@@ -4661,11 +5268,18 @@ if (data.model) setRewriteModel(data.model);
                       <DropdownMenuItem onClick={() => setWabaModal("ctaurl")} disabled={isDisabled || hybridTextOnly}>
                         <Link2 className="mr-2 h-4 w-4" /> {t("wabaCta")}
                       </DropdownMenuItem>
+                      {/* Convite do WebChat: texto com o link; sai pelo envio de texto de
+                          sempre (no híbrido com a janela fechada, pela conexão vinculada). */}
+                      {webchatInvite.info?.ready && (
+                        <DropdownMenuItem onClick={() => setWebchatInviteOpen(true)} disabled={isDisabled}>
+                          <MessageSquareShare className="mr-2 h-4 w-4" /> {tInvite("menuItem")}
+                        </DropdownMenuItem>
+                      )}
                       <DropdownMenuItem onClick={() => setWabaModal("replybuttons")} disabled={isDisabled || hybridTextOnly}>
                         <Reply className="mr-2 h-4 w-4" /> {t("wabaReplyButtons")}
                       </DropdownMenuItem>
                       <DropdownMenuSeparator />
-                      <DropdownMenuItem onClick={() => setWabaModal("location")} disabled={isDisabled || hybridTextOnly}>
+                      <DropdownMenuItem onClick={() => openLocationDialog("waba")} disabled={isDisabled || hybridTextOnly}>
                         <MapPin className="mr-2 h-4 w-4" /> {t("wabaLocation")}
                       </DropdownMenuItem>
                       <DropdownMenuItem onClick={() => setWabaModal("locationreq")} disabled={isDisabled || hybridTextOnly}>
@@ -4715,11 +5329,10 @@ if (data.model) setRewriteModel(data.model);
                       <DropdownMenuItem onClick={async () => {
                         setIgModal("privatereply");
                         setIgPrivateLoading(true);
-                        setIgPrivateMedia([]); setIgPrivateComments([]); setIgPrivateSelectedMedia("");
+                        setIgPrivateComments([]); setIgPrivateSelectedMedia("");
                         try {
-                          const res = await listMedia(whatsappId);
-                          setIgPrivateMedia((res.data as any)?.data || res.data || []);
-                        } catch {} finally { setIgPrivateLoading(false); }
+                          await igPrivateMediaPages.load(whatsappId);
+                        } finally { setIgPrivateLoading(false); }
                       }} disabled={isDisabled && !windowClosed}>
                         <Reply className="mr-2 h-4 w-4" /> {t("privateReply.title")}
                       </DropdownMenuItem>
@@ -4959,6 +5572,11 @@ if (data.model) setRewriteModel(data.model);
                         className="w-36 shrink-0"
                       />
                     </div>
+                    {/* Depois da busca: o modal foca o 1º item focável, e o "i" do aviso
+                        abriria o tooltip sozinho em cima do título. */}
+                    {freeEntryTemplateNotice}
+                    {!loadingTemplates && wabaTemplateShortcuts.length > 0 &&
+                      renderTemplateShortcuts(wabaTemplateShortcuts, (ref) => applyQuickReplyTemplate(wabaTemplates, ref))}
                     {loadingTemplates ? (
                       <p className="text-sm text-muted-foreground text-center py-4">{t("loadingTemplates")}</p>
                     ) : filteredTemplates.length === 0 ? (
@@ -4997,6 +5615,7 @@ if (data.model) setRewriteModel(data.model);
                       <span className="text-sm font-semibold">{selectedTemplate.name}</span>
                       <span className="text-xs text-muted-foreground ml-auto">{selectedTemplate.language}</span>
                     </div>
+                    {freeEntryTemplateNotice}
 
                     {/* Preview do template estilo WhatsApp */}
                     <div className="bg-[#e5ddd5] rounded-lg p-3">
@@ -5279,37 +5898,6 @@ if (data.model) setRewriteModel(data.model);
             </>
           )}
 
-          {/* ── LOCATION ── */}
-          {wabaModal === "location" && (
-            <>
-              <DialogHeader><DialogTitle className="flex items-center gap-2"><MapPin className="h-4 w-4" /> {t("sendWabaLocationTitle")}</DialogTitle></DialogHeader>
-              <div className="space-y-3 py-2 overflow-y-auto flex-1 min-h-0">
-                <div className="grid grid-cols-2 gap-2">
-                  <div>
-                    <Label className="text-xs">{t("latitudeRequired")}</Label>
-                    <Input value={wLoc.lat} onChange={(e) => setWLoc((p) => ({ ...p, lat: e.target.value }))} placeholder="-23.5505" className="mt-1 h-8 text-sm" />
-                  </div>
-                  <div>
-                    <Label className="text-xs">{t("longitudeRequired")}</Label>
-                    <Input value={wLoc.lng} onChange={(e) => setWLoc((p) => ({ ...p, lng: e.target.value }))} placeholder="-46.6333" className="mt-1 h-8 text-sm" />
-                  </div>
-                </div>
-                <div>
-                  <Label className="text-xs">{t("locationName")}</Label>
-                  <Input value={wLoc.name} onChange={(e) => setWLoc((p) => ({ ...p, name: e.target.value }))} placeholder={t("locationNamePlaceholder")} className="mt-1 h-8 text-sm" />
-                </div>
-                <div>
-                  <Label className="text-xs">{t("address")}</Label>
-                  <Input value={wLoc.addr} onChange={(e) => setWLoc((p) => ({ ...p, addr: e.target.value }))} placeholder={t("fullAddressOptional")} className="mt-1 h-8 text-sm" />
-                </div>
-              </div>
-              <DialogFooter>
-                <Button variant="outline" onClick={closeWaba}>{t("cancel")}</Button>
-                <Button onClick={handleSendWabaLocation}>{t("send")}</Button>
-              </DialogFooter>
-            </>
-          )}
-
           {/* ── FLOW ── */}
           {wabaModal === "flow" && (
             <>
@@ -5419,7 +6007,7 @@ if (data.model) setRewriteModel(data.model);
                   <Input value={wMultiProduct.sectionTitle} onChange={(e) => setWMultiProduct((p) => ({ ...p, sectionTitle: e.target.value }))} className="mt-1 h-8 text-sm" maxLength={WABA_LIMITS.sectionTitle} />
                 </div>
                 <div>
-                  <Label className="text-xs">{t("wabaProduct.productId")}s * (separados por vírgula)</Label>
+                  <Label className="text-xs">{t("productIdsCommaSeparated")} *</Label>
                   <Input value={wMultiProduct.productIds} onChange={(e) => setWMultiProduct((p) => ({ ...p, productIds: e.target.value }))} placeholder="id1,id2,id3" className="mt-1 h-8 text-sm" />
                 </div>
                 <div>
@@ -5526,7 +6114,7 @@ if (data.model) setRewriteModel(data.model);
                   <Textarea value={igQr.message} onChange={(e) => setIgQr((p) => ({ ...p, message: e.target.value }))} className="mt-1 text-sm" rows={3} />
                 </div>
                 <div className="space-y-2">
-                  <Label className="text-xs">{t("instagramQuickReply.addOption")} (máx. 13)</Label>
+                  <Label className="text-xs">{t("instagramQuickReply.addOption")} {t("maxItemsSuffix", { max: 13 })}</Label>
                   {igQr.replies.map((r, i) => (
                     <div key={i} className="flex gap-2 items-center">
                       {(r as any).content_type === "user_phone_number" ? (
@@ -5609,7 +6197,7 @@ if (data.model) setRewriteModel(data.model);
                       <div>
                         <Label className="text-xs">{t("privateReply.selectPost")}</Label>
                         <div className="mt-1 space-y-1 max-h-36 overflow-y-auto border rounded p-1">
-                          {igPrivateMedia.slice(0, 10).map(m => (
+                          {igPrivateMedia.map(m => (
                             <button key={m.id} type="button"
                               className={`w-full text-left text-xs px-2 py-1.5 rounded hover:bg-muted/60 flex items-center gap-2 ${igPrivateSelectedMedia === m.id ? 'bg-muted' : ''}`}
                               onClick={async () => {
@@ -5620,10 +6208,21 @@ if (data.model) setRewriteModel(data.model);
                                   setIgPrivateComments((res.data as any)?.data || []);
                                 } catch {} finally { setIgPrivateLoading(false); }
                               }}>
-                              {m.media_url && <img src={m.media_url} alt="" className="w-7 h-7 object-cover rounded flex-shrink-0" />}
+                              <span className="w-7 h-7 rounded overflow-hidden flex-shrink-0">
+                                <InstagramMediaThumb media={m} iconClassName="h-3.5 w-3.5" />
+                              </span>
                               <span className="truncate">{m.caption?.substring(0, 60) || m.media_type} — {new Date(m.timestamp).toLocaleDateString('pt-BR')}</span>
                             </button>
                           ))}
+                          {igPrivateMediaPages.hasMore && (
+                            <button type="button"
+                              className="w-full text-xs px-2 py-1.5 rounded hover:bg-muted/60 flex items-center justify-center gap-1 text-muted-foreground disabled:opacity-60"
+                              disabled={igPrivateMediaPages.loadingMore}
+                              onClick={() => { void igPrivateMediaPages.loadMore(); }}>
+                              {igPrivateMediaPages.loadingMore ? <Loader2 className="h-3 w-3 animate-spin" /> : <ChevronDown className="h-3 w-3" />}
+                              {t("privateReply.loadMorePosts")}
+                            </button>
+                          )}
                         </div>
                       </div>
                     )}
@@ -5681,7 +6280,7 @@ if (data.model) setRewriteModel(data.model);
                   <Textarea value={igBtn.message} onChange={(e) => setIgBtn(p => ({ ...p, message: e.target.value }))} className="mt-1 text-sm" rows={3} maxLength={640} />
                 </div>
                 <div className="space-y-2">
-                  <Label className="text-xs">{t("igButtonTemplate.buttons")} (máx. 3)</Label>
+                  <Label className="text-xs">{t("buttonsMax3")}</Label>
                   {igBtn.buttons.map((b, i) => (
                     <div key={i} className="flex gap-2 items-center">
                       <Input value={b.title} onChange={(e) => setIgBtn(p => { const buttons = [...p.buttons]; buttons[i] = { ...buttons[i], title: e.target.value }; return { ...p, buttons }; })} placeholder={t("igButtonTemplate.buttonTitle")} className="h-8 text-sm flex-1" maxLength={20} />
@@ -5772,7 +6371,7 @@ if (data.model) setRewriteModel(data.model);
                   <Textarea value={msgrQr.message} onChange={(e) => setMsgrQr((p) => ({ ...p, message: e.target.value }))} className="mt-1 text-sm" rows={3} />
                 </div>
                 <div className="space-y-2">
-                  <Label className="text-xs">{t("messengerQuickReply.addOption")} (máx. 13)</Label>
+                  <Label className="text-xs">{t("messengerQuickReply.addOption")} {t("maxItemsSuffix", { max: 13 })}</Label>
                   {msgrQr.replies.map((r, i) => (
                     <div key={i} className="flex gap-2 items-center">
                       <Input value={r.title} onChange={(e) => setMsgrQr((p) => { const replies = [...p.replies]; replies[i] = { ...replies[i], title: e.target.value }; return { ...p, replies }; })} placeholder={t("messengerQuickReply.optionPlaceholder")} className="h-8 text-sm flex-1" maxLength={20} />
@@ -5899,7 +6498,7 @@ if (data.model) setRewriteModel(data.model);
                   <Textarea value={msgrBtn.message} onChange={(e) => setMsgrBtn((p) => ({ ...p, message: e.target.value }))} className="mt-1 text-sm" rows={3} maxLength={640} />
                 </div>
                 <div className="space-y-2">
-                  <Label className="text-xs">{t("buttonTemplate.buttons")} (máx. 3)</Label>
+                  <Label className="text-xs">{t("buttonsMax3")}</Label>
                   {msgrBtn.buttons.map((btn, i) => (
                     <div key={i} className="border rounded p-2 space-y-2">
                       <div className="flex gap-2 items-center">
@@ -5936,7 +6535,7 @@ if (data.model) setRewriteModel(data.model);
               <DialogHeader><DialogTitle className="flex items-center gap-2"><Reply className="h-4 w-4" /> {t("privateReply.title")}</DialogTitle></DialogHeader>
               <div className="space-y-3 py-2">
                 <div>
-                  <Label className="text-xs">{t("privateReply.commentId")} (ou Post ID)</Label>
+                  <Label className="text-xs">{t("privateReply.commentId")} {t("privateReply.orPostId")}</Label>
                   <Input value={msgrPrivate.commentId} onChange={(e) => setMsgrPrivate((p) => ({ ...p, commentId: e.target.value }))} className="mt-1 h-8 text-sm" placeholder="Comment ID" />
                 </div>
                 <div>
@@ -5963,7 +6562,7 @@ if (data.model) setRewriteModel(data.model);
                             } catch {} finally { setMsgrPrivateLoading(false); }
                           }}>
                           {p.full_picture && <img src={p.full_picture} alt="" className="w-7 h-7 object-cover rounded flex-shrink-0" />}
-                          <span className="truncate">{p.message?.substring(0, 60) || p.story || '(sem texto)'}</span>
+                          <span className="truncate">{p.message?.substring(0, 60) || p.story || t("privateReply.postNoText")}</span>
                         </button>
                       ))}
                     </div>
@@ -6030,7 +6629,7 @@ if (data.model) setRewriteModel(data.model);
                   </div>
                 </div>
                 <div className="space-y-2">
-                  <Label className="text-xs">{t("igButtonTemplate.buttons")} (máx. 3)</Label>
+                  <Label className="text-xs">{t("buttonsMax3")}</Label>
                   {msgrMedia.buttons.map((b, i) => (
                     <div key={i} className="flex gap-2 items-center">
                       <Input value={b.title} onChange={(e) => setMsgrMedia(p => { const buttons = [...p.buttons]; buttons[i] = { ...buttons[i], title: e.target.value }; return { ...p, buttons }; })} placeholder={t("igButtonTemplate.buttonTitle")} className="h-8 text-sm flex-1" maxLength={20} />
@@ -6066,7 +6665,7 @@ if (data.model) setRewriteModel(data.model);
                   </div>
                   <div>
                     <Label className="text-xs">{t("receiptTemplate.currency")} *</Label>
-                    <Input value={msgrReceipt.currency} onChange={(e) => setMsgrReceipt(p => ({ ...p, currency: e.target.value }))} className="mt-1 h-8 text-sm" placeholder="BRL" />
+                    <Input value={msgrReceipt.currency} onChange={(e) => setMsgrReceipt(p => ({ ...p, currency: e.target.value }))} className="mt-1 h-8 text-sm" placeholder={regionCurrency} />
                   </div>
                   <div>
                     <Label className="text-xs">{t("receiptTemplate.paymentMethod")} *</Label>
@@ -6156,7 +6755,7 @@ if (data.model) setRewriteModel(data.model);
                 </div>
                 <div>
                   <Label className="text-xs">{t("customerFeedback.privacyUrl")}</Label>
-                  <Input value={msgrFeedback.privacyUrl} onChange={(e) => setMsgrFeedback(p => ({ ...p, privacyUrl: e.target.value }))} className="mt-1 h-8 text-sm" placeholder="https://seusite.com/privacidade" />
+                  <Input value={msgrFeedback.privacyUrl} onChange={(e) => setMsgrFeedback(p => ({ ...p, privacyUrl: e.target.value }))} className="mt-1 h-8 text-sm" placeholder={t("customerFeedback.privacyUrlPlaceholder")} />
                   <p className="text-[10px] text-muted-foreground mt-0.5">{t("customerFeedback.privacyUrlHelp")}</p>
                 </div>
                 <div>
@@ -6277,6 +6876,8 @@ if (data.model) setRewriteModel(data.model);
                 </span>
               )}
             </DialogTitle>
+            {/* D9: dica de descoberta do envio de vários arquivos de uma vez. */}
+            <p className="text-left text-xs text-muted-foreground">{t("galleryMultiSelectHint")}</p>
           </DialogHeader>
           <div className="flex-1 overflow-hidden flex flex-col gap-3 py-2 min-h-0">
             <div className="flex gap-2 shrink-0">
@@ -6297,6 +6898,17 @@ if (data.model) setRewriteModel(data.model);
                 </SelectContent>
               </Select>
             </div>
+
+            <GalleryFolderFilter
+              orientation="horizontal"
+              value={galleryFolderFilter}
+              onChange={changeGalleryFolderFilter}
+              available={galleryFolders.available}
+              folders={galleryFolders.folders}
+              unfiledCount={galleryFolders.unfiledCount}
+              totalCount={galleryFolders.totalCount}
+              className="shrink-0"
+            />
 
             {/* ── Grid de arquivos ── */}
             {loadingGallery ? (
@@ -6452,11 +7064,13 @@ if (data.model) setRewriteModel(data.model);
       </Dialog>
 
       {/* ── Dialog: Hub WABA Templates ── */}
-      <Dialog open={hubTemplateModal} onOpenChange={(open) => { if (!open) { setHubTemplateModal(false); setSelectedHubTemplate(null); } }}>
+      <Dialog open={hubTemplateModal} onOpenChange={(open) => { if (!open) closeHubTemplates(); }}>
         <DialogContent className="max-w-md max-h-[90vh] overflow-y-auto">
           <DialogHeader><DialogTitle className="flex items-center gap-2"><BookOpen className="h-4 w-4" /> {t("hubWabaTemplatesTitle")}</DialogTitle></DialogHeader>
           <div className="space-y-3 py-2">
             <Input value={hubTemplateSearch} onChange={(e) => setHubTemplateSearch(e.target.value)} placeholder={t("searchTemplatePlaceholder")} className="h-8 text-sm" />
+            {!loadingHubTemplates && hubTemplateShortcuts.length > 0 &&
+              renderTemplateShortcuts(hubTemplateShortcuts, (ref) => applyQuickReplyHubTemplate(hubTemplates, ref))}
             {loadingHubTemplates ? (
               <p className="text-sm text-muted-foreground text-center py-4">{t("loadingTemplates")}</p>
             ) : hubTemplates.filter((tmpl) => !hubTemplateSearch || tmpl.name.toLowerCase().includes(hubTemplateSearch.toLowerCase())).length === 0 ? (
@@ -6470,7 +7084,7 @@ if (data.model) setRewriteModel(data.model);
                       <button
                         key={`${tp.name}-${tp.language}`}
                         onClick={() => setSelectedHubTemplate(tp)}
-                        className={`w-full text-left p-2.5 rounded-lg border text-sm transition-colors hover:bg-accent overflow-hidden ${selectedHubTemplate?.name === tp.name ? "border-primary bg-accent" : "border-transparent"}`}
+                        className={`w-full text-left p-2.5 rounded-lg border text-sm transition-colors hover:bg-accent overflow-hidden ${selectedHubTemplate?.name === tp.name && selectedHubTemplate?.language === tp.language ? "border-primary bg-accent" : "border-transparent"}`}
                         style={{ minWidth: 0, maxWidth: "100%", boxSizing: "border-box" }}
                       >
                         <p className="font-medium" style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{tp.name}</p>
@@ -6509,7 +7123,7 @@ if (data.model) setRewriteModel(data.model);
             )}
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => { setHubTemplateModal(false); setSelectedHubTemplate(null); }}>{t("cancel")}</Button>
+            <Button variant="outline" onClick={closeHubTemplates}>{t("cancel")}</Button>
             <Button onClick={handleSendHubTemplate} disabled={!selectedHubTemplate}>{t("sendTemplate")}</Button>
           </DialogFooter>
         </DialogContent>
@@ -6957,6 +7571,21 @@ if (data.model) setRewriteModel(data.model);
         </DialogContent>
       </Dialog>
 
+      {/* ── Dialog: convite do WebChat (texto com {{linkWebchat}}, trocado no servidor) ── */}
+      {webchatInviteOpen && (
+        <WebchatInviteSendDialog
+          open={webchatInviteOpen}
+          onOpenChange={setWebchatInviteOpen}
+          onSend={(inviteText) =>
+            onSendText(
+              applySignature(inviteText),
+              undefined,
+              hybridTextOnly ? { forceLinked: true, webchatInvite: true } : { webchatInvite: true }
+            )
+          }
+        />
+      )}
+
       {/* ── Dialog: WooCommerce product picker ── */}
       <ProductPickerDialog
         open={productPickerOpen}
@@ -6975,8 +7604,7 @@ if (data.model) setRewriteModel(data.model);
               imageUrl.startsWith("http") || imageUrl.startsWith("blob:") || imageUrl.startsWith("data:")
                 ? imageUrl
                 : `${apiBaseUrl}${imageUrl.startsWith("/") ? "" : "/"}${imageUrl}`;
-            const resp = await fetch(url);
-            const blob = await resp.blob();
+            const blob = await fetchMediaBlob(url, { credentials: "same-origin" });
             const mimeType = blob.type || "image/jpeg";
             const ext = (mimeType.split("/")[1] || "jpg").split("+")[0];
             const file = new File([blob], `produto_${Date.now()}.${ext}`, { type: mimeType });
@@ -6990,38 +7618,19 @@ if (data.model) setRewriteModel(data.model);
         }}
       />
 
-      {/* ── Dialog: Enviar Localização ── */}
-      <Dialog open={locationModal} onOpenChange={(open) => { if (!open) setLocationModal(false); }}>
-        <DialogContent className="max-w-sm">
-          <DialogHeader><DialogTitle className="flex items-center gap-2"><MapPin className="h-4 w-4" /> {t("sendLocationTitle")}</DialogTitle></DialogHeader>
-          <div className="space-y-3 py-2">
-            <div className="grid grid-cols-2 gap-2">
-              <div>
-                <Label className="text-xs">{t("latitudeRequired")}</Label>
-                <Input value={locLat} onChange={(e) => setLocLat(e.target.value)} placeholder="-23.5505" className="h-8 text-sm mt-1" />
-              </div>
-              <div>
-                <Label className="text-xs">{t("longitudeRequired")}</Label>
-                <Input value={locLng} onChange={(e) => setLocLng(e.target.value)} placeholder="-46.6333" className="h-8 text-sm mt-1" />
-              </div>
-            </div>
-            <div>
-              <Label className="text-xs">{t("locationNameOptional")}</Label>
-              <Input value={locName} onChange={(e) => setLocName(e.target.value)} placeholder={t("locationNamePlaceholder")} className="h-8 text-sm mt-1" />
-            </div>
-            <div>
-              <Label className="text-xs">{t("addressOptional")}</Label>
-              <Input value={locAddr} onChange={(e) => setLocAddr(e.target.value)} placeholder={t("addressPlaceholder")} className="h-8 text-sm mt-1" />
-            </div>
-          </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setLocationModal(false)}>{t("cancel")}</Button>
-            <Button onClick={handleSendLocationDialog} disabled={sendingLocation}>
-              {sendingLocation ? t("sending") : t("send")}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      {/* ── Dialog: Enviar Localização (itens "Localização" geral e WABA, e a mensagem rápida de localização) ── */}
+      <SendLocationDialog
+        open={locationDialogOpen}
+        onOpenChange={setLocationDialogOpen}
+        title={locationDialogTarget.route === "waba" ? t("sendWabaLocationTitle") : t("sendLocationTitle")}
+        initial={locationDialogTarget.initial}
+        savedLocations={quickReplies}
+        canSave={canSaveQuickReplies}
+        canSavePublic={canSavePublicQuickReplies}
+        existingKeys={quickReplyKeys}
+        onSubmit={locationDialogTarget.route === "waba" ? submitLocationWaba : submitLocationGeneral}
+        onSaved={handleLocationQuickReplySaved}
+      />
 
       {/* ── Dialog: Resumir Conversa com IA ── */}
       <Dialog open={summarizeOpen} onOpenChange={(open) => { if (!summarizing) setSummarizeOpen(open); }}>
@@ -7170,6 +7779,14 @@ if (data.model) setRewriteModel(data.model);
             ) : noteFile ? (
               <p className="text-xs text-muted-foreground truncate">{noteFile.name}</p>
             ) : null}
+            {noteFileUnreadable && (
+              <div role="alert" className="flex flex-wrap items-center gap-2 rounded-md border border-destructive/40 bg-destructive/5 px-2 py-1.5 text-xs text-destructive">
+                <span className="min-w-0 flex-1">{t("pickedFileUnreadable")}</span>
+                <Button type="button" variant="outline" size="sm" className="h-7 shrink-0" onClick={() => openPickedFileFallback(noteFileInputRef.current)}>
+                  {t("pickedFileOpenFiles")}
+                </Button>
+              </div>
+            )}
             <div className="flex gap-2 items-center">
               <input
                 ref={noteFileInputRef}

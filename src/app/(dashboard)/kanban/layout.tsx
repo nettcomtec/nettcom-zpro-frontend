@@ -3,19 +3,21 @@
 import React from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { useTranslations } from "next-intl";
 import { PageHeader } from "@/components/layout/page-header";
 
 const tabs = [
-  { name: "Quadro", href: "/kanban/board" },
-  { name: "Etiqueta", href: "/kanban/tags" },
+  { labelKey: "tabBoard", href: "/kanban/board" },
+  { labelKey: "tabTags", href: "/kanban/tags" },
 ];
 
 export default function KanbanLayout({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
+  const t = useTranslations("kanbanLayout");
 
   return (
     <div className="h-full flex flex-col gap-6 min-h-0">
-      <PageHeader title="Kanban" description="Gerencie seus quadros kanban" />
+      <PageHeader title={t("title")} description={t("description")} />
       <div className="flex gap-1 border-b shrink-0">
         {tabs.map((tab) => (
           <Link
@@ -27,7 +29,7 @@ export default function KanbanLayout({ children }: { children: React.ReactNode }
                 : "border-transparent text-muted-foreground hover:text-foreground"
             }`}
           >
-            {tab.name}
+            {t(tab.labelKey)}
           </Link>
         ))}
       </div>

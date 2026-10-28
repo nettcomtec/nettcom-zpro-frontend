@@ -57,6 +57,10 @@ type Props = {
 
 const DEFAULT_CHATFLOW = "__default__";
 
+// Canais oficiais: com a janela de 24 h fechada o encerramento fecha sem enviar
+// (espelho de OFFICIAL_WINDOW_CHANNELS no SendMessageAutoCloseZPRO).
+const OFFICIAL_WINDOW_TYPES = ["waba", "dialog360", "gupshup"];
+
 export function InactivityConfigManager({ value, onChange, channelType, chatFlows }: Props) {
   const t = useTranslations("sessoesPage");
 
@@ -94,6 +98,11 @@ export function InactivityConfigManager({ value, onChange, channelType, chatFlow
   return (
     <div className="min-w-0 space-y-3">
       <p className="text-xs text-muted-foreground">{t("inactivitySectionHint")}</p>
+      {OFFICIAL_WINDOW_TYPES.includes(channelType) && (
+        <div className="rounded-md border border-amber-200 bg-amber-50 p-2 text-xs text-amber-800">
+          {t("inactivityOfficialWindowNote")}
+        </div>
+      )}
 
       <div className="space-y-2">
         <Label>{t("inactivityModeLabel")}</Label>

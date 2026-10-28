@@ -40,17 +40,24 @@ import { Store } from "lucide-react";
 import { useLiveMode } from "@/hooks/use-live-mode";
 import { cn } from "@/lib/utils";
 import { NewConversationDialog } from "@/components/layout/header";
+import { useAuthStore } from "@/stores/auth-store";
+import { useRegion, type UseRegionResult } from "@/hooks/use-region";
+import { withDialCode } from "@/lib/region";
 
 const ORDER_STATUSES = [
   "pending", "processing", "on-hold", "completed", "cancelled", "refunded", "failed"
 ] as const;
 
-function formatPrice(value: string | number | null | undefined, currency = "BRL"): string {
+// Moeda do pedido vence (sem ela, a da empresa); formato no país da empresa.
+function formatPrice(
+  value: string | number | null | undefined,
+  currency: string | null | undefined,
+  formatMoney: UseRegionResult["formatMoney"]
+): string {
   if (value === null || value === undefined || value === "") return "—";
   const n = Number(value);
   if (!Number.isFinite(n)) return String(value);
-  const symbol = currency === "BRL" ? "R$ " : `${currency} `;
-  return `${symbol}${n.toFixed(2)}`;
+  return formatMoney(n, { currency: currency || undefined });
 }
 
 function formatDate(iso: string): string {
@@ -91,6 +98,7 @@ export function WooCommercePedidosView({ embedded = false }: { embedded?: boolea
   const searchParams = useSearchParams();
   const pathname = usePathname();
   const { isLiveMode } = useLiveMode();
+  const { formatMoney, country } = useRegion();
 
   const [stores, setStores] = useState<WooStoreSummary[]>([]);
   const initialStoreId = useMemo(() => {
@@ -130,6 +138,8 @@ export function WooCommercePedidosView({ embedded = false }: { embedded?: boolea
 
   const [messageOpen, setMessageOpen] = useState(false);
   const [messageOrder, setMessageOrder] = useState<WooOrder | null>(null);
+  // "Enviar mensagem" abre a Nova Conversa: some para quem não pode iniciar conversa (D12).
+  const canStartConversation = useAuthStore((s) => s.canStartConversation());
 
   const openSendMessage = (o: WooOrder) => {
     setMessageOrder(o);
@@ -434,7 +444,7 @@ export function WooCommercePedidosView({ embedded = false }: { embedded?: boolea
                   {o.line_items?.length ?? 0}
                 </TableCell>
                 <TableCell className="text-foreground text-sm font-medium">
-                  {formatPrice(o.total, o.currency)}
+                  {formatPrice(o.total, o.currency, formatMoney)}
                 </TableCell>
                 <TableCell className="hidden lg:table-cell text-muted-foreground text-sm">
                   {o.payment_method_title || "—"}
@@ -453,13 +463,15 @@ export function WooCommercePedidosView({ embedded = false }: { embedded?: boolea
                       >
                         <Eye className="h-4 w-4" /> {t("actionView")}
                       </DropdownMenuItem>
-                      <DropdownMenuItem
-                        onClick={() => openSendMessage(o)}
-                        disabled={!o.billing?.phone && !o.billing?.email}
-                        className="gap-2 cursor-pointer hover:bg-muted"
-                      >
-                        <Send className="h-4 w-4" /> {t("actionSendMessage")}
-                      </DropdownMenuItem>
+                      {canStartConversation && (
+                        <DropdownMenuItem
+                          onClick={() => openSendMessage(o)}
+                          disabled={!o.billing?.phone && !o.billing?.email}
+                          className="gap-2 cursor-pointer hover:bg-muted"
+                        >
+                          <Send className="h-4 w-4" /> {t("actionSendMessage")}
+                        </DropdownMenuItem>
+                      )}
                       <DropdownMenuSub>
                         <DropdownMenuSubTrigger className="gap-2 cursor-pointer hover:bg-muted">
                           <CircleCheck className="h-4 w-4" /> {t("actionChangeStatus")}
@@ -575,7 +587,7 @@ export function WooCommercePedidosView({ embedded = false }: { embedded?: boolea
                           </TableCell>
                           <TableCell className="text-center text-foreground text-sm">{li.quantity}</TableCell>
                           <TableCell className="text-right text-foreground text-sm">
-                            {formatPrice(li.total, detail.currency)}
+                            {formatPrice(li.total, detail.currency, formatMoney)}
                           </TableCell>
                         </TableRow>
                       ))}
@@ -616,15 +628,15 @@ export function WooCommercePedidosView({ embedded = false }: { embedded?: boolea
                   </div>
                   <div className="flex justify-between text-xs text-muted-foreground">
                     <span>{t("paymentShipping")}</span>
-                    <span>{formatPrice(detail.shipping_total, detail.currency)}</span>
+                    <span>{formatPrice(detail.shipping_total, detail.currency, formatMoney)}</span>
                   </div>
                   <div className="flex justify-between text-xs text-muted-foreground">
                     <span>{t("paymentTax")}</span>
-                    <span>{formatPrice(detail.total_tax, detail.currency)}</span>
+                    <span>{formatPrice(detail.total_tax, detail.currency, formatMoney)}</span>
                   </div>
                   <div className="flex justify-between text-sm text-foreground font-medium pt-1 border-t border-border mt-1">
                     <span>{t("paymentTotal")}</span>
-                    <span>{formatPrice(detail.total, detail.currency)}</span>
+                    <span>{formatPrice(detail.total, detail.currency, formatMoney)}</span>
                   </div>
                 </section>
               </div>
@@ -731,7 +743,9 @@ export function WooCommercePedidosView({ embedded = false }: { embedded?: boolea
       <NewConversationDialog
         open={messageOpen}
         onOpenChange={(o) => { setMessageOpen(o); if (!o) setMessageOrder(null); }}
-        prefilledNumber={messageOrder?.billing?.phone || undefined}
+        // A loja costuma guardar o telefone sem DDI: completa pelo país do pedido
+        // (sem país, o da empresa). Número já com DDI ou "+" segue como está.
+        prefilledNumber={withDialCode(messageOrder?.billing?.phone, messageOrder?.billing?.country || country) || undefined}
         prefilledContactName={messageOrder ? customerName(messageOrder) : undefined}
         prefilledContactEmail={messageOrder?.billing?.email || undefined}
       />

@@ -21,6 +21,7 @@ export type AiTopupStatus = "pending" | "credited" | "expired" | "canceled" | "d
 export type AiUsageSource =
   | "agent"
   | "agent_summary"
+  | "agent_qualify"
   | "kb_embedding"
   | "kb_query"
   | "chatgpt"

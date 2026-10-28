@@ -28,8 +28,46 @@ export interface SendMessagePayload {
   quotedMsgId?: number | null;
 }
 
-export async function fetchPrivateMessages(userId: number, isGroup = false, pageNumber?: number) {
-  return api.get(`/chat-privado/msg/${userId}`, { params: { isGroup, ...(pageNumber !== undefined ? { pageNumber } : {}) } });
+/**
+ * `untilMessageId` (só com a página 1): o servidor devolve as páginas até a dessa mensagem e
+ * responde `pageNumber` + `target` (`found` | `tooOld` | `notFound`). Backend antigo ignora.
+ */
+export async function fetchPrivateMessages(userId: number, isGroup = false, pageNumber?: number, untilMessageId?: number) {
+  return api.get(`/chat-privado/msg/${userId}`, {
+    params: {
+      isGroup,
+      ...(pageNumber !== undefined ? { pageNumber } : {}),
+      ...(untilMessageId !== undefined && pageNumber === 1 ? { untilMessageId } : {}),
+    },
+  });
+}
+
+export interface PrivateChatSearchResult {
+  id: number;
+  /** Trecho em volta da palavra encontrada (a mensagem pode ser longa). */
+  text: string;
+  mediaType: string | null;
+  createdAt: string;
+  timestamp: number | null;
+  senderId: number | null;
+  senderName: string | null;
+  conversation: { isGroup: boolean; id: number; name: string; profilePicture: string | null };
+}
+
+/** Busca por palavras nas conversas do usuário e nas equipes de que ele é membro. */
+export async function searchPrivateMessages(
+  params: { q: string; contactId?: number; isGroup?: boolean; beforeId?: number; limit?: number },
+  signal?: AbortSignal
+) {
+  return api.get<{ results: PrivateChatSearchResult[]; hasMore: boolean }>("/chat-privado/search", {
+    params: {
+      q: params.q,
+      ...(params.contactId !== undefined ? { contactId: params.contactId, isGroup: !!params.isGroup } : {}),
+      ...(params.beforeId !== undefined ? { beforeId: params.beforeId } : {}),
+      ...(params.limit !== undefined ? { limit: params.limit } : {}),
+    },
+    signal,
+  });
 }
 
 export async function sendPrivateMessage(data: FormData | SendMessagePayload) {
@@ -69,6 +107,30 @@ export async function fetchUnreadCounts() {
 
 export async function fetchUnreadGroupCounts() {
   return api.get("/chat-privado/groups/mensagens");
+}
+
+/** Total de não lidas (conversas + equipes), no mesmo formato lido pelo sino e pela tela. */
+export async function fetchChatUnreadTotal(): Promise<number> {
+  const [privateRes, groupRes] = await Promise.all([
+    fetchUnreadCounts(),
+    fetchUnreadGroupCounts().catch(() => ({ data: { count: 0 } })),
+  ]);
+  const privateCount = Number((privateRes.data as { count?: number })?.count) || 0;
+  const g = groupRes.data as { count?: number | { count?: number } };
+  const groupCount = Number(g?.count && typeof g.count === "object" ? g.count?.count : g?.count) || 0;
+  return privateCount + groupCount;
+}
+
+/**
+ * Mesmo total, mas falha se QUALQUER parte falhar. Para decisões que apagam algo (ex.: tirar o
+ * aviso fixo quando o total dá 0): a versão acima conta como 0 a parte de equipes que falhou.
+ */
+export async function fetchChatUnreadTotalStrict(): Promise<number> {
+  const [privateRes, groupRes] = await Promise.all([fetchUnreadCounts(), fetchUnreadGroupCounts()]);
+  const privateCount = Number((privateRes.data as { count?: number })?.count) || 0;
+  const g = groupRes.data as { count?: number | { count?: number } };
+  const groupCount = Number(g?.count && typeof g.count === "object" ? g.count?.count : g?.count) || 0;
+  return privateCount + groupCount;
 }
 
 export interface UnreadPreviewItem {

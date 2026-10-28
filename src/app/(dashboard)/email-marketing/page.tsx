@@ -445,7 +445,7 @@ export default function EmailMarketingPage() {
               rows={8}
               value={importText}
               onChange={e => setImportText(e.target.value)}
-              placeholder={"nome@dominio.com\noutro@dominio.com"}
+              placeholder={t("importPlaceholder")}
             />
             <p className="text-xs text-muted-foreground">{t("importHint")}</p>
           </div>

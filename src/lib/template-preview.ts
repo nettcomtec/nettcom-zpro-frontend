@@ -20,6 +20,7 @@
  */
 
 import { extractOrderDetails, formatMetaAmount, isOrderDetailsTemplate } from "./order-details";
+import { uiT } from "@/lib/ui-t";
 
 type AnyComp = {
   type?: string;
@@ -117,7 +118,7 @@ const CHARGE_LABEL_KEY = "chargePreview";
 const CHARGE_LABEL_FALLBACK = "Cobrança";
 
 const getChargeLabel = (t?: TranslateFn): string => {
-  if (!t) return CHARGE_LABEL_FALLBACK;
+  if (!t) return uiT(`atendimentoChatExtra.${CHARGE_LABEL_KEY}`, undefined, CHARGE_LABEL_FALLBACK);
   try {
     const label = t(CHARGE_LABEL_KEY);
     // next-intl devolve `namespace.chave` quando a chave não existe no locale.
@@ -260,7 +261,9 @@ export const getTicketLastMessagePreview = (
       const stripped = lines[i].replace(/^\*(.+)\*$/, "$1").trim();
       if (stripped) return stripped;
     }
-    return raw.startsWith("[LIST]") ? "Lista" : "Botão";
+    return raw.startsWith("[LIST]")
+      ? uiT("templatePreview.list", undefined, "Lista")
+      : uiT("templatePreview.button", undefined, "Botão");
   }
 
   if (TEMPLATE_BAILEYS_MARKERS.some((m) => raw.includes(m))) {
@@ -359,7 +362,8 @@ export const getMediaTypeFallbackLabel = (
   if (mt === "sticker") return t("mediaSticker");
   if (mt.includes("vcard") || mt.includes("contact")) return t("mediaContact");
   if (mt.includes("location")) return t("mediaLocation");
-  if (mt === "chat" || mt === "conversation" || mt === "extendedtextmessage" || mt === "notes") return null;
+  // "text" é o tipo das mensagens de texto dos canais oficiais (Instagram, Messenger, WhatsApp oficial).
+  if (mt === "chat" || mt === "conversation" || mt === "extendedtextmessage" || mt === "notes" || mt === "text") return null;
   if (mt === "listresponsemessage") return null;
   return t("mediaFile");
 };

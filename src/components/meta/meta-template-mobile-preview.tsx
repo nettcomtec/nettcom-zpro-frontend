@@ -1,6 +1,7 @@
 "use client";
 
 import { MessageCircle, Instagram, Camera, Globe, Phone, CornerUpLeft, Link2, ImageIcon, Receipt } from "lucide-react";
+import { useTranslations } from "next-intl";
 import { sanitize } from "@/lib/sanitize";
 
 type Channel = "messenger" | "instagram";
@@ -33,6 +34,7 @@ export function MessengerTemplatePreview({
   template: any;
   channel?: Channel;
 }) {
+  const t = useTranslations("metaTemplatePreview");
   if (!template) return null;
   const components: any[] = template.components || [];
   const header = components.find((c) => c.type === "HEADER");
@@ -108,10 +110,10 @@ export function MessengerTemplatePreview({
                         (btn.type === "URL"
                           ? btn.url || "URL"
                           : btn.type === "PHONE_NUMBER"
-                          ? btn.phone_number || "Telefone"
+                          ? btn.phone_number || t("phoneFallback")
                           : btn.type === "ORDER_DETAILS"
-                          ? "Pagar"
-                          : "Resposta")}
+                          ? t("payFallback")
+                          : t("replyFallback"))}
                     </span>
                   </div>
                 ))}
@@ -144,6 +146,7 @@ export function GenericTemplatePreview({
   channel?: Channel;
   elements: PreviewGenericElement[];
 }) {
+  const t = useTranslations("metaTemplatePreview");
   const theme = channelTheme(channel);
   const HeaderIcon = theme.Icon;
   const cards = (elements || []).filter((el) => (el.title || "").trim() || (el.image_url || "").trim());
@@ -177,7 +180,7 @@ export function GenericTemplatePreview({
               </div>
               <div className="p-2 space-y-0.5">
                 <p className="text-xs font-semibold text-gray-900 truncate">
-                  {(el.title || "").trim() || "Título do card"}
+                  {(el.title || "").trim() || t("cardTitleFallback")}
                 </p>
                 {(el.subtitle || "").trim() && (
                   <p className="text-[11px] text-gray-500 line-clamp-2">{el.subtitle}</p>

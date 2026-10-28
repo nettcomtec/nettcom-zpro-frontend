@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 
-const PUBLIC_PATHS = ["/login", "/masterkey", "/reset", "/signup", "/precos", "/politica-de-privacidade", "/termos-de-uso", "/agendar", "/validate-a2f", "/api", "/_next", "/favicon", "/icons", "/public", "/sw.js", "/manifest"];
+const PUBLIC_PATHS = ["/login", "/masterkey", "/reset", "/signup", "/precos", "/politica-de-privacidade", "/termos-de-uso", "/agendar", "/validate-a2f", "/auth/google-business", "/api", "/_next", "/favicon", "/icons", "/public", "/sw.js", "/manifest"];
 
 export function middleware(req: NextRequest): NextResponse {
   const { pathname } = req.nextUrl;
@@ -13,6 +13,12 @@ export function middleware(req: NextRequest): NextResponse {
   // Contrato público do revendedor: igualdade exata (ou subcaminho), nunca prefixo
   // solto — senão uma rota futura como /contratos ficaria pública.
   if (pathname === "/contrato" || pathname.startsWith("/contrato/")) {
+    return NextResponse.next();
+  }
+
+  // Formulário público (/f/<endereço>): mesma regra. "/f" em PUBLIC_PATHS (startsWith)
+  // liberaria /filas, /funil, /fechamento, /ferramentas.
+  if (pathname === "/f" || pathname.startsWith("/f/")) {
     return NextResponse.next();
   }
 

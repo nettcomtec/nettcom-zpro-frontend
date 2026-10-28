@@ -69,12 +69,16 @@ import {
   verifyWebchatConfig,
   getWebchatWidget,
   buildDirectLinkUrl,
+  fetchWebchatInviteAvailability,
+  fetchWebchatInviteMessage,
+  invalidateWebchatInviteMessage,
   WEBCHAT_DEFAULT_COLOR,
   WEBCHAT_PRECHAT_FIELDS,
   type WebchatDirectConfig,
 } from "@/services/webchat";
 import { fetchWhatsapps, updateWhatsapp, type Whatsapp } from "@/services/whatsapp";
 import { useAuthStore } from "@/stores/auth-store";
+import { getBackendErrorCode } from "@/lib/backend-error-code";
 
 interface ChannelOption {
   label: string;
@@ -210,6 +214,116 @@ function montarConfigCompleta(
   };
 }
 
+/** Canais WebChat da resposta do GET /whatsapp, no formato do seletor da página. */
+function toWebchatChannelOptions(data: unknown): ChannelOption[] {
+  const sessions: Whatsapp[] = Array.isArray(data)
+    ? (data as Whatsapp[])
+    : (data as { whatsapps?: Whatsapp[] } | null)?.whatsapps || [];
+  return sessions
+    .filter((w) => w.type === "webchat" && !("isDeleted" in w && w.isDeleted))
+    .map((w) => {
+      // Campo novo fora da interface Whatsapp — ler via cast (probe §7:
+      // chave presente no GET = backend novo; ausente = backend antigo).
+      const rawConfig = (w as unknown as Record<string, unknown>).webchatConfig;
+      return {
+        label: w.name,
+        value: w.wabaId || String(w.id),
+        status: w.status,
+        id: w.id,
+        hasWebchatConfig: rawConfig !== undefined,
+        webchatConfig: (rawConfig ?? null) as WebchatDirectConfig | null,
+        wabaId: w.wabaId || "",
+      };
+    });
+}
+
+// Variável do link de convite (PLANO_WEBCHAT_LINK_CONVITE D1/D5): uma só, para o canal marcado.
+const WEBCHAT_INVITE_VARIABLE = "{{linkWebchat}}";
+
+const WEBCHAT_INVITE_ALERT_KEYS = [
+  "inviteLinkAlertOnce",
+  "inviteLinkAlertCloseFlow",
+  "inviteLinkAlertAudience",
+  "inviteLinkAlertDispatch",
+  "inviteLinkAlertEmpty",
+  "inviteLinkAlertAlone",
+  "inviteLinkAlertInApp",
+  "inviteLinkAlertUnlink",
+] as const;
+
+/** Copia texto; fora de contexto seguro (instalação por IP/HTTP) cai no modo antigo. */
+async function copyTextToClipboard(text: string): Promise<boolean> {
+  try {
+    if (typeof navigator !== "undefined" && navigator.clipboard?.writeText && window.isSecureContext) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch {
+    // cai no modo antigo abaixo
+  }
+  try {
+    const area = document.createElement("textarea");
+    area.value = text;
+    area.setAttribute("readonly", "");
+    area.style.position = "fixed";
+    area.style.top = "-1000px";
+    area.style.opacity = "0";
+    document.body.appendChild(area);
+    area.select();
+    const ok = document.execCommand("copy");
+    document.body.removeChild(area);
+    return ok;
+  } catch {
+    return false;
+  }
+}
+
+// Como funciona + alertas do link de convite. O tooltip do Radix não abre por toque (fecha no
+// clique), então o clique abre e tocar fora fecha — mesmo molde da ajuda do turno da noite em
+// Filas; sem isso, no celular a explicação nunca apareceria.
+function InviteLinkTip({ label, intro, alertsTitle, alerts }: { label: string; intro: string; alertsTitle: string; alerts: string[] }) {
+  const [open, setOpen] = useState(false);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  return (
+    <TooltipProvider delayDuration={150}>
+      <Tooltip open={open} onOpenChange={setOpen}>
+        <TooltipTrigger asChild>
+          <button
+            ref={triggerRef}
+            type="button"
+            aria-label={label}
+            onPointerDown={(e) => e.preventDefault()}
+            onClick={(e) => {
+              e.preventDefault();
+              setOpen(true);
+            }}
+            className="inline-flex shrink-0 items-center text-muted-foreground hover:text-foreground"
+          >
+            <HelpCircle className="h-3.5 w-3.5" />
+          </button>
+        </TooltipTrigger>
+        {/* 1 intro + 8 alertas passam da altura da tela: altura limitada, com rolagem. */}
+        <TooltipContent
+          side="top"
+          collisionPadding={16}
+          className="max-w-[20rem] max-h-[60vh] overflow-y-auto whitespace-normal leading-relaxed"
+          onPointerDownOutside={(e) => {
+            if (triggerRef.current?.contains(e.target as Node)) e.preventDefault();
+          }}
+        >
+          <p>{intro}</p>
+          <p className="mt-2 font-medium">{alertsTitle}</p>
+          <ul className="mt-1 list-disc space-y-1 pl-4">
+            {alerts.map((text, i) => (
+              <li key={i}>{text}</li>
+            ))}
+          </ul>
+        </TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
+  );
+}
+
 // Logo da galeria pode vir com URL relativa; a página pública do link direto
 // precisa de URL absoluta (o sanitizador do backend exige http/https).
 function toAbsoluteUrl(url: string): string {
@@ -257,6 +371,29 @@ export default function WebchatPage() {
   // formulário inicial mostra a tela do formulário; o resto mostra a conversa).
   const [configTab, setConfigTab] = useState("appearance");
   const [previewMode, setPreviewMode] = useState<"draft" | "live">("draft");
+  // Link de convite (PLANO_WEBCHAT_LINK_CONVITE D5): só com o servidor que entende a chave
+  // (availability 200 com available) — backend antigo descartaria a opção em silêncio.
+  const [inviteAvailable, setInviteAvailable] = useState(false);
+  const [savingInvite, setSavingInvite] = useState(false);
+  const reloadChannelsSeqRef = useRef(0);
+  // Texto do botão "Enviar convite do WebChat" do atendimento: o campo só aparece com o servidor
+  // que responde GET /webchat-invite/message (backend antigo descartaria a chave em silêncio).
+  const [inviteMessageDefault, setInviteMessageDefault] = useState<string | null>(null);
+  const [inviteMessageDraft, setInviteMessageDraft] = useState("");
+  const [savingInviteMessage, setSavingInviteMessage] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    fetchWebchatInviteAvailability().then((res) => {
+      if (alive) setInviteAvailable(res.available);
+    });
+    fetchWebchatInviteMessage({ fresh: true }).then((res) => {
+      if (alive) setInviteMessageDefault(res ? res.defaultText : null);
+    });
+    return () => {
+      alive = false;
+    };
+  }, []);
 
   useEffect(() => {
     const load = async () => {
@@ -275,28 +412,7 @@ export default function WebchatPage() {
         setBackendWssFuncionando(configRes.data.backendWssFuncionando ?? false);
         setModo(configRes.data.modo ?? "nenhum");
 
-        const sessions: Whatsapp[] = Array.isArray(whatsappsRes.data)
-          ? whatsappsRes.data
-          : (whatsappsRes.data as { whatsapps?: Whatsapp[] })?.whatsapps || [];
-
-        const webchatSessions = sessions
-          .filter((w) => w.type === "webchat" && !("isDeleted" in w && w.isDeleted))
-          .map((w) => {
-            // Campo novo fora da interface Whatsapp — ler via cast (probe §7:
-            // chave presente no GET = backend novo; ausente = backend antigo).
-            const rawConfig = (w as unknown as Record<string, unknown>).webchatConfig;
-            return {
-              label: w.name,
-              value: w.wabaId || String(w.id),
-              status: w.status,
-              id: w.id,
-              hasWebchatConfig: rawConfig !== undefined,
-              webchatConfig: (rawConfig ?? null) as WebchatDirectConfig | null,
-              wabaId: w.wabaId || "",
-            };
-          });
-
-        setChannelOptions(webchatSessions);
+        setChannelOptions(toWebchatChannelOptions(whatsappsRes.data));
       } catch {
         toast.error(t("errorLoad"));
       } finally {
@@ -315,6 +431,13 @@ export default function WebchatPage() {
     !!selectedOption && selectedOption.hasWebchatConfig && !!selectedOption.wabaId;
   const savedConfig = selectedOption?.webchatConfig ?? null;
   const directLinkEnabled = savedConfig?.directLinkEnabled === true;
+  const inviteLinkEnabled = savedConfig?.inviteLinkEnabled === true;
+  const savedInviteMessage =
+    typeof savedConfig?.inviteMessageText === "string" ? savedConfig.inviteMessageText : "";
+  // O campo acompanha o canal escolhido e o texto salvo.
+  useEffect(() => {
+    setInviteMessageDraft(savedInviteMessage);
+  }, [selectedChannel, savedInviteMessage]);
   const directLinkUrl = selectedOption?.wabaId
     ? buildDirectLinkUrl(selectedOption.wabaId)
     : "";
@@ -339,7 +462,7 @@ export default function WebchatPage() {
   const alternarLinkDireto = useCallback(
     async (novoValor: boolean) => {
       const opt = channelOptions.find((o) => o.value === selectedChannel);
-      if (!opt || savingToggle) return;
+      if (!opt || savingToggle || savingInvite || savingInviteMessage) return;
       setSavingToggle(true);
       try {
         // Objeto completo a partir do salvo no GET (merge raso defensivo no back).
@@ -349,6 +472,8 @@ export default function WebchatPage() {
         };
         await updateWhatsapp(opt.id, { webchatConfig: payload });
         aplicarConfigLocal(opt.value, payload);
+        // O botão do convite no atendimento depende do link direto ligado.
+        invalidateWebchatInviteMessage();
         toast.success(t("configSaveSuccess"));
       } catch {
         toast.error(t("configSaveError"));
@@ -356,12 +481,97 @@ export default function WebchatPage() {
         setSavingToggle(false);
       }
     },
-    [channelOptions, selectedChannel, savingToggle, aplicarConfigLocal]
+    [channelOptions, selectedChannel, savingToggle, savingInvite, savingInviteMessage, aplicarConfigLocal]
   );
+
+  // Relê os canais do servidor (sem mexer no canal escolhido nem no formulário): depois de
+  // marcar o link de convite, o backend desmarca o canal que tinha a opção (D5) e a memória
+  // da página ficaria com os dois marcados — salvar o outro canal depois o remarcaria.
+  const recarregarCanais = useCallback(async () => {
+    const seq = ++reloadChannelsSeqRef.current;
+    try {
+      const res = await fetchWhatsapps();
+      if (seq !== reloadChannelsSeqRef.current) return;
+      setChannelOptions(toWebchatChannelOptions(res.data));
+    } catch {
+      // Sem a releitura fica o ajuste local feito ao ligar.
+    }
+  }, []);
+
+  const alternarConvite = useCallback(
+    async (novoValor: boolean) => {
+      const opt = channelOptions.find((o) => o.value === selectedChannel);
+      if (!opt || savingInvite || savingToggle || savingConfig || savingInviteMessage) return;
+      setSavingInvite(true);
+      try {
+        const payload: WebchatDirectConfig = {
+          ...(opt.webchatConfig ?? {}),
+          inviteLinkEnabled: novoValor,
+        };
+        await updateWhatsapp(opt.id, { webchatConfig: payload });
+        aplicarConfigLocal(opt.value, payload);
+        if (novoValor) {
+          // Espelho imediato do que o backend fez (só um canal por empresa); a releitura confirma.
+          setChannelOptions((prev) =>
+            prev.map((o) =>
+              o.value !== opt.value && o.webchatConfig?.inviteLinkEnabled === true
+                ? { ...o, webchatConfig: { ...o.webchatConfig, inviteLinkEnabled: false } }
+                : o
+            )
+          );
+          void recarregarCanais();
+        }
+        invalidateWebchatInviteMessage();
+        toast.success(novoValor ? t("inviteLinkOn") : t("inviteLinkOff"));
+      } catch (err) {
+        // "Sem permissão" já tem o aviso global do painel.
+        if (getBackendErrorCode(err) !== "ERR_NO_PERMISSION") toast.error(t("inviteLinkSaveError"));
+      } finally {
+        setSavingInvite(false);
+      }
+    },
+    [channelOptions, selectedChannel, savingInvite, savingToggle, savingConfig, savingInviteMessage, aplicarConfigLocal, recarregarCanais]
+  );
+
+  const copiarVariavelConvite = useCallback(async () => {
+    const ok = await copyTextToClipboard(WEBCHAT_INVITE_VARIABLE);
+    if (ok) toast.success(t("inviteLinkCopied"));
+    else toast.error(t("directLinkCopyError"));
+  }, []);
+
+  // Texto do botão "Enviar convite do WebChat" (vazio = texto padrão no idioma da empresa).
+  const salvarTextoConvite = useCallback(async () => {
+    const opt = channelOptions.find((o) => o.value === selectedChannel);
+    if (!opt || savingInviteMessage || savingInvite || savingToggle || savingConfig) return;
+    setSavingInviteMessage(true);
+    try {
+      const value = inviteMessageDraft.trim();
+      // Só a chave do texto: o servidor mescla com o que está gravado. Mandar o objeto
+      // inteiro da tela regravaria a marca do convite que outro admin já trocou de canal.
+      await updateWhatsapp(opt.id, { webchatConfig: { inviteMessageText: value || null } });
+      aplicarConfigLocal(opt.value, { ...(opt.webchatConfig ?? {}), inviteMessageText: value || null });
+      invalidateWebchatInviteMessage();
+      toast.success(t("inviteMessageSaved"));
+    } catch (err) {
+      // "Sem permissão" já tem o aviso global do painel.
+      if (getBackendErrorCode(err) !== "ERR_NO_PERMISSION") toast.error(t("inviteMessageSaveError"));
+    } finally {
+      setSavingInviteMessage(false);
+    }
+  }, [
+    channelOptions,
+    selectedChannel,
+    savingInviteMessage,
+    savingInvite,
+    savingToggle,
+    savingConfig,
+    inviteMessageDraft,
+    aplicarConfigLocal,
+  ]);
 
   const salvarConfig = useCallback(async () => {
     const opt = channelOptions.find((o) => o.value === selectedChannel);
-    if (!opt || savingConfig) return;
+    if (!opt || savingConfig || savingInvite || savingInviteMessage) return;
     setSavingConfig(true);
     try {
       const payload = montarConfigCompleta(
@@ -378,7 +588,7 @@ export default function WebchatPage() {
     } finally {
       setSavingConfig(false);
     }
-  }, [channelOptions, selectedChannel, savingConfig, configForm, aplicarConfigLocal]);
+  }, [channelOptions, selectedChannel, savingConfig, savingInvite, savingInviteMessage, configForm, aplicarConfigLocal]);
 
   const copiarLinkDireto = useCallback(async () => {
     if (!directLinkUrl) return;
@@ -476,8 +686,9 @@ export default function WebchatPage() {
     setTimeout(() => {
       const iframe = sandboxIframeRef.current;
       if (!iframe) return;
+      const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
       const html = `<!DOCTYPE html>
-<html lang="pt-BR">
+<html lang="${esc(document.documentElement.lang || "pt-BR")}">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -491,15 +702,15 @@ export default function WebchatPage() {
 </head>
 <body>
   <div class="sandbox-info">
-    <h2>Sandbox do Widget</h2>
-    <p>O widget aparece no canto inferior direito.</p>
+    <h2>${esc(t("sandboxHeading"))}</h2>
+    <p>${esc(t("sandboxHint"))}</p>
   </div>
   <script>${widgetCode}<\/script>
 </body>
 </html>`;
       iframe.srcdoc = html;
     }, 100);
-  }, [widgetCode]);
+  }, [widgetCode, t]);
 
   const getBannerVariant = () => {
     if (!webchatConfigurado) return "warning";
@@ -528,7 +739,7 @@ export default function WebchatPage() {
   };
 
   const botaoSalvarConfig = (
-    <Button onClick={salvarConfig} disabled={savingConfig || savingToggle}>
+    <Button onClick={salvarConfig} disabled={savingConfig || savingToggle || savingInvite}>
       {savingConfig ? (
         <Loader2 className="mr-2 h-4 w-4 animate-spin" />
       ) : (
@@ -821,7 +1032,7 @@ export default function WebchatPage() {
                   id="directLinkToggle"
                   checked={directLinkEnabled}
                   onCheckedChange={alternarLinkDireto}
-                  disabled={savingToggle}
+                  disabled={savingToggle || savingInvite}
                 />
               </div>
 
@@ -865,6 +1076,90 @@ export default function WebchatPage() {
                       {t("directLinkQrHint")}
                     </p>
                   </div>
+
+                  {/* Link de convite (PLANO_WEBCHAT_LINK_CONVITE D5): o cliente do WhatsApp abre o
+                      link e continua aqui como o mesmo contato. Um canal por empresa (salva na hora). */}
+                  {inviteAvailable && (
+                    <div className="space-y-3 rounded-lg border p-3">
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0 space-y-0.5">
+                          <div className="flex items-center gap-1.5">
+                            <Label htmlFor="inviteLinkToggle" className="cursor-pointer">
+                              {t("inviteLinkLabel")}
+                            </Label>
+                            <InviteLinkTip
+                              label={t("inviteLinkAlertsTitle")}
+                              intro={t("inviteLinkTooltip")}
+                              alertsTitle={t("inviteLinkAlertsTitle")}
+                              alerts={WEBCHAT_INVITE_ALERT_KEYS.map((k) => t(k))}
+                            />
+                          </div>
+                          <p className="text-xs text-muted-foreground">{t("inviteLinkDescription")}</p>
+                        </div>
+                        <Switch
+                          id="inviteLinkToggle"
+                          checked={inviteLinkEnabled}
+                          onCheckedChange={alternarConvite}
+                          disabled={savingInvite || savingToggle || savingConfig}
+                        />
+                      </div>
+                      {inviteLinkEnabled && (
+                        <div className="flex flex-col gap-2 rounded-md bg-muted/50 p-2 sm:flex-row sm:items-center">
+                          <p className="min-w-0 flex-1 break-words text-xs">
+                            {t("inviteLinkVariableHint", { variable: WEBCHAT_INVITE_VARIABLE })}
+                          </p>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            className="shrink-0"
+                            onClick={copiarVariavelConvite}
+                          >
+                            <Copy className="mr-2 h-4 w-4" /> {t("inviteLinkCopyVariable")}
+                          </Button>
+                        </div>
+                      )}
+                      {/* Texto do botão "Enviar convite do WebChat" do atendimento oficial. */}
+                      {inviteLinkEnabled && inviteMessageDefault !== null && (
+                        <div className="space-y-2">
+                          <Label htmlFor="inviteMessageText">{t("inviteMessageLabel")}</Label>
+                          <p className="text-xs text-muted-foreground">
+                            {t("inviteMessageHint", { variable: WEBCHAT_INVITE_VARIABLE })}
+                          </p>
+                          <Textarea
+                            id="inviteMessageText"
+                            value={inviteMessageDraft}
+                            onChange={(e) => setInviteMessageDraft(e.target.value)}
+                            placeholder={inviteMessageDefault}
+                            maxLength={1000}
+                            rows={3}
+                            disabled={savingInviteMessage}
+                          />
+                          <div className="flex justify-end">
+                            <Button
+                              type="button"
+                              size="sm"
+                              onClick={salvarTextoConvite}
+                              disabled={
+                                savingInviteMessage ||
+                                savingInvite ||
+                                savingToggle ||
+                                savingConfig ||
+                                inviteMessageDraft.trim() === savedInviteMessage.trim()
+                              }
+                            >
+                              {savingInviteMessage ? (
+                                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                              ) : (
+                                <Save className="mr-2 h-4 w-4" />
+                              )}
+                              {t("inviteMessageSave")}
+                            </Button>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
 
                   {/* Ajuda colapsável */}
                   <Collapsible open={helpOpen} onOpenChange={setHelpOpen} className="rounded-lg border">

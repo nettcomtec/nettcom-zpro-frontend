@@ -32,6 +32,9 @@ import {
 import { isMetaAppPermissionError } from "@/lib/meta-app-permission-error";
 import { usePageAccess } from "@/hooks/use-page-access";
 import { AccessDenied } from "@/components/layout/access-denied";
+import { useAuthStore } from "@/stores/auth-store";
+import { canManageSocialPage } from "@/lib/social-page-manage";
+import { filterWhatsappsForCurrentUser } from "@/lib/whatsapp-user-access";
 
 const isOAuthChannel = (c?: Whatsapp) => c?.webhookOrigin === "zdg_oauth";
 
@@ -50,10 +53,20 @@ const ChannelAppIcon = ({ conn, ownLabel, oauthLabel }: { conn?: Whatsapp; ownLa
 };
 
 export default function FacebookComentariosPage() {
+  // O gate fica num componente próprio: o acesso do atendente pode mudar no meio da
+  // sessão (o refresh de 30 s relê as permissões) e os hooks da tela não podem rodar
+  // pela metade.
+  const allowed = usePageAccess("facebookComentarios");
+  if (!allowed) return <AccessDenied />;
+  return <FacebookComentariosContent />;
+}
+
+function FacebookComentariosContent() {
   const t = useTranslations("facebookComentariosPage");
   const tBadge = useTranslations("channelAppType");
-  const allowed = usePageAccess("facebookComentarios", { adminSuperOnly: true });
-  if (!allowed) return <AccessDenied />;
+  // Supervisor e atendente: ler, responder e comentar. Apagar e editar comentário,
+  // publicar, editar e apagar post ficam com o admin (o backend recusa com 403).
+  const canManage = canManageSocialPage(useAuthStore((s) => s.user?.profile));
 
   const [loading, setLoading] = useState(true);
   const [connections, setConnections] = useState<Whatsapp[]>([]);
@@ -104,7 +117,10 @@ export default function FacebookComentariosPage() {
     try {
       const res = await fetchWhatsapps();
       const all = Array.isArray(res.data) ? res.data : [];
-      setConnections(all.filter((c) => c.type === "messenger"));
+      const pages = all.filter((c) => c.type === "messenger");
+      // Atendente vê só os canais liberados para ele, como no Atendimento; supervisor
+      // e perfil personalizado seguem vendo todos, como antes.
+      setConnections(useAuthStore.getState().user?.profile === "user" ? filterWhatsappsForCurrentUser(pages) : pages);
     } catch {
       toast.error(t("errorLoadConnections"));
     } finally {
@@ -564,18 +580,20 @@ export default function FacebookComentariosPage() {
                       onClick={() => { setReplyingTo(comment); setReplyingToParentId(comment.id); setReplyDialogOpen(true); }}>
                       {t("reply")}
                     </button>
-                    {pageOwnerId && comment.from?.id === pageOwnerId && (
+                    {canManage && pageOwnerId && comment.from?.id === pageOwnerId && (
                       <button className="text-[11px] text-muted-foreground hover:text-blue-500 transition-colors disabled:opacity-50"
                         onClick={() => openEditDialog(comment, null)}
                         title={t("edit")}>
                         <Pencil className="h-3 w-3" />
                       </button>
                     )}
-                    <button className="text-[11px] text-muted-foreground hover:text-destructive transition-colors disabled:opacity-50"
-                      onClick={() => handleDelete(comment.id)}
-                      disabled={deletingIds.has(comment.id)}>
-                      {deletingIds.has(comment.id) ? <RefreshCw className="h-3 w-3 animate-spin" /> : <Trash2 className="h-3 w-3" />}
-                    </button>
+                    {canManage && (
+                      <button className="text-[11px] text-muted-foreground hover:text-destructive transition-colors disabled:opacity-50"
+                        onClick={() => handleDelete(comment.id)}
+                        disabled={deletingIds.has(comment.id)}>
+                        {deletingIds.has(comment.id) ? <RefreshCw className="h-3 w-3 animate-spin" /> : <Trash2 className="h-3 w-3" />}
+                      </button>
+                    )}
                   </div>
                   {/* Botão expandir replies */}
                   {hasReplies && (
@@ -630,18 +648,20 @@ export default function FacebookComentariosPage() {
                             onClick={() => { setReplyingTo(reply); setReplyingToParentId(comment.id); setReplyDialogOpen(true); }}>
                             {t("reply")}
                           </button>
-                          {pageOwnerId && reply.from?.id === pageOwnerId && (
+                          {canManage && pageOwnerId && reply.from?.id === pageOwnerId && (
                             <button className="text-[10px] text-muted-foreground hover:text-blue-500 transition-colors disabled:opacity-50"
                               onClick={() => openEditDialog(reply, comment.id)}
                               title={t("edit")}>
                               <Pencil className="h-3 w-3" />
                             </button>
                           )}
-                          <button className="text-[10px] text-muted-foreground hover:text-destructive transition-colors disabled:opacity-50"
-                            onClick={() => handleDelete(reply.id)}
-                            disabled={deletingIds.has(reply.id)}>
-                            {deletingIds.has(reply.id) ? <RefreshCw className="h-3 w-3 animate-spin" /> : <Trash2 className="h-3 w-3" />}
-                          </button>
+                          {canManage && (
+                            <button className="text-[10px] text-muted-foreground hover:text-destructive transition-colors disabled:opacity-50"
+                              onClick={() => handleDelete(reply.id)}
+                              disabled={deletingIds.has(reply.id)}>
+                              {deletingIds.has(reply.id) ? <RefreshCw className="h-3 w-3 animate-spin" /> : <Trash2 className="h-3 w-3" />}
+                            </button>
+                          )}
                         </div>
                       </div>
                     </div>
@@ -769,15 +789,20 @@ export default function FacebookComentariosPage() {
                 <div>
                   <h3 className="text-base font-semibold">{t("postsListTitle")}</h3>
                   <p className="text-xs text-muted-foreground">{t("postsListHint")}</p>
+                  {!canManage && (
+                    <p className="text-xs text-muted-foreground mt-1">{t("manageAdminOnlyNote")}</p>
+                  )}
                 </div>
                 <div className="flex items-center gap-2">
                   <Button variant="outline" size="sm" onClick={() => handleLoadPosts(selectedConnection)} disabled={loading || !selectedConnection}>
                     <RefreshCw className={`mr-2 h-4 w-4 ${loading ? "animate-spin" : ""}`} />
                     {t("refresh")}
                   </Button>
-                  <Button onClick={() => { resetNewPostForm(); setNewPostDialogOpen(true); }} disabled={!selectedConnection}>
-                    <Plus className="mr-2 h-4 w-4" />{t("newPost")}
-                  </Button>
+                  {canManage && (
+                    <Button onClick={() => { resetNewPostForm(); setNewPostDialogOpen(true); }} disabled={!selectedConnection}>
+                      <Plus className="mr-2 h-4 w-4" />{t("newPost")}
+                    </Button>
+                  )}
                 </div>
               </div>
             </CardContent>
@@ -794,7 +819,7 @@ export default function FacebookComentariosPage() {
               <CardContent className="p-6 text-center">
                 <Facebook className="mx-auto h-10 w-10 text-muted-foreground mb-3" />
                 <h3 className="text-base font-medium">{t("noPostsYet")}</h3>
-                <p className="text-sm text-muted-foreground mt-1">{t("noPostsYetHint")}</p>
+                {canManage && <p className="text-sm text-muted-foreground mt-1">{t("noPostsYetHint")}</p>}
               </CardContent>
             </Card>
           ) : (
@@ -818,12 +843,16 @@ export default function FacebookComentariosPage() {
                         <Button size="sm" variant="ghost" className="h-7 text-xs" onClick={() => { setActiveTab("comments"); setSelectedPostId(p.id); handleLoadComments(p.id); }} title={t("viewComments")}>
                           <MessageCircle className="h-3.5 w-3.5" />
                         </Button>
-                        <Button size="sm" variant="ghost" className="h-7" onClick={() => { setEditingPost(p); setEditPostText(p.message || p.story || ""); setEditPostDialogOpen(true); }} title={t("editPost")}>
-                          <Pencil className="h-3.5 w-3.5" />
-                        </Button>
-                        <Button size="sm" variant="ghost" className="h-7 text-destructive" onClick={() => handleDeletePost(p)} disabled={deletingPostIds.has(p.id)} title={t("deletePost")}>
-                          {deletingPostIds.has(p.id) ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <Trash2 className="h-3.5 w-3.5" />}
-                        </Button>
+                        {canManage && (
+                          <>
+                            <Button size="sm" variant="ghost" className="h-7" onClick={() => { setEditingPost(p); setEditPostText(p.message || p.story || ""); setEditPostDialogOpen(true); }} title={t("editPost")}>
+                              <Pencil className="h-3.5 w-3.5" />
+                            </Button>
+                            <Button size="sm" variant="ghost" className="h-7 text-destructive" onClick={() => handleDeletePost(p)} disabled={deletingPostIds.has(p.id)} title={t("deletePost")}>
+                              {deletingPostIds.has(p.id) ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <Trash2 className="h-3.5 w-3.5" />}
+                            </Button>
+                          </>
+                        )}
                         {p.permalink_url && (
                           <Button asChild size="sm" variant="ghost" className="h-7" title={t("openOnFacebook")}>
                             <a href={p.permalink_url} target="_blank" rel="noopener noreferrer"><ExternalLink className="h-3.5 w-3.5" /></a>

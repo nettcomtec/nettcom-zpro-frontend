@@ -1,27 +1,29 @@
 "use client";
 
-import { useEffect, useRef, useCallback } from "react";
+import { useEffect, useRef } from "react";
 import { getSocket } from "@/lib/socket";
 import { useAuthStore } from "@/stores/auth-store";
 import { useTicketStore, type Ticket } from "@/stores/ticket-store";
 import { useNotificationStore } from "@/stores/notification-store";
 import { useBrandingStore } from "@/stores/branding-store";
-import { fetchTickets } from "@/services/tickets";
-import { normalizeTickets, normalizeTicket } from "@/lib/normalize-ticket";
+import { normalizeTicket } from "@/lib/normalize-ticket";
 import { getNotificationSoundUrl, getPwaIconUrl } from "@/lib/branding-urls";
 import { toast } from "sonner";
 import { useTranslations } from "next-intl";
 import { safeJsonParse } from "@/lib/safe-json-parse";
 import { playNotificationSound } from "@/lib/notification-audio";
+import { isGroupTicketPayload, isNotificationSoundMutedForMe } from "@/lib/notification-sound-mute";
 import { canUserSeeTicket, isTicketInBotFlow, type TicketVisibilityData } from "@/lib/can-user-see-ticket";
 import { useTicketFilterStore } from "@/stores/ticket-filter-store";
 import { matchesActiveFilter, type MatchesFilterTicket } from "@/lib/matches-active-filter";
-import { getTicketLastMessagePreview } from "@/lib/template-preview";
 import {
   ensurePendingTicketNotification,
   pickTicketVisibilityPatch,
   syncTicketNotificationVisibility,
 } from "@/lib/ticket-notification-visibility";
+import { isClosedTicketRatingReply } from "@/lib/evaluation-score";
+import { notifyInbound as notifyWabaAgentGroupInbound } from "@/lib/waba-agent-grouping";
+import { rememberTicketAdReferral, withPendingAdReferral } from "@/lib/ad-referral";
 
 function passesActiveUiFilterOtm(ticket: MatchesFilterTicket): boolean {
   const filter = useTicketFilterStore.getState();
@@ -106,26 +108,13 @@ function ticketVisibilityFromChatPayloadOtm(
   };
 }
 
-// --- Cache e deduplicação no nível de módulo (compartilhado entre re-renders) ---
-// Keyed by "userId:tenantId" so different users/tenants never share cached data
-const _otmCacheMap = new Map<string, { data: { tickets: unknown[] }; timestamp: number }>();
-const _otmPendingMap = new Map<string, Promise<void>>();
-
-const OTM_DEBOUNCE_DELAY = 1500; // ms — maior que o padrão (500ms)
-const OTM_CACHE_TTL = 2000; // ms — cache válido por 2s
-
 /**
  * Hook otimizado de socket para tickets.
  * Ativado apenas quando `socketModelNovo === "optimized"` no localStorage.
- * Principais melhorias vs. padrão:
- *  - Debounce de 1500ms (vs 500ms)
- *  - Cache com TTL de 2s para evitar re-fetches desnecessários
- *  - Deduplicação: se uma requisição já está em voo, não inicia outra
  */
 export function useSocketTicketsOtm() {
   const t = useTranslations("useSocketTickets");
   const { user, isAuthenticated } = useAuthStore();
-  const setTickets = useTicketStore((s) => s.setTickets);
   const updateTicket = useTicketStore((s) => s.updateTicket);
   const addTicket = useTicketStore((s) => s.addTicket);
   const removeTicket = useTicketStore((s) => s.removeTicket);
@@ -142,98 +131,7 @@ export function useSocketTicketsOtm() {
   const userId = user?.userId;
   const profile = user?.profile;
   const initialized = useRef(false);
-  const debounceTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const recentMsgIds = useRef<Set<string>>(new Set());
-
-  const debouncedRefreshTickets = useCallback(async () => {
-    const now = Date.now();
-    const cacheKey = `${userId}:${tenantId}`;
-
-    const _otmCache = _otmCacheMap.get(cacheKey) ?? null;
-    const _otmPendingPromise = _otmPendingMap.get(cacheKey) ?? null;
-
-    // Cache hit: dados frescos disponíveis — aplica direto ao store
-    if (_otmCache && (now - _otmCache.timestamp) < OTM_CACHE_TTL) {
-      const raw = _otmCache.data.tickets || [];
-      const freshTickets = normalizeTickets(raw as Record<string, unknown>[]);
-      const freshIds = new Set(freshTickets.map((tk: { id: number }) => tk.id));
-      const currentTickets = useTicketStore.getState().tickets;
-      const preserved = currentTickets.filter((tk) => !freshIds.has(tk.id));
-      setTickets([...freshTickets, ...preserved]);
-      return;
-    }
-
-    // Deduplicação: se já há uma requisição pendente, não inicia outra
-    if (_otmPendingPromise) {
-      return _otmPendingPromise;
-    }
-
-    if (debounceTimer.current) clearTimeout(debounceTimer.current);
-
-    const contactLabel = t("contactFallback");
-    const newMsgLabel = t("newMessageFallback");
-
-    const promise = new Promise<void>((resolve) => {
-      debounceTimer.current = setTimeout(async () => {
-        try {
-          const { data } = await fetchTickets({
-            searchParam: "",
-            pageNumber: 1,
-            status: ["open", "pending"],
-          });
-
-          // Atualiza cache
-          _otmCacheMap.set(cacheKey, { data: data as { tickets: unknown[] }, timestamp: Date.now() });
-          _otmPendingMap.delete(cacheKey);
-
-          const raw = data?.tickets || [];
-          const freshTickets = normalizeTickets(raw as Record<string, unknown>[]);
-
-          const freshIds = new Set(freshTickets.map((tk: { id: number }) => tk.id));
-          const currentTickets = useTicketStore.getState().tickets;
-          const preserved = currentTickets.filter((tk) => !freshIds.has(tk.id));
-          setTickets([...freshTickets, ...preserved]);
-
-          const currentUserOtm = useAuthStore.getState().user;
-          const visibilityConfigOtm = buildVisibilityConfigOtm();
-          const isVisibleForUserOtm = (tk: TicketVisibilityData) =>
-            canUserSeeTicket(tk, currentUserOtm, visibilityConfigOtm);
-
-          const openTickets = freshTickets.filter((tk: TicketVisibilityData & { status: string; unreadMessages: number }) => {
-            if (tk.status !== "open" || (tk.unreadMessages ?? 0) <= 0) return false;
-            return isVisibleForUserOtm(tk);
-          });
-          const pendingTickets = freshTickets.filter((tk: TicketVisibilityData & { status: string }) =>
-            tk.status === "pending" && isVisibleForUserOtm(tk)
-          );
-          const allTicketNotifications = [
-            ...openTickets,
-            ...pendingTickets.filter((tk: { id: number }) => !openTickets.some((o: { id: number }) => o.id === tk.id)),
-          ];
-
-          const { notifications: prevNotifications, setNotifications } = useNotificationStore.getState();
-          const readIds = new Set(prevNotifications.filter((n) => n.read).map((n) => n.id));
-          setNotifications(
-            allTicketNotifications.map((tk: { id: number; contact?: { name?: string }; lastMessage?: string; updatedAt: string; unreadMessages?: number }) => ({
-              id: tk.id,
-              message: `${tk.contact?.name || contactLabel}: ${getTicketLastMessagePreview(tk.lastMessage) || newMsgLabel}`,
-              read: readIds.has(tk.id) || (tk.unreadMessages ?? 0) === 0,
-              createdAt: tk.updatedAt ?? new Date().toISOString(),
-              ticketId: tk.id,
-            }))
-          );
-        } catch {
-          _otmPendingMap.delete(cacheKey);
-          // silenciar erros de timeout
-        } finally {
-          resolve();
-        }
-      }, OTM_DEBOUNCE_DELAY);
-    });
-
-    _otmPendingMap.set(cacheKey, promise);
-    return promise;
-  }, [userId, profile, setTickets, t]);
 
   useEffect(() => {
     // Só ativa se o modo otimizado estiver habilitado
@@ -244,12 +142,37 @@ export function useSocketTicketsOtm() {
     initialized.current = true;
 
     const handleTicketList = (data: { type: string; payload: Record<string, unknown> }) => {
+      // Selo "Anúncio" (docs/PLANO_ANUNCIO_ORIGEM_CONVERSA.md) — espelho do hook padrão: só
+      // preenche atendimento que já está na tela e ainda não tem selo (o selo é o PRIMEIRO
+      // anúncio), nunca insere atendimento, e sai antes dos demais ramos. O aviso fica
+      // guardado para o atendimento que só entrar na lista depois (`withPendingAdReferral`).
+      if (data.type === "ticket:adReferral") {
+        const adPayloadOtm = (data.payload ?? {}) as { ticketId?: unknown; adReferral?: unknown };
+        const adTicketIdOtm = Number(adPayloadOtm.ticketId);
+        const rawAdOtm = adPayloadOtm.adReferral;
+        if (Number.isInteger(adTicketIdOtm) && adTicketIdOtm > 0 && rawAdOtm && typeof rawAdOtm === "object" && !Array.isArray(rawAdOtm)) {
+          const adOtm = rawAdOtm as Record<string, unknown>;
+          const adTextOtm = (v: unknown): string | null =>
+            typeof v === "string" && v.trim() ? v : typeof v === "number" && Number.isFinite(v) ? String(v) : null;
+          const adValueOtm = { adId: adTextOtm(adOtm.adId), adTitle: adTextOtm(adOtm.adTitle), channel: adTextOtm(adOtm.channel) };
+          rememberTicketAdReferral(adTicketIdOtm, adValueOtm);
+          const { tickets: listNowOtm, currentTicket: openNowOtm } = useTicketStore.getState();
+          const inListOtm = listNowOtm.find((tk) => tk.id === adTicketIdOtm);
+          const isOpenOtm = openNowOtm?.id === adTicketIdOtm;
+          const alreadyHasOtm = !!inListOtm?.adReferral || (isOpenOtm && !!openNowOtm?.adReferral);
+          if ((inListOtm || isOpenOtm) && !alreadyHasOtm) {
+            updateTicket({ id: adTicketIdOtm, adReferral: adValueOtm });
+          }
+        }
+        return;
+      }
+
       if (data.type === "chat:ack" || data.type === "chat:delete" || data.type === "chat:update") {
         const payload = data.payload as {
           id?: string | number;
           messageId?: string;
           ack?: number;
-          statusError?: { code?: number | string; title?: string; details?: string } | null;
+          statusError?: { code?: number | string; subcode?: number | string; title?: string; details?: string } | null;
           status?: string;
           isDeleted?: boolean;
           reaction?: string;
@@ -262,7 +185,9 @@ export function useSocketTicketsOtm() {
           dataJson?: string;
           mediaType?: string;
           sentVia?: string | null;
+          wabaPricingCategory?: string | null;
           ticketLastMessage?: string;
+          quotedMsgId?: string | null;
         };
         const currentTicket = useTicketStore.getState().currentTicket;
         const msgTicketId = payload.ticketId;
@@ -297,6 +222,16 @@ export function useSocketTicketsOtm() {
                     ...(payload.statusError !== undefined ? { statusError: payload.statusError } : {}),
                     // Híbrido: selo "roteada" aparece ao vivo (linked_pending -> linked_baileys).
                     ...(payload.sentVia !== undefined ? { sentVia: payload.sentVia } : {}),
+                    // WhatsApp oficial: selo da Marketing Messages API ao vivo. Só texto
+                    // preenchido entra (ausente ou null nunca apaga um selo já mostrado).
+                    ...(typeof payload.wabaPricingCategory === "string" && payload.wabaPricingCategory
+                      ? { wabaPricingCategory: payload.wabaPricingCategory }
+                      : {}),
+                    // Bomba da UAzapi: citação que não chegou ao celular (quotedMsgId nulo) sai da bolha.
+                    ...(payload.quotedMsgId === null && m.quotedMsg &&
+                      (String(currentTicket?.channel ?? "").toLowerCase() === "uazapi" || payload.sentVia === "linked_baileys")
+                      ? { quotedMsg: null }
+                      : {}),
                   }
                 : m
             );
@@ -324,7 +259,15 @@ export function useSocketTicketsOtm() {
               if (payload.isStarred !== undefined) patch.isStarred = payload.isStarred as boolean;
               if (payload.isPinned !== undefined) patch.isPinned = payload.isPinned as boolean;
               if (payload.isDeleted !== undefined) patch.isDeleted = payload.isDeleted as boolean;
+              // Espelho do hook padrão: hidrata a mídia gravada depois do envio (sem isso a
+              // imagem/documento só aparecia depois do F5 no modo otimizado).
+              if ((payload as { mediaUrl?: string }).mediaUrl != null) (patch as { mediaUrl?: string }).mediaUrl = (payload as { mediaUrl?: string }).mediaUrl;
+              if ((payload as { mediaType?: string }).mediaType != null) (patch as { mediaType?: import("@/stores/ticket-store").MediaType }).mediaType = (payload as { mediaType?: import("@/stores/ticket-store").MediaType }).mediaType;
+              if ((payload as { fileName?: string }).fileName != null) (patch as { fileName?: string }).fileName = (payload as { fileName?: string }).fileName;
+              if (payload.ack != null) (patch as { ack?: number }).ack = payload.ack;
+              if (payload.status != null) (patch as { status?: string }).status = payload.status;
               if (payload.sentVia !== undefined) (patch as { sentVia?: string | null }).sentVia = payload.sentVia;
+              if (typeof payload.wabaPricingCategory === "string" && payload.wabaPricingCategory) (patch as { wabaPricingCategory?: string | null }).wabaPricingCategory = payload.wabaPricingCategory;
               return { ...m, ...patch };
             });
             setMessages(updated);
@@ -420,7 +363,7 @@ export function useSocketTicketsOtm() {
             // Gate de filtro de UI: ticket fora do filtro ativo nao entra no store.
             const tkNormalized = normalizeTicket(tkCreate);
             if (passesActiveUiFilterOtm(tkNormalized as MatchesFilterTicket)) {
-              addTicket(tkNormalized);
+              addTicket(withPendingAdReferral(tkNormalized));
             }
             // Sync notification badge: add entry for new pending ticket (aplicando filtros de visibilidade)
             if (tkCreate.status === "pending") {
@@ -459,6 +402,8 @@ export function useSocketTicketsOtm() {
                     body: t("newMessageFallback"),
                     icon: getPwaIconUrl("icon-192x192.png"),
                     tag: "zpro-notification",
+                    // Som desligado pelo usuário no botão do topo: popup sem som do sistema.
+                    ...(isNotificationSoundMutedForMe({ group: isGroupTicketPayload(tkCreate) }) ? { silent: true } : {}),
                   });
                 }
               }
@@ -505,9 +450,6 @@ export function useSocketTicketsOtm() {
               buildVisibilityConfigOtm(),
             );
             // ── Aviso na TRANSIÇÃO p/ pendente na fila (paridade c/ ticket:create) ──
-            // ticket:create só avisa na criação; aqui cobrimos bot→fila / transferência /
-            // redirecionamento: avisa quando o ticket PASSA a ser "notificável"
-            // (pendente + visível + fora do bot). Mesma flag notifyOnlyHumanTickets do create.
             {
               const notifyOnlyHuman =
                 useAuthStore.getState().getConfigValue("notifyOnlyHumanTickets") === "enabled";
@@ -597,7 +539,7 @@ export function useSocketTicketsOtm() {
             passesActiveUiFilterOtm(tkNormalizedUpd as MatchesFilterTicket) ||
             useTicketStore.getState().currentTicket?.id === tkNormalizedUpd.id
           ) {
-            addTicket(tkNormalizedUpd);
+            addTicket(withPendingAdReferral(tkNormalizedUpd));
           }
           return;
         }
@@ -654,6 +596,9 @@ export function useSocketTicketsOtm() {
         // do usuário, shared, wallet e grupo. A conversa aberta na tela nunca é filtrada.
         const ticketsRainEnabledChat = safeJsonParse(localStorage.getItem("ticketsRain"), null) === "enabled";
         const messageTicketId = payload.ticketId ?? payload.ticket?.id;
+        // WABA: o cliente escreveu — o texto do atendente que esperava para juntar sai
+        // agora, antes da resposta dele (lib/waba-agent-grouping; sem grupo, nada acontece).
+        if (payload.fromMe === false && messageTicketId != null) notifyWabaAgentGroupInbound(messageTicketId);
         if (ticketsRainEnabledChat && payload.ticket) {
           const openTicketId = useTicketStore.getState().currentTicket?.id;
           const isForOpenTicket =
@@ -700,6 +645,11 @@ export function useSocketTicketsOtm() {
             contact: payload.contact,
             emailMetadata: payload.emailMetadata ?? undefined,
           };
+          // UAzapi: a citação gravada pelo servidor é a que chegou ao celular (null =
+          // saiu sem citação) e vence a da bolha provisória (lib/uazapi-quote-window).
+          const serverQuoteWins =
+            Object.prototype.hasOwnProperty.call(payload, "quotedMsg") &&
+            String(currentTicket?.channel ?? "").toLowerCase() === "uazapi";
 
           if (realId && recentMsgIds.current.has(realId)) {
             // já processado — ignora duplicata
@@ -724,7 +674,7 @@ export function useSocketTicketsOtm() {
                 mediaUrl: realMessage.mediaUrl || optimistic?.mediaUrl,
                 mediaType: (realIsGeneric && optHasMedia) ? optimistic!.mediaType : (realMessage.mediaType || optimistic?.mediaType),
                 fileName: realMessage.fileName || optimistic?.fileName,
-                quotedMsg: realMessage.quotedMsg || optimistic?.quotedMsg,
+                quotedMsg: serverQuoteWins ? realMessage.quotedMsg : (realMessage.quotedMsg || optimistic?.quotedMsg),
                 dataJson: realMessage.dataJson || optimistic?.dataJson,
                 ack: Math.max(realMessage.ack ?? 0, optimistic?.ack ?? 0) || undefined,
               };
@@ -734,7 +684,8 @@ export function useSocketTicketsOtm() {
               // eco de outra mensagem não pode "curar" bolha que falhou. O branch
               // por idFront acima segue reconciliando ack -1 (eco tardio legítimo).
               const currentMsgs = useTicketStore.getState().messages;
-              const pendingOptimistics = currentMsgs.filter((m) => m.id.startsWith("front-") && m.fromMe && m.ack !== -1);
+              // O balão do texto que espera para juntar (WABA) também fica fora: ainda não saiu.
+              const pendingOptimistics = currentMsgs.filter((m) => m.id.startsWith("front-") && m.fromMe && m.ack !== -1 && !m.groupingPending);
               const byBody = pendingOptimistics.find((m) => m.body === realMessage.body && !!m.body);
               const byMedia = !byBody && realMessage.mediaType
                 ? pendingOptimistics.find((m) => !!m.mediaUrl)
@@ -747,7 +698,7 @@ export function useSocketTicketsOtm() {
                   mediaUrl: realMessage.mediaUrl || optimistic.mediaUrl,
                   mediaType: (realIsGeneric && optHasMedia) ? optimistic.mediaType : (realMessage.mediaType || optimistic.mediaType),
                   fileName: realMessage.fileName || optimistic.fileName,
-                  quotedMsg: realMessage.quotedMsg || optimistic.quotedMsg,
+                  quotedMsg: serverQuoteWins ? realMessage.quotedMsg : (realMessage.quotedMsg || optimistic.quotedMsg),
                   dataJson: realMessage.dataJson || optimistic.dataJson,
                   ack: Math.max(realMessage.ack ?? 0, optimistic.ack ?? 0) || undefined,
                 };
@@ -769,7 +720,13 @@ export function useSocketTicketsOtm() {
         const isWindowFocusedOtm =
           typeof document !== "undefined" && typeof document.hasFocus === "function" && document.hasFocus();
         const suppressSoundForActiveChatOtm = isForCurrentTicket && isWindowFocusedOtm;
-        if (!payload.fromMe && !suppressSoundForActiveChatOtm && messageTicketId != null) {
+        // Nota do cliente num atendimento fechado: sem som, aviso do navegador nem sino
+        // (lib/evaluation-score). A bolha e a última mensagem do card seguem atualizando.
+        const isClosedRatingReplyOtm = isClosedTicketRatingReply(
+          payload,
+          useAuthStore.getState().getConfigValue("ratingMaxScore"),
+        );
+        if (!payload.fromMe && !suppressSoundForActiveChatOtm && messageTicketId != null && !isClosedRatingReplyOtm) {
           // Gate de visibilidade: o som/notif sistema só toca quando o usuário pode ver o ticket
           // (respeita fila, whatsappAllowed, NotViewTicketsChatBot, DirectTicketsToWallets, etc.).
           // Antes, o gate era apenas `userId === me || !userId`, o que deixava o som tocar
@@ -789,17 +746,20 @@ export function useSocketTicketsOtm() {
             const suppressBotNotif =
               useAuthStore.getState().getConfigValue("notifyOnlyHumanTickets") === "enabled" &&
               isTicketInBotFlow(payload.ticket as { chatFlowId?: number | null; queueId?: number | null; userId?: number | null });
+            // Som desligado pelo usuário no botão do topo: popup sem som do sistema.
+            const isGroupMessageOtm = isGroupTicketPayload(payload.ticket);
             if (!suppressBotNotif && notificationSilenced && typeof Notification !== "undefined" && Notification.permission === "granted") {
               new Notification(`${t("notificationContactLabel")}: ${payload.ticket?.contact?.name || payload.contact?.name || ""}`, {
                 body: `${t("notificationMessageLabel")}: ${payload.body || ""}`,
                 icon: getPwaIconUrl("icon-192x192.png"),
                 tag: "zpro-notification",
+                ...(isNotificationSoundMutedForMe({ group: isGroupMessageOtm }) ? { silent: true } : {}),
               });
             }
             if (!suppressBotNotif && notificationSilenced) {
               const recording = safeJsonParse(localStorage.getItem("recording"), false);
               if (!recording) {
-                playNotificationSound(getNotificationSoundUrl("ticket", soundTimestampsRef.current.ticket || undefined));
+                playNotificationSound(getNotificationSoundUrl("ticket", soundTimestampsRef.current.ticket || undefined), { group: isGroupMessageOtm });
               }
             }
           }
@@ -812,7 +772,9 @@ export function useSocketTicketsOtm() {
         if (payload.fromMe && !isForCurrentTicket) {
           return;
         }
-        if (messageTicketId != null) {
+        // Divisória de transferência não vira prévia do card nem o sobe: o ticket:update do
+        // servidor traz a prévia certa (docs/PLANO_HISTORICO_TRANSFERENCIAS_ATENDIMENTO.md 5.9).
+        if (messageTicketId != null && payload.mediaType !== "transfer") {
           // Gate de filtro de UI: ticket fora do filtro atualiza lastMessage mas
           // NAO bumpa updatedAt — evita re-flutuar pro topo da lista filtrada.
           const existingForBump = useTicketStore.getState().tickets.find((t) => t.id === messageTicketId);
@@ -824,6 +786,12 @@ export function useSocketTicketsOtm() {
           };
           if (bumpsUpdatedAt) {
             lastMessagePatch.updatedAt = new Date().toISOString();
+            // Data da última mensagem gravada pelo servidor (ticket aninhado do chat:create):
+            // selo do card e ordem da lista com "Listar atendimentos pela última mensagem".
+            const nestedLastMessageAt = (payload.ticket as { lastMessageAt?: unknown } | undefined)?.lastMessageAt;
+            if ((typeof nestedLastMessageAt === "number" || typeof nestedLastMessageAt === "string") && Number(nestedLastMessageAt) > 0) {
+              lastMessagePatch.lastMessageAt = nestedLastMessageAt;
+            }
           }
           updateTicket(lastMessagePatch);
         }
@@ -889,7 +857,7 @@ export function useSocketTicketsOtm() {
           }
         }
         // Sync notification badge: add/update entry for new unread message (aplicando filtros de visibilidade)
-        if (!payload.fromMe && !isForCurrentTicket && messageTicketId != null) {
+        if (!payload.fromMe && !isForCurrentTicket && messageTicketId != null && !isClosedRatingReplyOtm) {
           // Fail-closed: payload sem ticket aninhado não permite avaliar visibilidade e
           // canUserSeeTicket devolveria true para o tenant inteiro (ver hasNestedTicketOtm).
           const ticketForCheck = ticketVisibilityFromChatPayloadOtm(payload.ticket, messageTicketId);
@@ -957,7 +925,7 @@ export function useSocketTicketsOtm() {
           const notificationSilenced = useAuthStore.getState().getConfigValue("notificationSilenced") === "enabled";
           const recording = safeJsonParse(localStorage.getItem("recording"), false);
           if (notificationSilenced && !recording) {
-            playNotificationSound(getNotificationSoundUrl("ticket", soundTimestampsRef.current.ticket || undefined));
+            playNotificationSound(getNotificationSoundUrl("ticket", soundTimestampsRef.current.ticket || undefined), { group: isGroupTicketPayload(tkNotifOtm) });
           }
         }
         return;
@@ -987,10 +955,19 @@ export function useSocketTicketsOtm() {
         | {
             id?: number;
             profilePicUrl?: string | null;
+            telegramId?: string | number | null;
             tags?: { id: number; tag?: string; name?: string; color?: string }[];
           }
         | undefined;
       if (contact?.id == null) return;
+      // Telegram ligado pelo link de convite: o botão "Convidar para o Telegram" do
+      // atendimento some na hora. Campo presente e vazio = Telegram tirado do cadastro
+      // (o botão volta); evento sem o campo não mexe.
+      const telegramId: string | null | undefined = !Object.prototype.hasOwnProperty.call(contact, "telegramId")
+        ? undefined
+        : contact.telegramId != null && String(contact.telegramId) !== ""
+          ? String(contact.telegramId)
+          : null;
       const tags = Array.isArray(contact.tags)
         ? contact.tags
             .filter((tg, i, arr) => tg?.id != null && arr.findIndex((x) => x?.id === tg.id) === i)
@@ -1007,8 +984,23 @@ export function useSocketTicketsOtm() {
         typeof contact.profilePicUrl === "string" && contact.profilePicUrl.startsWith("http")
           ? contact.profilePicUrl
           : undefined;
-      if (!tags && !profilePicUrl) return;
       const state = useTicketStore.getState();
+      // Limpeza só conta quando o store tinha o Telegram: sem isso, todo contact:update
+      // de contato sem Telegram atualizaria os tickets dele à toa.
+      const hadTelegram =
+        state.tickets.some((tk) => tk.contact?.id === contact.id && !!tk.contact?.telegramId) ||
+        (state.currentTicket?.contact?.id === contact.id && !!state.currentTicket.contact?.telegramId);
+      const telegramChange = telegramId === null && !hadTelegram ? undefined : telegramId;
+      if (!tags && !profilePicUrl && telegramChange === undefined) return;
+      // Foto de quem mandou no grupo: a bolha lê a foto de `msg.contact`, e o participante
+      // nunca é o contato do atendimento aberto — sem isto, só com F5.
+      if (profilePicUrl && state.messages.some((m) => m.contact?.id === contact.id && m.contact?.profilePicUrl !== profilePicUrl)) {
+        useTicketStore.setState((s) => ({
+          messages: s.messages.map((m) =>
+            m.contact && m.contact.id === contact.id ? { ...m, contact: { ...m.contact, profilePicUrl } } : m
+          ),
+        }));
+      }
       const affected = state.tickets.filter((tk) => tk.contact?.id === contact.id).map((tk) => tk.id);
       if (state.currentTicket?.contact?.id === contact.id && !affected.includes(state.currentTicket.id)) {
         affected.push(state.currentTicket.id);
@@ -1024,6 +1016,7 @@ export function useSocketTicketsOtm() {
                   ...tk.contact,
                   ...(tags ? { tags } : {}),
                   ...(profilePicUrl ? { profilePicUrl } : {}),
+                  ...(telegramChange !== undefined ? { telegramId: telegramChange } : {}),
                 },
               }
             : {}),
@@ -1049,9 +1042,6 @@ export function useSocketTicketsOtm() {
       const downtime = disconnectedAt ? Date.now() - disconnectedAt : 0;
       disconnectedAt = null;
       if (downtime > 0 && downtime < RECONNECT_DOWNTIME_THRESHOLD_MS) return;
-      const ck = `${userId}:${tenantId}`;
-      _otmCacheMap.delete(ck);
-      _otmPendingMap.delete(ck);
       signalTicketListRefresh();
     };
     socket.io.on("reconnect_attempt", onReconnectAttempt);
@@ -1062,12 +1052,7 @@ export function useSocketTicketsOtm() {
       socket.off(`${tenantId}:contactList`, handleContactList);
       socket.io.off("reconnect_attempt", onReconnectAttempt);
       socket.io.off("reconnect", onReconnect);
-      if (debounceTimer.current) clearTimeout(debounceTimer.current);
-      // Limpa cache e pending ao desmontar
-      const ck = `${userId}:${tenantId}`;
-      _otmCacheMap.delete(ck);
-      _otmPendingMap.delete(ck);
       initialized.current = false;
     };
-  }, [isAuthenticated, tenantId, userId, profile, socketModelOptimized, debouncedRefreshTickets, addTicketMessage, addNotification, signalTicketListRefresh, signalCurrentTicketRefresh, updateTicket]);
+  }, [isAuthenticated, tenantId, userId, profile, socketModelOptimized, addTicketMessage, addNotification, signalTicketListRefresh, signalCurrentTicketRefresh, updateTicket]);
 }

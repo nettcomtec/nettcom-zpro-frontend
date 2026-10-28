@@ -170,16 +170,16 @@ export const QWEN_MODELS: ReadonlyArray<string> = [
   "qwen2.5-7b-instruct",
 ];
 
-/** Modelos Anthropic Claude (api.anthropic.com/v1). */
+/**
+ * Modelos Anthropic Claude (api.anthropic.com/v1). Só os ativos que os bots do canal
+ * suportam: a família 3/3.5/3.7 foi aposentada (404) e a família 5 recusa
+ * `temperature`, que os handlers mandam. O id antigo `claude-opus-4-5-20250929`
+ * nunca existiu (migration `zpro_20261001190000000001` troca os salvos).
+ */
 export const CLAUDE_MODELS: ReadonlyArray<string> = [
-  "claude-opus-4-5-20250929",
-  "claude-sonnet-4-5-20250929",
-  "claude-3-5-sonnet-20241022",
-  "claude-3-5-sonnet-20240620",
-  "claude-3-5-haiku-20241022",
-  "claude-3-opus-20240229",
-  "claude-3-sonnet-20240229",
-  "claude-3-haiku-20240307",
+  "claude-sonnet-4-5",
+  "claude-haiku-4-5",
+  "claude-opus-4-5",
 ];
 
 /**

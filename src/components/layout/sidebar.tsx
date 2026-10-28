@@ -9,6 +9,9 @@ import { useTheme } from "next-themes";
 import { cn } from "@/lib/utils";
 import { useUIStore } from "@/stores/ui-store";
 import { useAuthStore } from "@/stores/auth-store";
+import { useTaskSummaryStore } from "@/stores/task-summary-store";
+import { useChatStore } from "@/stores/chat-store";
+import { usePageAccess } from "@/hooks/use-page-access";
 import { planAllowsRoute, type PlanFeatures } from "@/lib/plan-capabilities";
 import { isMenuRouteHidden } from "@/lib/menu-visibility";
 import { Button } from "@/components/ui/button";
@@ -39,10 +42,22 @@ import {
   BarChart2, Youtube, Music2,
   HardDrive, Download, Smartphone, CheckCircle2, X, ShoppingBag, Package, Linkedin, Facebook,
   Home, Compass, Receipt, CircleDot, PauseCircle, ListChecks, MailPlus, DatabaseZap,
-  Coins, Sparkles,
+  Coins, Sparkles, AppWindow, Wrench,
 } from "lucide-react";
+import {
+  getPanelAppIcon,
+  isSafePanelAppUrl,
+  panelAppNavKey,
+  panelAppViewHref,
+  resolvePanelAppCategoryKey,
+  usePanelAppsManageVisible,
+  type PanelAppNavEntry,
+} from "@/lib/panel-apps";
+import { useVisiblePanelApps } from "@/stores/panel-apps-store";
+import { openPanelAppLaunch } from "@/lib/panel-app-launch";
 import { updateUserIsOnline } from "@/services/users";
 import { unsubscribePush } from "@/lib/push-subscription";
+import { endServerSession } from "@/lib/auth-session";
 import { getBullBoardStatus } from "@/services/superadmin";
 import { getInitials } from "@/lib/utils";
 import { useBrandingStore } from "@/stores/branding-store";
@@ -57,9 +72,22 @@ export interface NavItem {
   routeName?: string;
   tourId?: string;
   external?: boolean;
+  /**
+   * Identidade do item (chave React e valor da busca rápida) quando o href não é único:
+   * duas apps personalizadas "nova aba" podem ter o mesmo endereço. Ausente = href.
+   */
+  key?: string;
+  /**
+   * Ação no lugar da navegação (menu lateral e busca rápida). Hoje: app personalizada
+   * "nova aba" com variáveis no endereço, que abre pelo lançamento (o link com os dados e a
+   * ficha sai do servidor no clique). Chamada NO clique: a janela nova abre nele.
+   * Ausente = navega pelo `href` (como sempre).
+   */
+  onSelect?: () => void;
 }
 
 export interface NavSubgroup {
+  /** Vazio = sem rótulo (itens nativos de uma categoria que ganhou o subgrupo "Aplicativos"). */
   label: string;
   items: NavItem[];
 }
@@ -92,6 +120,8 @@ const CATEGORY_COLORS: Record<string, { icon: string; dot: string }> = {
   "adm-automacao":         { icon: "text-indigo-400/80",        dot: "bg-indigo-400/80" },
   "adm-gestao-comercial":  { icon: "text-amber-400/80",         dot: "bg-amber-400/80" },
   "adm-configuracao":      { icon: "text-slate-400",            dot: "bg-slate-400" },
+  // Aplicativos personalizados (só existe com app no menu do usuário).
+  ferramentas:             { icon: "text-cyan-400/80",          dot: "bg-cyan-400/80" },
   "sa-tenants":            { icon: "text-blue-400/80",          dot: "bg-blue-400/80" },
   "sa-config":             { icon: "text-slate-400",            dot: "bg-slate-400" },
   "sa-canais":             { icon: "text-teal-400/80",          dot: "bg-teal-400/80" },
@@ -211,6 +241,7 @@ function buildSupervisorMenu(t: (key: string) => string): NavCategory[] {
             { name: t("item.catalogo"), href: "/catalogo", icon: Package, routeName: "catalogo" },
             { name: t("item.cobrancas"), href: "/cobrancas", icon: Receipt, routeName: "cobrancas" },
             { name: t("item.agendamentoPublico"), href: "/agendamento-publico", icon: CalendarClock, routeName: "agendamento-publico" },
+            { name: t("item.formularios"), href: "/formularios", icon: ClipboardList, routeName: "formularios" },
           ]),
         },
         {
@@ -271,6 +302,7 @@ function buildAdminMenu(t: (key: string) => string): NavCategory[] {
             { name: t("item.catalogo"), href: "/catalogo", icon: Package, routeName: "catalogo" },
             { name: t("item.cobrancas"), href: "/cobrancas", icon: Receipt, routeName: "cobrancas" },
             { name: t("item.agendamentoPublico"), href: "/agendamento-publico", icon: CalendarClock, routeName: "agendamento-publico" },
+            { name: t("item.formularios"), href: "/formularios", icon: ClipboardList, routeName: "formularios" },
           ]),
         },
         {
@@ -292,6 +324,8 @@ function buildAdminMenu(t: (key: string) => string): NavCategory[] {
       icon: Cog,
       items: sortItems([
         { name: t("item.api"), href: "/api-service", icon: Split, routeName: "api-service", tourId: "tour-api" },
+        // Só aparece com usePanelAppsManageVisible() (fail-closed em getProfileMenus).
+        { name: t("item.aplicativos"), href: "/aplicativos", icon: AppWindow, routeName: "aplicativos" },
         { name: t("item.auditLog"), href: "/audit-log", icon: ClipboardList, routeName: "audit-log", tourId: "tour-auditlog" },
         { name: t("item.configuracoes"), href: "/configuracoes", icon: Settings, routeName: "configuracoes", tourId: "tour-config" },
         // Só aparece com o gate dos Créditos de IA ligado (fail-closed em getProfileMenus).
@@ -339,6 +373,7 @@ function buildSuperAdminMenu(t: (key: string) => string): NavCategory[] {
       label: t("cat.configuracoes"),
       icon: Settings,
       items: sortItems([
+        { name: t("item.aplicativosGlobais"), href: "/aplicativos-globais", icon: AppWindow, routeName: "aplicativosGlobais" },
         { name: t("item.customizar"), href: "/customizar", icon: Palette, routeName: "customizar" },
         { name: t("item.email"), href: "/configuracoesTenant", icon: Send, routeName: "configuracoesTenant" },
         { name: t("item.notificacao"), href: "/notificacao", icon: Bell, routeName: "notificacao" },
@@ -414,9 +449,122 @@ function buildSuperAdminMenu(t: (key: string) => string): NavCategory[] {
   ];
 }
 
-function getProfileMenus(profile: ProfileType, menuVisibility: Record<string, boolean>, t: (key: string) => string, isRestricted?: boolean, planFeatures?: PlanFeatures | null, wavoipEnabled?: boolean, tenantMenuVisibility?: Record<string, boolean> | null, aiCreditsVisible?: boolean): NavCategory[] {
+// Páginas que supervisor e atendente só abrem com a permissão MARCADA no cadastro
+// (o usePageAccess delas exige `=== true`, não "ausente = liberado"). Sem este
+// filtro o item aparecia para eles e levava a "Acesso negado". `user: false` = a
+// página recusa o atendente sempre. A chave é a grafia do cadastro (camelCase).
+const GRANT_ONLY_ROUTES: Record<string, { key: string; user: boolean }> = {
+  "instagram-comentarios": { key: "instagramComentarios", user: true },
+  "facebook-comentarios": { key: "facebookComentarios", user: true },
+  "tiktok-comentarios": { key: "tiktokComentarios", user: false },
+  "youtube-comentarios": { key: "youtubeComentarios", user: false },
+  "instagram-automacao": { key: "instagramAutomacao", user: false },
+};
+
+const categoryHasItems = (cat: NavCategory): boolean => {
+  if (cat.subgroups) return cat.subgroups.some((sg) => sg.items.length > 0);
+  return cat.items.length > 0;
+};
+
+/**
+ * Aplicativos personalizados no menu (docs/PLANO_APLICATIVOS_PERSONALIZADOS.md §5.4).
+ * Roda DEPOIS dos gates (`filterCategory`) e ANTES da remoção das categorias vazias:
+ * - categoria-alvo por perfil (`resolvePanelAppCategoryKey`); ausente no menu do perfil
+ *   ou sem nenhum item nativo visível → "Ferramentas" (D5);
+ * - na categoria existente a app entra num subgrupo "Aplicativos" no fim (a categoria
+ *   sem subgrupos ganha um primeiro subgrupo sem rótulo com os itens nativos);
+ * - ordem = a do backend (empresa primeiro, depois provedor — D29), nunca `sortItems`;
+ * - só entra app com endereço seguro para o modo (`isSafePanelAppUrl`, Ag1-11);
+ * - fase 2: app "nova aba" com variáveis (`needsLaunch`) vira item com `onSelect` que lança
+ *   (`onLaunchPanelApp`) — nunca link com o endereço gravado, que tem as variáveis cruas
+ *   (Ag1-9). Sem o lançador (chamador antigo) o item leva à página da app, que lança sozinha.
+ * Sem apps devolve a MESMA lista (estrutura de hoje).
+ */
+function injectPanelApps(
+  categories: NavCategory[],
+  profile: ProfileType,
+  apps: PanelAppNavEntry[] | undefined,
+  t: (key: string) => string,
+  onLaunchPanelApp?: (app: PanelAppNavEntry) => void,
+): NavCategory[] {
+  if (!apps || apps.length === 0) return categories;
+
+  const byCategory = new Map<string, NavItem[]>();
+  const seen = new Set<string>();
+  for (const app of apps) {
+    if (!app || !Number.isInteger(app.id) || app.id <= 0) continue;
+    if (app.openMode !== "embed" && app.openMode !== "new_tab") continue;
+    if (!isSafePanelAppUrl(app.url, app.openMode)) continue;
+    const name = typeof app.name === "string" ? app.name.trim() : "";
+    if (!name) continue;
+    const key = panelAppNavKey(app);
+    if (seen.has(key)) continue;
+    seen.add(key);
+
+    const launchInNewTab = app.needsLaunch === true && app.openMode === "new_tab";
+    const item: NavItem = launchInNewTab
+      ? {
+          key,
+          name,
+          href: panelAppViewHref(app.id),
+          icon: getPanelAppIcon(app.icon),
+          ...(onLaunchPanelApp ? { external: true, onSelect: () => onLaunchPanelApp(app) } : {}),
+        }
+      : {
+          key,
+          name,
+          href: app.openMode === "embed" ? panelAppViewHref(app.id) : app.url,
+          icon: getPanelAppIcon(app.icon),
+          external: app.openMode === "new_tab",
+        };
+
+    let target = resolvePanelAppCategoryKey(profile, String(app.category || "ferramentas"));
+    if (target !== "ferramentas") {
+      const native = categories.find((c) => c.key === target);
+      if (!native || !categoryHasItems(native)) target = "ferramentas";
+    }
+    const list = byCategory.get(target);
+    if (list) list.push(item);
+    else byCategory.set(target, [item]);
+  }
+  if (byCategory.size === 0) return categories;
+
+  const appsLabel = t("subgroup.aplicativos");
+  const result = categories.map((cat): NavCategory => {
+    const items = byCategory.get(cat.key);
+    if (!items || cat.key === "ferramentas") return cat;
+    if (cat.subgroups) {
+      return { ...cat, subgroups: [...cat.subgroups, { label: appsLabel, items }] };
+    }
+    // Mesma convenção das categorias com subgrupos: `items` vazio, tudo nos subgrupos.
+    return { ...cat, items: [], subgroups: [{ label: "", items: cat.items }, { label: appsLabel, items }] };
+  });
+
+  const tools = byCategory.get("ferramentas");
+  if (tools && tools.length > 0) {
+    const toolsCat: NavCategory = { key: "ferramentas", label: t("cat.ferramentas"), icon: Wrench, items: tools };
+    if (profile === "superadmin") {
+      // Antes da Conta do superadmin (que é a última).
+      const contaIdx = result.findIndex((c) => c.key === "sa-conta");
+      if (contaIdx >= 0) result.splice(contaIdx, 0, toolsCat);
+      else result.push(toolsCat);
+    } else {
+      // No fim: a montagem final move "user-conta" para depois de todas as outras,
+      // então "Ferramentas" fica logo antes da Conta.
+      result.push(toolsCat);
+    }
+  }
+  return result;
+}
+
+function getProfileMenus(profile: ProfileType, menuVisibility: Record<string, boolean>, t: (key: string) => string, isRestricted?: boolean, planFeatures?: PlanFeatures | null, wavoipEnabled?: boolean, tenantMenuVisibility?: Record<string, boolean> | null, aiCreditsVisible?: boolean, panelApps?: PanelAppNavEntry[], panelAppsManageVisible?: boolean, onLaunchPanelApp?: (app: PanelAppNavEntry) => void): NavCategory[] {
   const isVisible = (routeName?: string) => {
     if (!routeName) return true;
+    const grant = GRANT_ONLY_ROUTES[routeName];
+    if (grant && (profile === "user" || profile === "super")) {
+      if (profile === "user" && !grant.user) return false;
+      if (menuVisibility[grant.key] !== true) return false;
+    }
     // Teto do TENANT (AND): para user/super/custom o `menuVisibility` abaixo é o
     // menuPermissions do próprio usuário (sobrescrito no boot/refresh do layout),
     // então o que o superadmin desligou em /tenants só sobrevive neste mapa.
@@ -431,6 +579,10 @@ function getProfileMenus(profile: ProfileType, menuVisibility: Record<string, bo
     // esconde. O valor vem de useAiCreditsNavVisible() (recurso ligado no tenant +
     // quem pode gerenciar), então user/super e tenant sem o recurso nunca veem o item.
     if (routeName === "creditos-ia" && aiCreditsVisible !== true) return false;
+    // Gestão dos aplicativos personalizados: FAIL-CLOSED como os Créditos de IA. Só
+    // `true` explícito (usePanelAppsManageVisible: admin, ou custom ligado com a
+    // permissão e a chave de menu não desmarcada; teto do tenant não desligado) mostra.
+    if (routeName === "aplicativos" && panelAppsManageVisible !== true) return false;
     // O PLANO é o teto: rota de capability não contratada some do menu, independente
     // de menuVisibility/permissão. Plano ausente => libera (grandfathering). AND com o resto.
     if (!planAllowsRoute(planFeatures, routeName)) return false;
@@ -484,8 +636,9 @@ function getProfileMenus(profile: ProfileType, menuVisibility: Record<string, bo
       break;
   }
 
-  const filtered = categories
-    .map(filterCategory)
+  // Apps personalizadas entram DEPOIS dos gates e ANTES de tirar as categorias vazias
+  // (Ag1-14): categoria que ficou vazia não recebe app (a app cai em "Ferramentas").
+  const filtered = injectPanelApps(categories.map(filterCategory), profile, panelApps, t, onLaunchPanelApp)
     .filter(hasVisibleItems);
 
   if (profile === "superadmin") {
@@ -529,6 +682,18 @@ export interface BuildNavEntriesArgs {
   tenantMenuVisibility?: Record<string, boolean>;
   /** useAiCreditsNavVisible(). FAIL-CLOSED: ausente ou false = item "Créditos de IA" oculto. */
   aiCreditsVisible?: boolean;
+  /**
+   * Apps personalizadas do menu (`useVisiblePanelApps().apps`, já pelo seletor único e
+   * pelo dono). Ausente = nenhuma app (chamador antigo = menu de hoje).
+   */
+  panelApps?: PanelAppNavEntry[];
+  /** usePanelAppsManageVisible(). FAIL-CLOSED: ausente ou false = item "Aplicativos" oculto. */
+  panelAppsManageVisible?: boolean;
+  /**
+   * Abre pelo lançamento a app "nova aba" com variáveis (fase 2), chamado no clique do item.
+   * Ausente = o item dessas apps leva à página `/ferramentas/<id>`, que lança sozinha.
+   */
+  onLaunchPanelApp?: (app: PanelAppNavEntry) => void;
 }
 
 /**
@@ -571,6 +736,9 @@ export function buildNavEntriesForProfile({
   wavoipEnabled,
   tenantMenuVisibility,
   aiCreditsVisible,
+  panelApps,
+  panelAppsManageVisible,
+  onLaunchPanelApp,
 }: BuildNavEntriesArgs): NavCategory[] {
   // Troca de senha obrigatória: sem menu nenhum — o guard prende em /trocar-senha
   // e o backend nega todo o resto com 403; itens de nav seriam só ruído.
@@ -595,7 +763,7 @@ export function buildNavEntriesForProfile({
   if (resellerTermsPending && profile === "admin") {
     return [];
   }
-  return getProfileMenus(profile, menuVisibility, t, isRestricted, profile === "superadmin" ? null : planFeatures, wavoipEnabled, profile === "superadmin" ? null : tenantMenuVisibility, aiCreditsVisible);
+  return getProfileMenus(profile, menuVisibility, t, isRestricted, profile === "superadmin" ? null : planFeatures, wavoipEnabled, profile === "superadmin" ? null : tenantMenuVisibility, aiCreditsVisible, panelApps, panelAppsManageVisible, onLaunchPanelApp);
 }
 
 /**
@@ -610,10 +778,44 @@ export async function performLogout(setOffline: boolean): Promise<void> {
     try { await updateUserIsOnline(user.userId, false); } catch { /* ignora — sai mesmo assim */ }
   }
   // Web Push (PWA): desfaz a assinatura deste aparelho para quem saiu parar de
-  // receber avisos aqui. Best-effort com teto de 3s — sair nunca trava.
-  await unsubscribePush();
+  // receber avisos aqui. Best-effort com teto de 3s — sair nunca trava. Junto,
+  // encerra no servidor a renovação do login deste aparelho (teto de 2s).
+  await Promise.all([unsubscribePush(), endServerSession()]);
   clearAuth();
   window.location.href = "/login";
+}
+
+// Chat Privado: o contador muda a cada mensagem, então cada marcador lê o store sozinho e só
+// ele re-renderiza (não a sidebar inteira). Quem não tem acesso ao Chat Privado tem contagem 0.
+function ChatUnreadPill() {
+  const t = useTranslations("layoutSidebar");
+  const count = useChatStore((s) => s.unreadCount);
+  if (count <= 0) return null;
+  const label = t("chatUnread", { count });
+  return (
+    <span
+      title={label}
+      className="ml-auto text-[10px] font-bold px-1.5 py-0.5 rounded-full min-w-[18px] text-center bg-blue-500/20 text-blue-600 dark:text-blue-400"
+    >
+      {count > 99 ? "99+" : count}
+      <span className="sr-only"> {label}</span>
+    </span>
+  );
+}
+
+function ChatUnreadDot({ className }: { className?: string }) {
+  const t = useTranslations("layoutSidebar");
+  const count = useChatStore((s) => s.unreadCount);
+  if (count <= 0) return null;
+  const label = t("chatUnread", { count });
+  return (
+    <span
+      role="img"
+      aria-label={label}
+      title={label}
+      className={cn("h-1.5 w-1.5 shrink-0 rounded-full bg-blue-500", className)}
+    />
+  );
 }
 
 export function Sidebar() {
@@ -622,6 +824,7 @@ export function Sidebar() {
   // "channelDisconnected" (sessões) rotula o dot de incidente da sidebar colapsada.
   const tHeader = useTranslations("layoutHeader");
   const tSessoes = useTranslations("sessoesPage");
+  const tTask = useTranslations("taskShared");
   const pathname = usePathname();
   const { theme, setTheme, resolvedTheme } = useTheme();
   const { logoTimestamp, appName, tenantBranding } = useBrandingStore();
@@ -630,6 +833,19 @@ export function Sidebar() {
   const { user, menuVisibility, tenantMenuVisibility, isRestrictedUser, paymentOverdue, canViewPayments, planFeatures } = useAuthStore();
   const wavoipEnabled = useAuthStore((s) => s.isWavoipEnabled());
   const aiCreditsVisible = useAiCreditsNavVisible();
+  // Aplicativos personalizados: mesma fonte da busca rápida (seletor único + dono).
+  const { apps: panelApps } = useVisiblePanelApps();
+  const panelAppsManageVisible = usePanelAppsManageVisible();
+  // Fase 2: app "nova aba" com variáveis abre pelo lançamento (janela aberta no clique) e
+  // fecha o menu do celular, como a navegação dos outros itens.
+  const tPanelAppLaunch = useTranslations("panelAppLaunch");
+  const launchPanelAppFromMenu = React.useCallback(
+    (app: PanelAppNavEntry) => {
+      void openPanelAppLaunch({ app, placement: "menu", t: tPanelAppLaunch });
+      setMobileSidebarOpen(false);
+    },
+    [tPanelAppLaunch, setMobileSidebarOpen],
+  );
 
   const effectiveTenantId =tenantBranding && tenantBranding.customLogoTimestamp > 0 ? tenantBranding.tenantId : undefined;
   const effectiveLogoTs = tenantBranding?.customLogoTimestamp || logoTimestamp;
@@ -691,6 +907,16 @@ export function Sidebar() {
     window.addEventListener("sessionsTenantStatusUpdate", handler as EventListener);
     return () => window.removeEventListener("sessionsTenantStatusUpdate", handler as EventListener);
   }, []);
+
+  // Tarefas (D14): atrasadas + que vencem hoje do PRÓPRIO usuário, do mesmo resumo do sino
+  // (o header carrega; sem o recurso no plano o resumo fica zerado). Backend antigo: sem número.
+  // Só com acesso à página (D23): item que leva a "Acesso negado" não ganha número.
+  const canAccessTasksPage = usePageAccess("tarefas");
+  const taskOverdue = useTaskSummaryStore((s) => s.overdue);
+  const taskToday = useTaskSummaryStore((s) => s.today);
+  const taskSummarySupported = useTaskSummaryStore((s) => s.supported);
+  const taskBadgeCount = canAccessTasksPage && taskSummarySupported === true ? taskOverdue + taskToday : 0;
+  const taskBadgeTip = tTask("menuBadgeTooltip");
 
   // Users counts for badge
   const [userCounts, setUserCounts] = useState<{online: number; total: number}>({ online: 0, total: 0 });
@@ -767,6 +993,9 @@ export function Sidebar() {
       wavoipEnabled,
       tenantMenuVisibility: tenantMenuVisibility || {},
       aiCreditsVisible,
+      panelApps,
+      panelAppsManageVisible,
+      onLaunchPanelApp: launchPanelAppFromMenu,
     });
     // Bull-Board: injeta o atalho (link externo, nova aba) no subgrupo Operação
     // do menu Sistema do superadmin, só quando o backend reporta disponível.
@@ -783,7 +1012,7 @@ export function Sidebar() {
     }
     return cats;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [profile, menuVisibility, tenantMenuVisibility, isRestricted, paymentOverdue, showPayments, planFeatures, bullBoard.enabled, bullBoard.url, user?.mustChangePassword, user?.resellerTermsPending, wavoipEnabled, aiCreditsVisible]);
+  }, [profile, menuVisibility, tenantMenuVisibility, isRestricted, paymentOverdue, showPayments, planFeatures, bullBoard.enabled, bullBoard.url, user?.mustChangePassword, user?.resellerTermsPending, wavoipEnabled, aiCreditsVisible, panelApps, panelAppsManageVisible, launchPanelAppFromMenu]);
 
   // During tour: expand all collapsed-sidebar categories so items are in the DOM
   useEffect(() => {
@@ -888,6 +1117,12 @@ export function Sidebar() {
                   sessionCounts.total > 0 &&
                   sessionCounts.online === 0 &&
                   collapsedItems.some((i) => i.href === "/sessoes");
+                // Tarefas (D14): mesmo ponto na categoria que contém /tarefas — vermelho com
+                // atrasada, âmbar só com as de hoje. O incidente de canais tem prioridade.
+                const hasTasksDot =
+                  !hasChannelsIncident &&
+                  taskBadgeCount > 0 &&
+                  collapsedItems.some((i) => i.href === "/tarefas");
                 return (
                   <div key={category.key} className={cn("space-y-0.5", idx > 0 && "mt-2 pt-2 border-t border-sidebar-border/50")}>
                     {/* Category icon — click to expand/collapse */}
@@ -913,6 +1148,21 @@ export function Sidebar() {
                                 className="absolute -right-1 -top-1 h-1.5 w-1.5 rounded-full bg-destructive"
                               />
                             )}
+                            {hasTasksDot && (
+                              <span
+                                role="img"
+                                aria-label={taskBadgeTip}
+                                title={taskBadgeTip}
+                                className={cn(
+                                  "absolute -right-1 -top-1 h-1.5 w-1.5 rounded-full",
+                                  taskOverdue > 0 ? "bg-destructive" : "bg-amber-500",
+                                )}
+                              />
+                            )}
+                            {/* Chat Privado: canto de baixo, para não cobrir os pontos acima. */}
+                            {collapsedItems.some((i) => i.href === "/chat-privado") && (
+                              <ChatUnreadDot className="absolute -right-1 -bottom-1" />
+                            )}
                           </span>
                         </button>
                       </TooltipTrigger>
@@ -933,8 +1183,34 @@ export function Sidebar() {
                           {collapsedItems.map((item) => {
                             const Icon = item.icon;
                             const active = isActive(item.href);
+                            if (item.onSelect) {
+                              // App "nova aba" com variáveis: abre pelo lançamento (nunca link).
+                              const onSelect = item.onSelect;
+                              return (
+                                <Tooltip key={item.key ?? item.href}>
+                                  <TooltipTrigger asChild>
+                                    <button
+                                      type="button"
+                                      onClick={() => onSelect()}
+                                      aria-label={item.name}
+                                      aria-current={active ? "page" : undefined}
+                                      {...(item.tourId ? { id: item.tourId } : {})}
+                                      className={cn(
+                                        "flex h-9 w-full items-center justify-center rounded-md transition-colors",
+                                        active
+                                          ? "bg-sidebar-accent text-sidebar-accent-foreground"
+                                          : "text-sidebar-foreground/78 hover:bg-sidebar-accent/50 hover:text-sidebar-accent-foreground"
+                                      )}
+                                    >
+                                      <Icon className="h-4 w-4" />
+                                    </button>
+                                  </TooltipTrigger>
+                                  <TooltipContent side="right">{item.name}</TooltipContent>
+                                </Tooltip>
+                              );
+                            }
                             return (
-                              <Tooltip key={item.href}>
+                              <Tooltip key={item.key ?? item.href}>
                                 <TooltipTrigger asChild>
                                   <Link
                                     href={item.href}
@@ -951,10 +1227,31 @@ export function Sidebar() {
                                     {/* Ativo: ícone herda text-sidebar-accent-foreground (contraste por luminância
                                         de brand-colors.ts) em vez da cor fixa da categoria — evita ícone amber sobre
                                         fundo accent claro (baixo contraste). */}
-                                    <Icon className="h-4 w-4" />
+                                    {item.href === "/tarefas" && taskBadgeCount > 0 ? (
+                                      <span className="relative inline-flex">
+                                        <Icon className="h-4 w-4" />
+                                        <span
+                                          aria-hidden="true"
+                                          className={cn(
+                                            "absolute -right-1 -top-1 h-1.5 w-1.5 rounded-full",
+                                            taskOverdue > 0 ? "bg-destructive" : "bg-amber-500",
+                                          )}
+                                        />
+                                      </span>
+                                    ) : item.href === "/chat-privado" ? (
+                                      <span className="relative inline-flex">
+                                        <Icon className="h-4 w-4" />
+                                        <ChatUnreadDot className="absolute -right-1 -top-1" />
+                                      </span>
+                                    ) : (
+                                      <Icon className="h-4 w-4" />
+                                    )}
                                   </Link>
                                 </TooltipTrigger>
-                                <TooltipContent side="right">{item.name}</TooltipContent>
+                                <TooltipContent side="right">
+                                  {item.name}
+                                  {item.href === "/tarefas" && taskBadgeCount > 0 && ` (${taskBadgeCount > 99 ? "99+" : taskBadgeCount})`}
+                                </TooltipContent>
                               </Tooltip>
                             );
                           })}
@@ -976,6 +1273,10 @@ export function Sidebar() {
                   <CollapsibleTrigger className="group flex w-full items-center gap-2 rounded-md bg-sidebar-foreground/5 px-2 py-1.5 text-[11px] font-semibold uppercase tracking-wider text-sidebar-foreground/80 transition-colors hover:bg-sidebar-foreground/10 hover:text-sidebar-foreground/95">
                     <span className={cn("h-3.5 w-1 shrink-0 rounded-full", colors.dot)} />
                     <span className="flex-1 text-left">{category.label}</span>
+                    {/* Categoria fechada esconde o contador do item: o ponto avisa por ela. */}
+                    {(category.subgroups ? category.subgroups.flatMap((sg) => sg.items) : category.items).some((i) => i.href === "/chat-privado") && (
+                      <ChatUnreadDot className="group-data-[state=open]:hidden" />
+                    )}
                     <ChevronRight className="h-3 w-3 transition-transform duration-200 group-data-[state=open]:rotate-90 opacity-50" />
                   </CollapsibleTrigger>
                   <CollapsibleContent>
@@ -985,8 +1286,34 @@ export function Sidebar() {
                           const Icon = item.icon;
                           const active = isActive(item.href);
                           const itemName = item.nameKey ? t(item.nameKey) : item.name;
+                          if (item.onSelect) {
+                            // App "nova aba" com variáveis: abre pelo lançamento (nunca link).
+                            const onSelect = item.onSelect;
+                            return (
+                              <div key={item.key ?? item.href} className="relative">
+                                {active && (
+                                  <div className={cn("absolute left-0 top-1 bottom-1 w-0.5 rounded-full", colors.dot)} />
+                                )}
+                                <button
+                                  type="button"
+                                  onClick={() => onSelect()}
+                                  aria-current={active ? "page" : undefined}
+                                  {...(item.tourId ? { id: item.tourId } : {})}
+                                  className={cn(
+                                    "flex h-8 w-full items-center gap-2 rounded-md px-2 text-left text-sm transition-colors duration-150",
+                                    active
+                                      ? "bg-sidebar-accent text-sidebar-accent-foreground font-medium pl-3 shadow-xs"
+                                      : "text-sidebar-foreground/78 hover:bg-sidebar-accent/50 hover:text-sidebar-accent-foreground"
+                                  )}
+                                >
+                                  <Icon className="h-4 w-4 shrink-0" />
+                                  <span className="truncate">{itemName}</span>
+                                </button>
+                              </div>
+                            );
+                          }
                           return (
-                            <div key={item.href} className="relative">
+                            <div key={item.key ?? item.href} className="relative">
                               {active && (
                                 <div className={cn("absolute left-0 top-1 bottom-1 w-0.5 rounded-full", colors.dot)} />
                               )}
@@ -1007,6 +1334,7 @@ export function Sidebar() {
                                     fundo accent claro (baixo contraste). */}
                                 <Icon className="h-4 w-4 shrink-0" />
                                 <span className="truncate">{itemName}</span>
+                                {item.href === "/chat-privado" && <ChatUnreadPill />}
                                 {item.href === "/sessoes" && sessionCounts.total > 0 && (
                                   <span className={cn(
                                     "ml-auto text-[10px] font-bold px-1.5 py-0.5 rounded-full min-w-[18px] text-center",
@@ -1015,6 +1343,20 @@ export function Sidebar() {
                                       : "bg-red-500/20 text-red-600 dark:text-red-400"
                                   )}>
                                     {sessionCounts.online}/{sessionCounts.total}
+                                  </span>
+                                )}
+                                {item.href === "/tarefas" && taskBadgeCount > 0 && (
+                                  <span
+                                    title={taskBadgeTip}
+                                    className={cn(
+                                      "ml-auto text-[10px] font-bold px-1.5 py-0.5 rounded-full min-w-[18px] text-center",
+                                      taskOverdue > 0
+                                        ? "bg-red-500/20 text-red-600 dark:text-red-400"
+                                        : "bg-amber-500/20 text-amber-700 dark:text-amber-400"
+                                    )}
+                                  >
+                                    {taskBadgeCount > 99 ? "99+" : taskBadgeCount}
+                                    <span className="sr-only"> {taskBadgeTip}</span>
                                   </span>
                                 )}
                                 {item.href === "/usuarios" && userCounts.total > 0 && (
@@ -1050,9 +1392,12 @@ export function Sidebar() {
                         if (category.subgroups) {
                           return category.subgroups.map((sg, sgIdx) => (
                             <div key={sgIdx} className={cn(sgIdx > 0 && "mt-2 pt-1.5 border-t border-sidebar-border/40")}>
-                              <p className="px-2 pb-0.5 text-[10px] font-semibold uppercase tracking-wider text-sidebar-foreground/50">
-                                {sg.label}
-                              </p>
+                              {/* Rótulo vazio = itens nativos de uma categoria que ganhou o subgrupo "Aplicativos". */}
+                              {sg.label && (
+                                <p className="px-2 pb-0.5 text-[10px] font-semibold uppercase tracking-wider text-sidebar-foreground/50">
+                                  {sg.label}
+                                </p>
+                              )}
                               <div className="space-y-0.5">
                                 {sg.items.map(renderItem)}
                               </div>

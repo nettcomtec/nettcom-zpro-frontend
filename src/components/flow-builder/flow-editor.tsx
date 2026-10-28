@@ -54,8 +54,9 @@ import {
   syncConditionsToEdges,
 } from "./lib/flow-adapter";
 import { createDefaultFlow } from "./lib/default-flow";
-import { defaultInteractionData } from "./lib/types";
+import { defaultInteractionData, flowLocationCoordKeys, isFlowLocationValueFilled } from "./lib/types";
 import type { FlowData, FlowNodeData, FlowCondition, FlowInteraction } from "./lib/types";
+import { isValidLatLng, parseCoordInput } from "@/lib/location-message";
 
 interface FlowEditorProps {
   initialData?: FlowData;
@@ -70,6 +71,7 @@ interface FlowEditorProps {
 
 export function FlowEditor({ initialData, flowName, onSave, onDirtyChange }: FlowEditorProps) {
   const t = useTranslations("flowBuilderEditor");
+  const tLoc = useTranslations("locationShare");
   const nodeTypes = useMemo(() => ({ flowNode: FlowCustomNode }), []);
   const edgeTypes = useMemo(() => ({ condEdge: ConditionEdge }), []);
 
@@ -775,6 +777,29 @@ export function FlowEditor({ initialData, flowName, onSave, onDirtyChange }: Flo
     return null;
   }, [nodes]);
 
+  // Valida interações Localização: com latitude ou longitude preenchida (na família de
+  // chaves que o nó usa — a regra do servidor, flowLocationCoordKeys), as duas têm de formar
+  // uma coordenada válida; senão o servidor pula o envio sem nada na tela. Nó sem nenhuma
+  // das duas continua salvando como antes.
+  const findLocationFieldError = useCallback((): string | null => {
+    for (const n of nodes) {
+      const d = n.data as unknown as FlowNodeData;
+      const interactions = Array.isArray(d.interactions) ? d.interactions : [];
+      for (const i of interactions) {
+        if (i.type !== "location") continue;
+        const data = (i.data ?? {}) as Record<string, unknown>;
+        const keys = flowLocationCoordKeys(data);
+        const rawLat = data[keys.lat];
+        const rawLng = data[keys.lng];
+        if (!isFlowLocationValueFilled(rawLat) && !isFlowLocationValueFilled(rawLng)) continue;
+        const lat = parseCoordInput(rawLat);
+        const lng = parseCoordInput(rawLng);
+        if (lat === null || lng === null || !isValidLatLng(lat, lng)) return d.name || d.id;
+      }
+    }
+    return null;
+  }, [nodes]);
+
   // `hasError` é flag transitória do editor (realce de validação) e `__allNodes`
   // é resíduo de versões antigas do editor de horários (lista completa dos outros
   // nós — com base64 de mídias — que vazava para o state e inflava o JSON até o
@@ -919,6 +944,11 @@ export function FlowEditor({ initialData, flowName, onSave, onDirtyChange }: Flo
       );
       return;
     }
+    const locationError = findLocationFieldError();
+    if (locationError) {
+      toast.error(tLoc("flowErrInvalid", { node: locationError }));
+      return;
+    }
     const dangling = findDanglingConditionNodes();
     if (dangling.length > 0) {
       const idSet = new Set(dangling.map((b) => b.id));
@@ -963,7 +993,7 @@ export function FlowEditor({ initialData, flowName, onSave, onDirtyChange }: Flo
     } finally {
       setSaving(false);
     }
-  }, [nodes, edges, flowName, onSave, onDirtyChange, findTimeTableDestinationError, findAutoAdvanceError, findTemplateFieldError, findDanglingConditionNodes, errorNodeIds, applyErrorNodeIds, stripEditorFlags, applyServerMediaState, t]);
+  }, [nodes, edges, flowName, onSave, onDirtyChange, findTimeTableDestinationError, findAutoAdvanceError, findTemplateFieldError, findLocationFieldError, findDanglingConditionNodes, errorNodeIds, applyErrorNodeIds, stripEditorFlags, applyServerMediaState, t, tLoc]);
 
   const handleAutoLayout = useCallback(() => {
     pushHistory();

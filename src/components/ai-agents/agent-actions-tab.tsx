@@ -2,7 +2,7 @@
 
 import { Fragment, useEffect, useRef } from "react";
 import { useTranslations } from "next-intl";
-import { Plus, Trash2 } from "lucide-react";
+import { HelpCircle, Plus, Trash2 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -14,6 +14,7 @@ import {
   Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 
 import {
   AI_AGENT_ACTION_TYPES_V5,
@@ -112,6 +113,10 @@ const TYPE_DISABLED_HINT_KEY: Partial<Record<AiAgentActionType, string>> = {
 // Tipos que aceitam o texto que o próprio modelo escreve junto da ação.
 const TYPES_WITH_AI_TEXT: AiAgentActionType[] = ["opportunity", "note", "notify", "block"];
 
+// Tipos decididos pela passada de qualificação (depois da resposta) quando ela
+// está ligada: neles a "Mensagem ao cliente" não vale e fica escondida.
+const QUALIFY_PASS_TYPES: AiAgentActionType[] = ["tag", "kanban"];
+
 const NOTIFY_NO_QUEUE = "__none";
 
 interface AgentActionsTabProps {
@@ -139,6 +144,11 @@ interface AgentActionsTabProps {
   // O servidor anuncia em engineFeatures o que sabe executar: sem "actionsV5"
   // os 4 tipos novos não são oferecidos (backend antigo não os executaria)
   supportsV5: boolean;
+  // Passada de qualificação: só com o anúncio do servidor e o valor devolvido
+  // para este agente. Ausente = aba igual à de antes
+  showQualifyPass?: boolean;
+  qualifyPassEnabled?: boolean;
+  onQualifyPassChange?: (value: boolean) => void;
 }
 
 export function AgentActionsTab({
@@ -159,8 +169,16 @@ export function AgentActionsTab({
   onPipelineSelected,
   hasFallbackQueue,
   supportsV5,
+  showQualifyPass = false,
+  qualifyPassEnabled = false,
+  onQualifyPassChange,
 }: AgentActionsTabProps) {
   const t = useTranslations("aiAgents");
+
+  // Passada ligada: etiqueta e funil saem da resposta e são decididos depois
+  const qualifyPassActive = showQualifyPass && qualifyPassEnabled;
+  const isQualifyPassCard = (action: AiAgentAction) =>
+    qualifyPassActive && QUALIFY_PASS_TYPES.includes(action.type);
 
   // ── Ações ────────────────────────────────────────────────────────────────
 
@@ -361,6 +379,11 @@ export function AgentActionsTab({
       <p className="text-xs text-muted-foreground">{t("actionAiWrites")}</p>
     ) : null;
 
+  const renderQualifyPassCardNote = (action: AiAgentAction) =>
+    isQualifyPassCard(action) ? (
+      <p className="text-xs text-muted-foreground">{t("qualifyPassCardNote")}</p>
+    ) : null;
+
   // Campos próprios de cada tipo. Entram na MESMA grade do seletor de tipo, que
   // ocupa a primeira célula — por isso tag/kanban ficam com o layout de sempre.
   const renderActionFields = (action: AiAgentAction, index: number) => {
@@ -393,6 +416,7 @@ export function AgentActionsTab({
                 ))}
               </SelectContent>
             </Select>
+            {renderQualifyPassCardNote(action)}
           </div>
         );
       }
@@ -663,6 +687,51 @@ export function AgentActionsTab({
           <p className="text-xs text-muted-foreground">{t("actionsTabIntro")}</p>
         </div>
 
+        {/* ── Passada de qualificação: etiqueta e funil depois da resposta ── */}
+        {showQualifyPass && (
+          <div className="space-y-1.5">
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex min-w-0 items-center gap-1.5">
+                <Label htmlFor="ai-agent-qualify-pass">{t("qualifyPassLabel")}</Label>
+                {/* Popover (não Tooltip): abre no toque, no celular */}
+                <Popover>
+                  <PopoverTrigger asChild>
+                    <button
+                      type="button"
+                      className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-muted-foreground hover:text-foreground"
+                      aria-label={t("qualifyPassLabel")}
+                    >
+                      <HelpCircle className="h-4 w-4" />
+                    </button>
+                  </PopoverTrigger>
+                  <PopoverContent
+                    side="top"
+                    align="start"
+                    collisionPadding={16}
+                    className="w-[380px] max-w-[calc(100vw-2rem)] overflow-y-auto text-xs"
+                    style={{
+                      maxHeight: "var(--radix-popover-content-available-height, 70vh)",
+                    }}
+                  >
+                    <div className="space-y-2">
+                      <p className="text-sm font-semibold">{t("qualifyPassLabel")}</p>
+                      <p className="whitespace-pre-line text-muted-foreground">
+                        {t("qualifyPassHelp")}
+                      </p>
+                    </div>
+                  </PopoverContent>
+                </Popover>
+              </div>
+              <Switch
+                id="ai-agent-qualify-pass"
+                checked={qualifyPassEnabled}
+                onCheckedChange={value => onQualifyPassChange?.(value)}
+              />
+            </div>
+            <p className="text-xs text-muted-foreground">{t("qualifyPassNote")}</p>
+          </div>
+        )}
+
         {actions.length === 0 && (
           <p className="text-sm text-muted-foreground">{t("actionsEmpty")}</p>
         )}
@@ -721,16 +790,20 @@ export function AgentActionsTab({
               <p className="text-xs text-muted-foreground">{t("actionWhenHint")}</p>
             </div>
 
-            <div className="space-y-1.5">
-              <Label>{t("actionMessage")}</Label>
-              <Input
-                value={action.actionMessage || ""}
-                onChange={e => updateAction(index, { actionMessage: e.target.value })}
-                placeholder={t("actionMessagePlaceholder")}
-                maxLength={MAX_ACTION_MESSAGE}
-              />
-              <p className="text-xs text-muted-foreground">{t("actionMessageHint")}</p>
-            </div>
+            {/* Com a passada ligada, etiqueta e funil não respondem ao cliente:
+                o campo some, mas o valor continua salvo */}
+            {!isQualifyPassCard(action) && (
+              <div className="space-y-1.5">
+                <Label>{t("actionMessage")}</Label>
+                <Input
+                  value={action.actionMessage || ""}
+                  onChange={e => updateAction(index, { actionMessage: e.target.value })}
+                  placeholder={t("actionMessagePlaceholder")}
+                  maxLength={MAX_ACTION_MESSAGE}
+                />
+                <p className="text-xs text-muted-foreground">{t("actionMessageHint")}</p>
+              </div>
+            )}
           </div>
         ))}
 

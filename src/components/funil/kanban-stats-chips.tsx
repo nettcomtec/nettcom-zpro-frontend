@@ -2,6 +2,7 @@
 
 import React, { useMemo } from "react";
 import { useTranslations } from "next-intl";
+import { useRegion } from "@/hooks/use-region";
 
 export interface StatsOpportunity {
   status?: string;
@@ -16,6 +17,8 @@ interface Props {
 
 export function KanbanStatsChips({ opportunities, paginationTotal }: Props) {
   const t = useTranslations("funilKanbanPage");
+  // Valor gravado sem moeda: aparece na moeda e no formato do país da empresa.
+  const { formatMoney } = useRegion();
 
   const stats = useMemo(() => {
     const list = opportunities || [];
@@ -27,12 +30,9 @@ export function KanbanStatsChips({ opportunities, paginationTotal }: Props) {
     return {
       abertas,
       emAndamento,
-      valorTotalFormatado: valorTotal.toLocaleString("pt-BR", {
-        minimumFractionDigits: 2,
-        maximumFractionDigits: 2,
-      }),
+      valorTotalFormatado: formatMoney(valorTotal),
     };
-  }, [opportunities]);
+  }, [opportunities, formatMoney]);
 
   const total = paginationTotal ?? opportunities.length;
   // Com paginação ativa, os chips abaixo (abertas/andamento/valor) refletem só a
@@ -57,7 +57,7 @@ export function KanbanStatsChips({ opportunities, paginationTotal }: Props) {
         {pageNote}
       </span>
       <span className="rounded-full border border-primary/30 bg-primary/5 px-3 py-1 font-semibold text-primary">
-        {t("statTotalValue")} R$ {stats.valorTotalFormatado}
+        {t("statTotalValue")} {stats.valorTotalFormatado}
         {pageNote}
       </span>
     </div>

@@ -53,11 +53,12 @@ import { fetchContacts, createContact } from "@/services/contacts";
 import { fetchQueues, type Queue } from "@/services/queues";
 import { fetchWallets } from "@/services/wallets";
 import { createTicket, fetchTicket, updateTicket } from "@/services/tickets";
-import { sendWabaTemplateComponents, sendWabaTemplateMarketingComponents } from "@/services/messages";
+import { sendWabaTemplateComponents } from "@/services/messages";
 import { usePageAccess } from "@/hooks/use-page-access";
 import { AccessDenied } from "@/components/layout/access-denied";
 import { PageHelp } from "@/components/layout/page-help";
 import { formatBulkSendError } from "@/lib/bulk-send-error-format";
+import { isMetaTokenUnauthorized, metaRateLimitedMessage } from "@/lib/backend-error-code";
 import { getBrPhoneVariants } from "@/lib/phone-utils";
 import { SendProgressModal } from "@/components/massa/send-progress-modal";
 import { BulkCsvImportDialog } from "@/components/massa/bulk-csv-import-dialog";
@@ -214,6 +215,7 @@ export default function MassaTemplateVariavelPage() {
   const tWarn = useTranslations("bulkPhoneWarnings");
   const tCsv = useTranslations("bulkCsvImport");
   const tOrder = useTranslations("orderDetails");
+  const tCommon = useTranslations("common");
   const allowed = usePageAccess("massa");
   if (!allowed) return <AccessDenied />;
   const [loading, setLoading] = useState(true);
@@ -353,8 +355,8 @@ export default function MassaTemplateVariavelPage() {
         a.name.toLowerCase().localeCompare(b.name.toLowerCase())
       );
       setTemplates(sorted);
-    } catch {
-      toast.error(t("errorLoadTemplates"));
+    } catch (err) {
+      toast.error(metaRateLimitedMessage(err, tCommon) ?? (isMetaTokenUnauthorized(err) ? tCommon("metaTokenInvalidReconnect") : t("errorLoadingTemplates")));
     } finally {
       setLoadingTemplates(false);
     }
@@ -534,7 +536,7 @@ export default function MassaTemplateVariavelPage() {
       }
     }
 
-    throw new Error(`Não foi possível criar contato: ${number}`);
+    throw new Error(t("errorCreateContact", { number }));
   };
 
   /** Cria ou obtém ticket existente (trata 409); `created` = nasceu neste disparo.
@@ -567,7 +569,7 @@ export default function MassaTemplateVariavelPage() {
         if ((t as { id?: number })?.id) return { id: (t as { id: number }).id, created: false };
       }
     }
-    throw new Error(`Não foi possível criar ticket para contato ${contactId}`);
+    throw new Error(t("errorCreateTicket", { contactId }));
   };
 
   /** Aplica o destino pós-envio (pendente/fila/usuário). Plano B: se falhar num
@@ -664,7 +666,9 @@ export default function MassaTemplateVariavelPage() {
     return result;
   };
 
-  const handleSend = async (isMarketing = false) => {
+  // Um só caminho de envio: o backend escolhe a rota pela categoria do template
+  // (marketing sai pela Marketing Messages API quando a conta aceitou os termos).
+  const handleSend = async () => {
     // Camada 1c — guard sincrono: segundo clique enquanto o primeiro ainda esta
     // em voo retorna silenciosamente. Cobre janela ate setSending(true) propagar.
     if (sendingRef.current) return;
@@ -742,7 +746,7 @@ export default function MassaTemplateVariavelPage() {
     let bulkDispatchId: number | null = null;
     try {
       const dr = await createDispatch({
-        dispatchType: isMarketing ? "template_variable_marketing" : "template_variable",
+        dispatchType: "template_variable",
         totalMessages: lines.length,
         whatsappId: selectedConnection.id,
         templateName: selectedTemplate.name,
@@ -885,8 +889,6 @@ export default function MassaTemplateVariavelPage() {
             bulkDispatchId,
             ...orderDetailsField,
           });
-        } else if (isMarketing) {
-          await sendWabaTemplateMarketingComponents(payload);
         } else {
           await sendWabaTemplateComponents(payload);
         }
@@ -1058,11 +1060,11 @@ export default function MassaTemplateVariavelPage() {
           </div>
           <div className="space-y-2">
             <Label>{t("minSeconds")}</Label>
-            <Input placeholder="Ex: 1" value={minDelay} onChange={(e) => setMinDelay(e.target.value)} />
+            <Input placeholder={t("minSecondsPlaceholder")} value={minDelay} onChange={(e) => setMinDelay(e.target.value)} />
           </div>
           <div className="space-y-2">
             <Label>{t("maxSeconds")}</Label>
-            <Input placeholder="Ex: 3" value={maxDelay} onChange={(e) => setMaxDelay(e.target.value)} />
+            <Input placeholder={t("maxSecondsPlaceholder")} value={maxDelay} onChange={(e) => setMaxDelay(e.target.value)} />
           </div>
         </div>
 
@@ -1197,13 +1199,13 @@ export default function MassaTemplateVariavelPage() {
                   <Label className="text-sm font-medium">{t("templateVariables")}</Label>
                   <div className="rounded-md border bg-muted/40 p-3 space-y-2">
                     <p className="text-xs text-muted-foreground">
-                      {t("expectedFormat")}:
+                      {t("expectedFormat")}
                     </p>
                     <p className="font-mono text-xs bg-background rounded p-1">
                       número,{templateVariables.join(",")}
                     </p>
                     <p className="text-xs text-muted-foreground">
-                      {t("example")}:
+                      {t("example")}
                     </p>
                     <p className="font-mono text-xs bg-background rounded p-1">
                       5511999999999,João,Produto A
@@ -1560,7 +1562,7 @@ export default function MassaTemplateVariavelPage() {
         <div className="flex gap-2 flex-wrap">
           <Button
             disabled={!selectedTemplate || sending || parsedBulk.invalid.length > 0 || parsedBulk.valid.length === 0}
-            onClick={() => handleSend(false)}
+            onClick={() => handleSend()}
           >
             {sending ? (
               <RefreshCw className="mr-2 h-4 w-4 animate-spin" />
@@ -1568,13 +1570,6 @@ export default function MassaTemplateVariavelPage() {
               <Send className="mr-2 h-4 w-4" />
             )}
             {t("send")}
-          </Button>
-          <Button
-            variant="secondary"
-            disabled={!selectedTemplate || sending || parsedBulk.invalid.length > 0 || parsedBulk.valid.length === 0}
-            onClick={() => handleSend(true)}
-          >
-            {t("sendMarketing")}
           </Button>
           <Button
             type="button"

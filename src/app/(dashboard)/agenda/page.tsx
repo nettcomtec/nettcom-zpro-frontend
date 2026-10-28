@@ -57,6 +57,8 @@ import { fetchWhatsapps, type WABATemplate } from "@/services/whatsapp";
 import { fetchContacts } from "@/services/contacts";
 import { usePageAccess } from "@/hooks/use-page-access";
 import { useLiveMode } from "@/hooks/use-live-mode";
+import { useRegion } from "@/hooks/use-region";
+import { examplePhone, looksLikeMissingDialCode } from "@/lib/region";
 // Cobranca (template ORDER_DETAILS) — PLANO_TEMPLATE_ORDER_DETAILS.md F6.4.
 // A ficha e guardada dentro do proprio messageContent do lembrete (campo livre)
 // SEM referencia: quem gera o "N da cobranca" e o job, a cada disparo (D7).
@@ -70,12 +72,13 @@ import {
   type OrderDetailsValue,
 } from "@/lib/order-details";
 import { cn, isValidHttpUrl } from "@/lib/utils";
+import { isMetaTokenUnauthorized, metaRateLimitedMessage } from "@/lib/backend-error-code";
 import { AccessDenied } from "@/components/layout/access-denied";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from "@/components/ui/command";
 
 // Channels that support WhatsApp messaging (same as funil/acao-ticket)
-const WA_CHANNEL_TYPES = ["waba", "waba_oauth", "whatsapp", "baileys", "zapo", "evo", "evogo", "zapi", "uazapi", "wuzapi"];
+const WA_CHANNEL_TYPES = ["waba", "waba_oauth", "whatsapp", "baileys", "zapo", "evo", "evogo", "zapi", "uazapi", "meow"];
 // Channels that support WABA templates
 // BSPs (gupshup, dialog360) também suportam templates — incluídos no select.
 const WABA_ONLY_TYPES = ["waba", "waba_oauth", "gupshup", "dialog360"];
@@ -383,8 +386,11 @@ export default function AgendaPage() {
 function AgendaPageContent() {
   const t = useTranslations("agendaPage");
   const tErrors = useTranslations("errors");
+  const tCommon = useTranslations("common");
   const tOrder = useTranslations("orderDetails");
+  const tPhone = useTranslations("phoneInput");
   const { isLiveMode } = useLiveMode();
+  const { country: regionCountry } = useRegion();
 
   // ---- shared state ----
   const [tab, setTab] = useState("appointments");
@@ -516,7 +522,7 @@ function AgendaPageContent() {
           }
         }
       })
-      .catch(() => { toast.error(tErrors("loadFailed")); })
+      .catch((err) => { toast.error(metaRateLimitedMessage(err, tCommon) ?? (isMetaTokenUnauthorized(err) ? tCommon("metaTokenInvalidReconnect") : tErrors("loadFailed"))); })
       .finally(() => setLoadingTemplates(false));
   }, [reminderForm.messageType, reminderForm.whatsappId]);
 
@@ -1546,9 +1552,19 @@ function AgendaPageContent() {
                   <Input
                     value={apptForm.contactPhone}
                     onChange={(e) => setApptForm((f) => ({ ...f, contactPhone: e.target.value }))}
-                    placeholder={t("contactPhonePlaceholder")}
+                    placeholder={examplePhone(regionCountry)}
                   />
                 </div>
+                {/* Campo cru (valor enviado como digitado): exemplo no país da empresa e aviso NÃO
+                    bloqueante quando falta o código do país — sem ele o lembrete vai a outro número. */}
+                {looksLikeMissingDialCode(apptForm.contactPhone, regionCountry) ? (
+                  <p className="col-span-2 flex items-start gap-1 text-xs text-amber-600 dark:text-amber-400" role="status">
+                    <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" aria-hidden />
+                    <span>{tPhone("missingCountryCodeHint", { example: examplePhone(regionCountry) })}</span>
+                  </p>
+                ) : (
+                  <p className="col-span-2 text-xs text-muted-foreground">{t("contactPhoneHint")}</p>
+                )}
               </div>
             )}
             <div className="grid grid-cols-2 gap-2">
@@ -1710,7 +1726,7 @@ function AgendaPageContent() {
                     onValueChange={(v) => setReminderForm((f) => ({ ...f, whatsappId: v ? Number(v) : undefined }))}
                   >
                     <SelectTrigger>
-                      <SelectValue placeholder="Selecione" />
+                      <SelectValue placeholder={t("selectPlaceholder")} />
                     </SelectTrigger>
                     <SelectContent>
                       {waWhatsapps.map((w) => (
@@ -1735,7 +1751,7 @@ function AgendaPageContent() {
                     }}
                   >
                     <SelectTrigger>
-                      <SelectValue placeholder="Selecione" />
+                      <SelectValue placeholder={t("selectPlaceholder")} />
                     </SelectTrigger>
                     <SelectContent>
                       {wabaWhatsapps.map((w) => (
@@ -1767,7 +1783,7 @@ function AgendaPageContent() {
                         }}
                       >
                         <SelectTrigger>
-                          <SelectValue placeholder="Selecione" />
+                          <SelectValue placeholder={t("selectPlaceholder")} />
                         </SelectTrigger>
                         <SelectContent>
                           {templates.map((tpl) => (

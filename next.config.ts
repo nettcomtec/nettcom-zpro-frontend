@@ -6,6 +6,10 @@ const withSerwist = withSerwistInit({
   swSrc: "src/app/sw.ts",
   swDest: "public/sw.js",
   disable: process.env.NODE_ENV === "development",
+  // O registro é feito por components/pwa/service-worker-registrar.tsx, que chama o
+  // mesmo window.serwist.register() de antes, menos nas páginas públicas (/f e /agendar):
+  // o visitante não baixa o app do painel (pré-carga de ~34 MB).
+  register: false,
   // Branding assets are updated dynamically at runtime — never precache them
   exclude: [
     /logo\.png$/,
@@ -52,7 +56,7 @@ const nextConfig: NextConfig = {
     // (/publicFavicon, /publicLogoDark, /publicPwaIcon/...): porta diferente do front,
     // logo fora de 'self', e http, logo fora de https:. Vazio em producao.
     const devHttp = isDev ? " http://localhost:* http://127.0.0.1:*" : "";
-    const csp = [
+    const cspDirectives = [
       "default-src 'self'",
       "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://connect.facebook.net blob:",
       "style-src 'self' 'unsafe-inline' https:",
@@ -71,18 +75,33 @@ const nextConfig: NextConfig = {
       "object-src 'none'",
       "base-uri 'self'",
       "form-action 'self'",
-    ].join("; ");
+    ];
+    const csp = cspDirectives.join("; ");
+    // Formulário público (/f/<endereço>): a ÚNICA rota que o site do cliente pode embutir
+    // (iframe). Mesmo CSP, trocando só o frame-ancestors, e sem X-Frame-Options — não há
+    // como "remover" um cabeçalho de outra entrada, por isso a global exclui "f/". O "/f"
+    // sozinho (404) fica só na global (":path+" exige o endereço).
+    const cspEmbeddable = cspDirectives
+      .map((directive) => (directive === "frame-ancestors 'none'" ? "frame-ancestors *" : directive))
+      .join("; ");
+    const commonHeaders = [
+      { key: "X-Content-Type-Options", value: "nosniff" },
+      { key: "Referrer-Policy", value: "strict-origin-when-cross-origin" },
+      { key: "Strict-Transport-Security", value: "max-age=63072000; includeSubDomains; preload" },
+      { key: "Permissions-Policy", value: "camera=(self), microphone=(self), geolocation=()" },
+    ];
     return [
       {
-        source: "/(.*)",
+        source: "/((?!f/).*)",
         headers: [
           { key: "Content-Security-Policy", value: csp },
           { key: "X-Frame-Options", value: "DENY" },
-          { key: "X-Content-Type-Options", value: "nosniff" },
-          { key: "Referrer-Policy", value: "strict-origin-when-cross-origin" },
-          { key: "Strict-Transport-Security", value: "max-age=63072000; includeSubDomains; preload" },
-          { key: "Permissions-Policy", value: "camera=(self), microphone=(self), geolocation=()" },
+          ...commonHeaders,
         ],
+      },
+      {
+        source: "/f/:path+",
+        headers: [{ key: "Content-Security-Policy", value: cspEmbeddable }, ...commonHeaders],
       },
     ];
   },

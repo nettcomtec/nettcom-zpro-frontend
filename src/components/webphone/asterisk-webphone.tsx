@@ -11,18 +11,29 @@ import { UserAgent, Inviter, SessionState } from "sip.js";
 import type { Session, Web } from "sip.js";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
-import { useWebphoneStore } from "@/stores/webphone-store";
+import { Button } from "@/components/ui/button";
+import { isSipCallActive, useWebphoneStore } from "@/stores/webphone-store";
 import { useAuthStore } from "@/stores/auth-store";
 import { CallControls } from "./call-controls";
 import { CallTimer } from "./call-timer";
 import { Numpad } from "./numpad";
 import { SipTransferPanel } from "./sip-transfer-panel";
 import { SipConsultPanel } from "./sip-consult-panel";
-import { Wifi, WifiOff } from "lucide-react";
+import { AlertTriangle, Loader2, RefreshCw, Wifi, WifiOff } from "lucide-react";
 import { useTranslations } from "next-intl";
 import { toast } from "sonner";
 import { sipSession, SIP_MIC_TIMEOUT_ERROR } from "./sip-session";
 import { createCallLog } from "@/services/call-logs";
+import { describeRegisterFailure } from "@/lib/sip-diagnostics";
+import type { SipLinkState } from "@/lib/sip-link";
+import {
+  attachSessionAudio,
+  createOutgoingRingback,
+  getSessionPeerConnection,
+  isSipEarlyMediaEnabled,
+  watchOutgoingInvite,
+} from "@/lib/sip-ringback";
+import type { OutgoingRingback } from "@/lib/sip-ringback";
 
 const NO_RESPONSE_TIMEOUT_MS = 15_000;
 
@@ -35,7 +46,7 @@ interface AsteriskWebphoneProps {
   transport?: "ws" | "wss" | "udp";
 }
 
-export function AsteriskWebphone({ server, initialPhoneNumber = "" }: AsteriskWebphoneProps) {
+export function AsteriskWebphone({ server, initialPhoneNumber = "", transport }: AsteriskWebphoneProps) {
   const {
     callStatus,
     callInfo,
@@ -51,9 +62,12 @@ export function AsteriskWebphone({ server, initialPhoneNumber = "" }: AsteriskWe
     clearPendingSipCall,
   } = useWebphoneStore();
   const { user } = useAuthStore();
+  const sipRegisterFailure = useWebphoneStore((s) => s.sipRegisterFailure);
+  const sipLinkState = useWebphoneStore((s) => s.sipLinkState);
 
   const t = useTranslations("asteriskWebphone");
   const tc = useTranslations("webphoneControls");
+  const td = useTranslations("sipDiagnostics");
   const [phoneNumber, setPhoneNumber] = useState(initialPhoneNumber);
   const [showKeypad, setShowKeypad] = useState(false);
   const [holdPending, setHoldPending] = useState(false);
@@ -69,17 +83,33 @@ export function AsteriskWebphone({ server, initialPhoneNumber = "" }: AsteriskWe
   // Quem encerrou a perna de consulta: "complete"/"cancel" iniciados por nós
   // (já tratam unhold/endCall); null = destino desligou → retomar a chamada.
   const consultEndRef = useRef<null | "complete" | "cancel">(null);
+  // "Chamando" das ligações de saída (lib/sip-ringback.ts): a da ligação e a da consulta.
+  const ringbackRef = useRef<OutgoingRingback | null>(null);
+  const consultRingbackRef = useRef<OutgoingRingback | null>(null);
+  const outgoingInviterRef = useRef<Inviter | null>(null);
+
+  // Tela fechando no meio do "chamando": o toque de reserva não pode seguir tocando.
+  useEffect(
+    () => () => {
+      ringbackRef.current?.stop();
+      consultRingbackRef.current?.stop();
+    },
+    []
+  );
+
+  // Chamada recebida por cima do "chamando" (o provider troca a sessão e a ligação de saída fica
+  // sem tela): o toque e o áudio antecipado dela não podem tocar por cima. Ligação já atendida
+  // não entra aqui, para não cortar o áudio de uma conversa.
+  useEffect(() => {
+    if (callInfo?.direction !== "incoming") return;
+    const outgoing = outgoingInviterRef.current;
+    if (!outgoing || outgoing.state !== SessionState.Establishing) return;
+    ringbackRef.current?.stop();
+    if (remoteAudioRef.current) remoteAudioRef.current.srcObject = null;
+  }, [callInfo]);
 
   const setupRemoteAudio = useCallback((session: Session) => {
-    const pc = (
-      session.sessionDescriptionHandler as unknown as Record<string, unknown>
-    )?.peerConnection as RTCPeerConnection | undefined;
-    if (!pc || !remoteAudioRef.current) return;
-    const receivers = pc.getReceivers();
-    if (receivers.length > 0 && receivers[0].track) {
-      const stream = new MediaStream([receivers[0].track]);
-      remoteAudioRef.current.srcObject = stream;
-    }
+    attachSessionAudio(session, remoteAudioRef.current);
   }, []);
 
   const handleSessionStateChange = useCallback(
@@ -273,20 +303,29 @@ export function AsteriskWebphone({ server, initialPhoneNumber = "" }: AsteriskWe
                 setOnHold(true);
                 consultEndRef.current = null;
                 try {
-                  const consultInviter = new Inviter(ua, uri);
+                  // earlyMedia: o "chamando" do destino toca antes de atender (lib/sip-ringback.ts).
+                  const earlyMedia = isSipEarlyMediaEnabled();
+                  const consultInviter = new Inviter(ua, uri, { earlyMedia });
                   sipSession.consultSession = consultInviter;
                   setConsult({ state: "calling", ext: target, label });
                   setTransferOpen(false);
+                  consultRingbackRef.current?.stop();
+                  const consultRingback = createOutgoingRingback({
+                    session: consultInviter,
+                    getPeerConnection: () => getSessionPeerConnection(consultInviter),
+                    attachRemoteAudio: () => attachSessionAudio(consultInviter, consultAudioRef.current),
+                  });
+                  consultRingbackRef.current = consultRingback;
+                  const consultWatch = watchOutgoingInvite(consultInviter, {
+                    earlyMedia,
+                    sawEarlyMedia: consultRingback.sawEarlyMedia,
+                  });
                   consultInviter.stateChange.addListener((s: SessionState) => {
+                    // Consulta encerrada e já substituída por outra: não mexe na nova.
+                    if (sipSession.consultSession !== null && sipSession.consultSession !== consultInviter) return;
                     if (s === SessionState.Established) {
                       setConsult((c) => (c ? { ...c, state: "established" } : c));
-                      const pc = (
-                        consultInviter.sessionDescriptionHandler as unknown as Record<string, unknown>
-                      )?.peerConnection as RTCPeerConnection | undefined;
-                      const receivers = pc?.getReceivers?.();
-                      if (receivers && receivers[0]?.track && consultAudioRef.current) {
-                        consultAudioRef.current.srcObject = new MediaStream([receivers[0].track]);
-                      }
+                      attachSessionAudio(consultInviter, consultAudioRef.current);
                     } else if (s === SessionState.Terminated) {
                       sipSession.consultSession = null;
                       resetConsult();
@@ -294,12 +333,21 @@ export function AsteriskWebphone({ server, initialPhoneNumber = "" }: AsteriskWe
                       if (consultEndRef.current === null) setHold(false);
                     }
                   });
-                  consultInviter.invite().catch(() => {
-                    sipSession.consultSession = null;
-                    resetConsult();
-                    setHold(false);
-                    toast.error(tc("consultStartError"));
-                  });
+                  consultInviter
+                    .invite({
+                      requestDelegate: {
+                        onProgress: (response) => consultRingback.onProgress(response),
+                        onAccept: consultWatch.onAccept,
+                        onReject: consultWatch.onFinalResponse,
+                        onRedirect: consultWatch.onFinalResponse,
+                      },
+                    })
+                    .catch(() => {
+                      sipSession.consultSession = null;
+                      resetConsult();
+                      setHold(false);
+                      toast.error(tc("consultStartError"));
+                    });
                   setTransferPending(false);
                 } catch {
                   setHold(false);
@@ -359,6 +407,7 @@ export function AsteriskWebphone({ server, initialPhoneNumber = "" }: AsteriskWe
   }, [transferPending, consult, endCall, resetConsult, tc]);
 
   const cancelConsultation = useCallback(() => {
+    consultRingbackRef.current?.stop();
     const consultSession = sipSession.consultSession;
     consultEndRef.current = "cancel";
     if (consultSession) {
@@ -393,8 +442,19 @@ export function AsteriskWebphone({ server, initialPhoneNumber = "" }: AsteriskWe
         toast.error(t("callError"));
         return;
       }
-      const inviter = new Inviter(sipSession.ua, target);
+      // earlyMedia: o "chamando" e os avisos da operadora tocam antes de atender (lib/sip-ringback.ts).
+      const earlyMedia = isSipEarlyMediaEnabled();
+      const inviter = new Inviter(sipSession.ua, target, { earlyMedia });
       sipSession.session = inviter;
+      outgoingInviterRef.current = inviter;
+      ringbackRef.current?.stop();
+      const ringback = createOutgoingRingback({
+        session: inviter,
+        getPeerConnection: () => getSessionPeerConnection(inviter),
+        attachRemoteAudio: () => attachSessionAudio(inviter, remoteAudioRef.current),
+      });
+      ringbackRef.current = ringback;
+      const inviteWatch = watchOutgoingInvite(inviter, { earlyMedia, sawEarlyMedia: ringback.sawEarlyMedia });
       setPhoneNumber(number);
       startCall({ phone: number, tag, direction: "outgoing" });
  // Front legado: makeCall → CriarCallLog('Calling')
@@ -425,6 +485,9 @@ export function AsteriskWebphone({ server, initialPhoneNumber = "" }: AsteriskWe
         // Chamada já encerrada pelo teto: o Terminated tardio (Timer B) não pode
         // zerar sipSession.session de uma chamada NOVA feita nesse meio-tempo.
         if (noResponseTimedOut) return;
+        // Mesma coisa quando outra ligação já ocupa a tela (rediscou antes do 487, ou
+        // entrou chamada durante o "chamando"): esta não mexe no estado da outra.
+        if (sipSession.session !== null && sipSession.session !== inviter) return;
         handleSessionStateChange(s);
       });
       // Rejeição aqui = INVITE nem saiu (ex.: microfone negado). Sem o reset,
@@ -433,10 +496,22 @@ export function AsteriskWebphone({ server, initialPhoneNumber = "" }: AsteriskWe
         .invite({
           requestDelegate: {
             onTrying: markResponse,
-            onProgress: markResponse,
-            onRedirect: markResponse,
-            onAccept: markResponse,
-            onReject: markResponse,
+            onProgress: (response) => {
+              markResponse();
+              ringback.onProgress(response);
+            },
+            onRedirect: () => {
+              markResponse();
+              inviteWatch.onFinalResponse();
+            },
+            onAccept: () => {
+              markResponse();
+              inviteWatch.onAccept();
+            },
+            onReject: () => {
+              markResponse();
+              inviteWatch.onFinalResponse();
+            },
           },
         })
         .then(() => {
@@ -480,6 +555,11 @@ export function AsteriskWebphone({ server, initialPhoneNumber = "" }: AsteriskWe
   }, [pendingSipCall, clearPendingSipCall, dialNumber]);
 
   const handleHangup = useCallback(() => {
+    // O toque de reserva e o áudio antecipado da operadora param já no clique, sem esperar
+    // o 487/BYE fechar a conexão (o 487 que se perde deixaria o áudio tocando com a tela parada).
+    ringbackRef.current?.stop();
+    consultRingbackRef.current?.stop();
+    if (remoteAudioRef.current) remoteAudioRef.current.srcObject = null;
     // Derruba também qualquer perna de consulta em aberto.
     const consultSession = sipSession.consultSession;
     if (consultSession) {
@@ -575,6 +655,17 @@ export function AsteriskWebphone({ server, initialPhoneNumber = "" }: AsteriskWe
     terminated: t("statusTerminated"),
     error: t("statusError"),
   };
+  // Fora de chamada o selo mostra a conexão do ramal; em chamada, a chamada.
+  const linkLabel: Record<SipLinkState, string> = {
+    idle: t("statusIdle"),
+    connecting: t("statusConnecting"),
+    registering: t("statusRegistering"),
+    registered: t("statusRegistered"),
+    reconnecting: t("statusReconnecting"),
+    error: t("statusError"),
+  };
+  const inCall = isSipCallActive(callStatus);
+  const linkBusy = sipLinkState === "connecting" || sipLinkState === "registering" || sipLinkState === "reconnecting";
 
   return (
     <div className="flex flex-col items-center gap-4 p-4">
@@ -584,13 +675,84 @@ export function AsteriskWebphone({ server, initialPhoneNumber = "" }: AsteriskWe
       <div className="flex items-center gap-2">
         {sipRegistered ? (
           <Wifi aria-hidden="true" className="h-4 w-4 text-success" />
+        ) : linkBusy ? (
+          <Loader2 aria-hidden="true" className="h-4 w-4 animate-spin text-amber-500" />
         ) : (
           <WifiOff aria-hidden="true" className="h-4 w-4 text-destructive" />
         )}
-        <Badge variant={isOnHold ? "warning" : sipRegistered ? "success" : "secondary"}>
-          {isOnHold ? tc("statusOnHold") : statusLabel[callStatus] || callStatus}
+        <Badge
+          variant={
+            isOnHold ? "warning" : sipRegistered ? "success" : sipLinkState === "reconnecting" ? "warning" : "secondary"
+          }
+        >
+          {isOnHold
+            ? tc("statusOnHold")
+            : inCall
+              ? statusLabel[callStatus] || callStatus
+              : linkLabel[sipLinkState] || statusLabel[callStatus] || callStatus}
         </Badge>
       </div>
+
+      {/* Queda da conexão: o WebPhone volta sozinho (lib/sip-link.ts); o botão só pula a espera. */}
+      {sipLinkState === "reconnecting" && (
+        <div
+          role="status"
+          className="flex w-full items-start gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 p-2 text-xs text-amber-700 dark:text-amber-400"
+        >
+          <AlertTriangle aria-hidden="true" className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+          <div className="min-w-0 flex-1 space-y-1">
+            <p className="font-medium break-words">
+              {td(`webphone.${describeRegisterFailure(sipRegisterFailure ?? { kind: "disconnected" })}`, {
+                code: sipRegisterFailure?.code ?? 0,
+              })}
+            </p>
+            <p className="break-words opacity-90">{td("webphone.reconnectingHint")}</p>
+            {/* Nunca conectou: pode ser configuração, então a dica do teste aparece junto. */}
+            {sipRegisterFailure?.kind === "connection" && (
+              <p className="break-words opacity-90">
+                {td(transport === "udp" ? "webphone.adminHintUdp" : "webphone.adminHint")}
+              </p>
+            )}
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="h-7 px-2 text-xs"
+              onClick={() => sipSession.link?.reconnectNow()}
+            >
+              <RefreshCw aria-hidden="true" className="mr-1 h-3.5 w-3.5" />
+              {td("webphone.reconnectNow")}
+            </Button>
+          </div>
+        </div>
+      )}
+
+      {/* Só no erro definitivo: entre o socket voltar e o 200 chegar a falha anterior
+          continua guardada, e a caixa vermelha mandaria recarregar a página à toa. */}
+      {sipLinkState === "error" && sipRegisterFailure && (
+        <div
+          role="status"
+          className="flex w-full items-start gap-2 rounded-md border border-destructive/30 bg-destructive/10 p-2 text-xs text-destructive"
+        >
+          <AlertTriangle aria-hidden="true" className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+          <div className="min-w-0 space-y-0.5">
+            <p className="font-medium break-words">
+              {td(`webphone.${describeRegisterFailure(sipRegisterFailure)}`, {
+                code: sipRegisterFailure.code ?? 0,
+              })}
+            </p>
+            <p className="break-words opacity-90">
+              {td(
+                sipRegisterFailure.kind === "disconnected" || sipRegisterFailure.kind === "lost"
+                  ? "webphone.reloadHint"
+                  : transport === "udp"
+                    ? "webphone.adminHintUdp"
+                    : "webphone.adminHint"
+              )}
+            </p>
+          </div>
+        </div>
+      )}
 
       {callInfo && (
         <div className="text-center">

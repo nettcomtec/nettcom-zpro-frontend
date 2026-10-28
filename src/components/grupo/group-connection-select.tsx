@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useState, useEffect } from "react";
+import { useTranslations } from "next-intl";
 import { Label } from "@/components/ui/label";
 import {
   Select,
@@ -27,9 +28,10 @@ export function GroupConnectionSelect({
   groupId,
   onChange,
   onWhatsappIdChange,
-  labelConnection = "Conexão",
-  labelGroup = "Grupo",
+  labelConnection,
+  labelGroup,
 }: GroupConnectionSelectProps) {
+  const t = useTranslations("groupConnectionSelect");
   const [sessions, setSessions] = useState<Whatsapp[]>([]);
   const [selectedWhatsappId, setSelectedWhatsappId] = useState<string>("");
   const [groups, setGroups] = useState<WhatsAppGroup[]>([]);
@@ -73,20 +75,20 @@ export function GroupConnectionSelect({
   return (
     <div className="space-y-3">
       <div className="grid gap-2">
-        <Label>{labelConnection}</Label>
+        <Label>{labelConnection ?? t("connection")}</Label>
         {loadingSessions ? (
           <div className="flex items-center gap-2 text-sm text-muted-foreground">
-            <Loader2 className="h-4 w-4 animate-spin" /> Carregando conexões...
+            <Loader2 className="h-4 w-4 animate-spin" /> {t("loadingConnections")}
           </div>
         ) : (
           <Select value={selectedWhatsappId} onValueChange={handleSelectSession}>
             <SelectTrigger>
-              <SelectValue placeholder="Selecione uma conexão" />
+              <SelectValue placeholder={t("selectConnection")} />
             </SelectTrigger>
             <SelectContent>
               {sessions.length === 0 ? (
                 <SelectItem value="_none" disabled>
-                  Nenhuma conexão disponível
+                  {t("noConnections")}
                 </SelectItem>
               ) : (
                 sessions.map((s) => (
@@ -101,10 +103,10 @@ export function GroupConnectionSelect({
       </div>
 
       <div className="grid gap-2">
-        <Label>{labelGroup}</Label>
+        <Label>{labelGroup ?? t("group")}</Label>
         {loadingGroups ? (
           <div className="flex items-center gap-2 text-sm text-muted-foreground">
-            <Loader2 className="h-4 w-4 animate-spin" /> Carregando grupos...
+            <Loader2 className="h-4 w-4 animate-spin" /> {t("loadingGroups")}
           </div>
         ) : (
           <Select
@@ -116,10 +118,10 @@ export function GroupConnectionSelect({
               <SelectValue
                 placeholder={
                   !selectedWhatsappId
-                    ? "Selecione uma conexão primeiro"
+                    ? t("selectConnectionFirst")
                     : groups.length === 0
-                    ? "Nenhum grupo encontrado"
-                    : "Selecione um grupo"
+                    ? t("noGroups")
+                    : t("selectGroup")
                 }
               />
             </SelectTrigger>

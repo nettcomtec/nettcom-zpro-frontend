@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react"
 import { Copy, ExternalLink, Info, Loader2 } from "lucide-react"
 import { toast } from "sonner"
+import { useTranslations } from "next-intl"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
@@ -30,6 +31,7 @@ interface Props {
  * lista de eventos a marcar.
  */
 export function BspWebhookInfoCard({ channelType, whatsappId, crossTenant = false }: Props) {
+  const t = useTranslations("bspWebhookInfoCard")
   const [loading, setLoading] = useState(true)
   const [gupshup, setGupshup] = useState<GupshupWebhookInfo | null>(null)
   const [dialog360, setDialog360] = useState<Dialog360WebhookInfo | null>(null)
@@ -64,7 +66,7 @@ export function BspWebhookInfoCard({ channelType, whatsappId, crossTenant = fals
       <Card>
         <CardContent className="py-6 flex items-center justify-center text-sm text-muted-foreground">
           <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-          Carregando webhook info...
+          {t("loading")}
         </CardContent>
       </Card>
     )
@@ -74,7 +76,7 @@ export function BspWebhookInfoCard({ channelType, whatsappId, crossTenant = fals
     return (
       <Card>
         <CardContent className="py-4 text-xs text-destructive">
-          Não foi possível carregar webhook info ({error}).
+          {t("loadError", { error })}
         </CardContent>
       </Card>
     )
@@ -91,18 +93,16 @@ export function BspWebhookInfoCard({ channelType, whatsappId, crossTenant = fals
       <CardHeader className="pb-3">
         <CardTitle className="text-sm flex items-center gap-2">
           <Info className="w-4 h-4" />
-          Configurar webhook no painel {panelLabel}
+          {t("title", { panel: panelLabel })}
         </CardTitle>
       </CardHeader>
       <CardContent className="space-y-3 text-sm">
         <p className="text-xs text-muted-foreground">
-          Se o canal foi criado via fluxo Manual (Customer Account), a URL abaixo
-          precisa ser configurada manualmente no painel do BSP — o backend não
-          consegue setar automaticamente sem credenciais Partner.
+          {t("manualNote")}
         </p>
 
         <div className="space-y-1">
-          <label className="text-xs font-semibold">URL de Webhook</label>
+          <label className="text-xs font-semibold">{t("webhookUrlLabel")}</label>
           <div className="flex gap-2">
             <Input value={webhookUrl} readOnly className="font-mono text-xs" />
             <Button
@@ -111,9 +111,9 @@ export function BspWebhookInfoCard({ channelType, whatsappId, crossTenant = fals
               size="icon"
               onClick={() => {
                 navigator.clipboard.writeText(webhookUrl)
-                toast.success("URL copiada")
+                toast.success(t("urlCopied"))
               }}
-              title="Copiar URL"
+              title={t("copyUrl")}
             >
               <Copy className="w-4 h-4" />
             </Button>
@@ -122,7 +122,7 @@ export function BspWebhookInfoCard({ channelType, whatsappId, crossTenant = fals
 
         {events && events.length > 0 && (
           <div className="space-y-1">
-            <label className="text-xs font-semibold">Eventos a marcar</label>
+            <label className="text-xs font-semibold">{t("eventsLabel")}</label>
             <div className="flex flex-wrap gap-1.5">
               {events.map((e) => (
                 <Badge key={e} variant="secondary" className="font-mono text-[10px]">
@@ -132,7 +132,7 @@ export function BspWebhookInfoCard({ channelType, whatsappId, crossTenant = fals
             </div>
             {channelType === "gupshup" && (
               <p className="text-[11px] text-muted-foreground">
-                Versão: V3 (selecione se houver toggle).
+                {t("versionNote")}
               </p>
             )}
           </div>
@@ -140,7 +140,7 @@ export function BspWebhookInfoCard({ channelType, whatsappId, crossTenant = fals
 
         {instructions && (
           <div className="space-y-1">
-            <label className="text-xs font-semibold">Passo a passo no painel</label>
+            <label className="text-xs font-semibold">{t("stepsLabel")}</label>
             <ol className="text-xs list-decimal pl-4 space-y-0.5 text-muted-foreground">
               {instructions.steps.map((s, i) => (
                 <li key={i}>{s}</li>
@@ -153,7 +153,7 @@ export function BspWebhookInfoCard({ channelType, whatsappId, crossTenant = fals
               className="h-auto p-0 text-xs"
               onClick={() => window.open(instructions.panelUrl, "_blank", "noopener")}
             >
-              Abrir {instructions.panelUrl} <ExternalLink className="w-3 h-3 ml-1" />
+              {t("openPanel", { url: instructions.panelUrl })} <ExternalLink className="w-3 h-3 ml-1" />
             </Button>
           </div>
         )}

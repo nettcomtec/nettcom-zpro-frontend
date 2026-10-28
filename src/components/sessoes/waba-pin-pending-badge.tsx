@@ -18,6 +18,8 @@ interface Props {
   bmToken?: string | null;
   wabaVersion?: string | null;
   webhookOrigin?: string | null;
+  /** WABA do canal: com ele o canal do Embedded Signup (zdg_oauth) tambem mostra o aviso. */
+  wabaId?: string | null;
   enabled?: boolean;
   className?: string;
   onClick?: () => void;
@@ -36,13 +38,14 @@ export function WabaPinPendingBadge({
   bmToken,
   wabaVersion,
   webhookOrigin,
+  wabaId,
   enabled = true,
   className,
   onClick,
   asIcon = false,
 }: Props) {
   const t = useTranslations("sessoesPage");
-  const { pending } = useWabaPinPending({ type, tokenAPI, bmToken, wabaVersion, webhookOrigin, enabled });
+  const { pending } = useWabaPinPending({ type, tokenAPI, bmToken, wabaVersion, webhookOrigin, wabaId, enabled });
 
   if (pending !== true) return null;
 

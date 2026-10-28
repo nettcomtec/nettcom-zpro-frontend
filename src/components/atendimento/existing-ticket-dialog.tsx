@@ -14,6 +14,7 @@ import {
 import { useAuthStore } from "@/stores/auth-store";
 import { updateTicket } from "@/services/tickets";
 import type { ExistingOpenTicket } from "@/lib/check-existing-open-ticket";
+import { isNotViewAssignedRestricted } from "@/lib/not-view-assigned-scope";
 
 /**
  * Dialog exibido quando o operador tenta iniciar conversa avulsa para contato
@@ -55,15 +56,22 @@ export function ExistingTicketDialog({
   const t = useTranslations("existingTicket");
   const router = useRouter();
   const { user } = useAuthStore();
+  const supervisorAdmin = useAuthStore((s) => s.supervisorAdmin);
   const [taking, setTaking] = React.useState(false);
 
   if (!ticket) return null;
 
   const profile = user?.profile ?? "";
   const isAdminLike = profile === "admin" || profile === "super" || profile === "superadmin";
-  const restricted = isRestrictedUser || (notViewAssignedTickets && profile === "user");
-  const canOpen = !restricted;
-  const canTake = isAdminLike;
+  const blockedByNotViewAssigned =
+    notViewAssignedTickets && isNotViewAssignedRestricted(user, supervisorAdmin);
+  const restricted = isRestrictedUser || blockedByNotViewAssigned;
+  // accessible === false: o servidor disse que este usuário não abre o atendimento.
+  const canOpen = !restricted && ticket.accessible !== false;
+  // Assumir o atendimento de colega passa pela mesma trava do servidor: o supervisor
+  // rebaixado só assume o que está sem atendente.
+  const ownedByOther = ticket.ownerHidden === true || (ticket.ownerId != null && ticket.ownerId !== user?.userId);
+  const canTake = isAdminLike && ticket.accessible !== false && !(blockedByNotViewAssigned && ownedByOther);
 
   // Canal do ticket encontrado x canal alvo da ação. `sameChannel` vem do backend
   // (pré-check batelado) e é a fonte primária; o comparativo com targetWhatsappId
@@ -110,8 +118,11 @@ export function ExistingTicketDialog({
     }
   };
 
-  const ownerLabel = ticket.ownerName || t("noOwner");
-  const queueLabel = ticket.queueName || t("noQueue");
+  // ownerHidden: atendimento que este usuário não abre; o servidor omitiu atendente e fila.
+  const ownerOf = (s: ExistingOpenTicket) => (s.ownerHidden ? t("ownerHidden") : s.ownerName || t("noOwner"));
+  const queueOf = (s: ExistingOpenTicket) => (s.ownerHidden ? t("queueHidden") : s.queueName || t("noQueue"));
+  const ownerLabel = ownerOf(ticket);
+  const queueLabel = queueOf(ticket);
   const contactLabel = ticket.contactName || "";
   const channelLabel = ticket.whatsappName || t("noChannel");
   const proceedLabel = t(proceedMode === "accept" ? "acceptAnyway" : "proceedAnyway");
@@ -203,11 +214,11 @@ export function ExistingTicketDialog({
                   </Badge>
                   <span
                     className="text-xs text-muted-foreground truncate flex-1 min-w-0"
-                    title={`${s.ownerName || t("noOwner")} — ${s.queueName || t("noQueue")}`}
+                    title={`${ownerOf(s)} — ${queueOf(s)}`}
                   >
-                    {s.ownerName || t("noOwner")}
+                    {ownerOf(s)}
                   </span>
-                  {canOpen && (
+                  {!restricted && s.accessible !== false && (
                     <Button
                       variant="ghost"
                       size="sm"

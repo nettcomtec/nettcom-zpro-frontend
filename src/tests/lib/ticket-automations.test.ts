@@ -1,6 +1,11 @@
 import { describe, it, expect } from "vitest";
 import { normalizeTicket } from "@/lib/normalize-ticket";
-import { getTicketAutomations, matchesTicketAutomationFilter } from "@/lib/ticket-automations";
+import {
+  getTicketAutomations,
+  isAiAgentActiveOrPaused,
+  isAiAgentPaused,
+  matchesTicketAutomationFilter,
+} from "@/lib/ticket-automations";
 
 describe("ticket-automations — guia Automações do /atendimento", () => {
   it("ticket sem nenhuma automação não entra em filtro nenhum", () => {
@@ -34,5 +39,43 @@ describe("ticket-automations — guia Automações do /atendimento", () => {
     const tk = normalizeTicket({ id: 1, chatgptStatus: true });
     expect(getTicketAutomations(tk)).toEqual({ chatbot: false, aiAgent: false, integrations: ["ChatGPT"] });
     expect(matchesTicketAutomationFilter(tk, "integration")).toBe(true);
+  });
+});
+
+describe("ticket-automations — agente de IA pausado neste atendimento", () => {
+  it("pausado = agente no atendimento + botStopped + IA desligada; some do selo ativo", () => {
+    const tk = normalizeTicket({ id: 1, aiAgentId: 7, chatgptStatus: false, botStopped: true });
+    expect(isAiAgentPaused(tk)).toBe(true);
+    expect(isAiAgentActiveOrPaused(tk)).toBe(true);
+    expect(getTicketAutomations(tk).aiAgent).toBe(false);
+    expect(matchesTicketAutomationFilter(tk, "aiAgent")).toBe(false);
+  });
+
+  it("botStopped antigo com a IA ligada (fora de par) conta como pausado: o motor cala e a tela oferece Retomar", () => {
+    const tk = normalizeTicket({ id: 1, aiAgentId: 7, chatgptStatus: true, botStopped: true });
+    expect(isAiAgentPaused(tk)).toBe(true);
+    expect(isAiAgentActiveOrPaused(tk)).toBe(true);
+    expect(getTicketAutomations(tk).aiAgent).toBe(true);
+  });
+
+  it("agente respondendo sem botStopped: ativo, não pausado", () => {
+    const tk = normalizeTicket({ id: 1, aiAgentId: "7", chatgptStatus: "enabled" });
+    expect(isAiAgentPaused(tk)).toBe(false);
+    expect(isAiAgentActiveOrPaused(tk)).toBe(true);
+  });
+
+  it("sem agente: botStopped é só do fluxo (nem pausado nem ativo)", () => {
+    const tk = normalizeTicket({ id: 1, chatFlowId: 3, botStopped: true, chatgptStatus: false });
+    expect(isAiAgentPaused(tk)).toBe(false);
+    expect(isAiAgentActiveOrPaused(tk)).toBe(false);
+    expect(isAiAgentPaused(normalizeTicket({ id: 2, aiAgentId: null, botStopped: true }))).toBe(false);
+    expect(isAiAgentPaused(normalizeTicket({ id: 3, aiAgentId: 0, botStopped: true }))).toBe(false);
+  });
+
+  it("IA desligada sem botStopped (desligada à mão) ou sem a chave (lista de backend antigo) não é pausa", () => {
+    expect(isAiAgentPaused(normalizeTicket({ id: 1, aiAgentId: 7, chatgptStatus: false, botStopped: false }))).toBe(false);
+    const legacy = normalizeTicket({ id: 2, aiAgentId: 7, chatgptStatus: false });
+    expect(isAiAgentPaused(legacy)).toBe(false);
+    expect(isAiAgentActiveOrPaused(legacy)).toBe(false);
   });
 });

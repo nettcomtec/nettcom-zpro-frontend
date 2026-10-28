@@ -631,7 +631,7 @@ export default function StorageConfigPage() {
               {/* AWS S3 */}
               <TabsContent value="aws" className="space-y-4 pt-2">
                 <p className="text-xs text-muted-foreground">
-                  AWS S3 — sem endpoint customizado, region padrão AWS.
+                  {t("awsHint")}
                 </p>
                 {credentialFields}
               </TabsContent>

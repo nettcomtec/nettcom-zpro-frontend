@@ -6,6 +6,12 @@ import { useTranslations } from "next-intl";
 import { Card, CardContent } from "@/components/ui/card";
 import { Loader2, CheckCircle, XCircle } from "lucide-react";
 
+// O state do login é assinado ("<canal>.<empresa>.<validade>.<assinatura>") ou, no
+// formato antigo, só o id do canal: nos dois o id do canal é a parte antes do 1º ".".
+// Só esse id vai à tela e ao aviso para a janela de origem; o state inteiro vai apenas
+// ao backend, que confere a assinatura.
+const channelIdFromState = (state: string): number => parseInt(state.split(".")[0], 10);
+
 function GmailCallbackContent() {
   const t = useTranslations("gmailCallbackPage");
   const searchParams = useSearchParams();
@@ -37,7 +43,9 @@ function GmailCallbackContent() {
       return;
     }
 
-    setWhatsappId(state);
+    // Na tela só o id do canal, nunca o state cru (carrega a assinatura)
+    const channelId = channelIdFromState(state);
+    setWhatsappId(channelId > 0 ? String(channelId) : "");
     handleCallback(code, state);
   }, [searchParams]);
 
@@ -73,7 +81,7 @@ function GmailCallbackContent() {
               {
                 type: "OAUTH_COMPLETE",
                 status: "success",
-                whatsappId: Number(state),
+                whatsappId: channelIdFromState(state),
               },
               window.location.origin
             );
@@ -82,16 +90,26 @@ function GmailCallbackContent() {
         setTimeout(() => window.close(), 800);
       } else {
         const errorText = await response.text();
+        // Login recusado pelo state (vencido, de outra janela ou adulterado): texto
+        // traduzido aqui e no aviso à tela de canais, nunca o JSON do backend.
+        let errorCode = "";
+        try {
+          errorCode = String(JSON.parse(errorText)?.error || "");
+        } catch {}
+        const errorMessage =
+          errorCode === "ERR_GMAIL_OAUTH_STATE_INVALID"
+            ? t("errorStateInvalid")
+            : t("errorProcess") + errorText;
         setStatus("error");
-        setMessage(t("errorProcess") + errorText);
+        setMessage(errorMessage);
         if (window.opener && !window.opener.closed) {
           try {
             window.opener.postMessage(
               {
                 type: "OAUTH_COMPLETE",
                 status: "error",
-                message: errorText,
-                whatsappId: Number(state),
+                message: errorMessage,
+                whatsappId: channelIdFromState(state),
               },
               window.location.origin
             );

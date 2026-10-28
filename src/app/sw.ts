@@ -1,6 +1,6 @@
 import { defaultCache } from "@serwist/next/worker";
 import type { PrecacheEntry, SerwistGlobalConfig } from "serwist";
-import { NetworkFirst, Serwist } from "serwist";
+import { NetworkFirst, NetworkOnly, Serwist } from "serwist";
 
 declare global {
   interface WorkerGlobalScope extends SerwistGlobalConfig {
@@ -58,7 +58,7 @@ function getCurrentTenantIdFromDB(): Promise<number | null> {
 let swLocale = "pt";
 
 const swStrings: Record<string, Record<string, string>> = {
-  pt: { defaultTitle: "APP", defaultBody: "Nova notificação", internalChat: "💬 Chat Interno", internalBody: "Nova mensagem recebida", newTicket: "🆕 Novo Ticket", open: "Abrir", close: "Fechar" },
+  pt: { defaultTitle: "APP", defaultBody: "Nova notificação", internalChat: "💬 Chat Interno", internalBody: "Nova mensagem recebida", newTicket: "🆕 Novo atendimento", open: "Abrir", close: "Fechar" },
   en: { defaultTitle: "APP", defaultBody: "New notification", internalChat: "💬 Internal Chat", internalBody: "New message received", newTicket: "🆕 New Ticket", open: "Open", close: "Close" },
   es: { defaultTitle: "APP", defaultBody: "Nueva notificación", internalChat: "💬 Chat Interno", internalBody: "Nuevo mensaje recibido", newTicket: "🆕 Nuevo Ticket", open: "Abrir", close: "Cerrar" },
   de: { defaultTitle: "APP", defaultBody: "Neue Benachrichtigung", internalChat: "💬 Interner Chat", internalBody: "Neue Nachricht erhalten", newTicket: "🆕 Neues Ticket", open: "Öffnen", close: "Schließen" },
@@ -69,8 +69,8 @@ const swStrings: Record<string, Record<string, string>> = {
   ar: { defaultTitle: "APP", defaultBody: "إشعار جديد", internalChat: "💬 دردشة داخلية", internalBody: "تم استلام رسالة جديدة", newTicket: "🆕 تذكرة جديدة", open: "فتح", close: "إغلاق" },
   hi: { defaultTitle: "APP", defaultBody: "नई सूचना", internalChat: "💬 आंतरिक चैट", internalBody: "नया संदेश प्राप्त हुआ", newTicket: "🆕 नया टिकट", open: "खोलें", close: "बंद करें" },
   id: { defaultTitle: "APP", defaultBody: "Notifikasi baru", internalChat: "💬 Chat Internal", internalBody: "Pesan baru diterima", newTicket: "🆕 Tiket Baru", open: "Buka", close: "Tutup" },
-  ru: { defaultTitle: "APP", defaultBody: "Новое уведомление", internalChat: "💬 Внутренний чат", internalBody: "Получено новое сообщение", newTicket: "🆕 Новый тикет", open: "Открыть", close: "Закрыть" },
-  tr: { defaultTitle: "APP", defaultBody: "Yeni bildirim", internalChat: "💬 Dahili Sohbet", internalBody: "Yeni mesaj alındı", newTicket: "🆕 Yeni Bilet", open: "Aç", close: "Kapat" },
+  ru: { defaultTitle: "APP", defaultBody: "Новое уведомление", internalChat: "💬 Внутренний чат", internalBody: "Получено новое сообщение", newTicket: "🆕 Новое обращение", open: "Открыть", close: "Закрыть" },
+  tr: { defaultTitle: "APP", defaultBody: "Yeni bildirim", internalChat: "💬 Dahili Sohbet", internalBody: "Yeni mesaj alındı", newTicket: "🆕 Yeni Talep", open: "Aç", close: "Kapat" },
 };
 
 function t(key: string): string {
@@ -96,6 +96,12 @@ const serwist = new Serwist({
       matcher: BRANDING_PATTERN,
       handler: new NetworkFirst({ cacheName: "branding", networkTimeoutSeconds: 3 }),
     },
+    // Mídia de conversa baixada pela rota do front: a regra "apis" do defaultCache
+    // guardaria o arquivo no Cache Storage por 24 h, ignorando o no-store.
+    {
+      matcher: ({ sameOrigin, url: { pathname } }) => sameOrigin && pathname === "/api/download",
+      handler: new NetworkOnly(),
+    },
     ...defaultCache,
   ],
 });
@@ -119,7 +125,15 @@ self.addEventListener("push", (event: any) => {
       title = t("internalChat");
       body = (data.body as string) || t("internalBody");
       tag = `chat-interno-${inner?.messageId}`;
-      url = "/chat-privado";
+      // Abre a conversa: equipe pelo groupId, direta pelo senderId; backend antigo
+      // sem os campos cai na lista. Montado aqui porque o SW não importa lib/.
+      const groupId = Number(inner?.groupId);
+      const senderId = Number(inner?.senderId);
+      url = Number.isInteger(groupId) && groupId > 0
+        ? `/chat-privado?groupId=${groupId}`
+        : Number.isInteger(senderId) && senderId > 0
+          ? `/chat-privado?contactId=${senderId}`
+          : "/chat-privado";
     } else if (inner?.ticketId) {
       // `titleKind: "contact"` só existe em backend novo, que manda o nome do
       // contato no title e a prévia da mensagem no body. Backend antigo não manda
@@ -141,9 +155,10 @@ self.addEventListener("push", (event: any) => {
   const payloadTenantId = data.tenantId != null ? Number(data.tenantId) : null;
 
   // `silent` vem do backend quando o toggle "Notificações sonoras" está desligado no
-  // tenant (Setting notificationSilenced). Só chega em alerta de mensagem nova de
-  // cliente. Backend antigo não manda o campo -> undefined -> som normal (sem
-  // regressão). Quando silencioso, também não vibra: vibração é o "som" do mobile.
+  // tenant (Setting notificationSilenced) ou quando o próprio usuário desligou o som no
+  // botão do topo (backend/src/helpers/NotificationSoundPolicyZPRO.ts). Backend antigo
+  // não manda o campo -> undefined -> som normal (sem regressão). Quando silencioso,
+  // também não vibra: vibração é o "som" do mobile.
   const isSilent = data.silent === true;
 
   const showOptions = {

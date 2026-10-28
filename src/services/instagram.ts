@@ -4,9 +4,17 @@ export interface InstagramMedia {
   id: string;
   caption?: string;
   media_type: string;
-  media_url: string;
+  // A Meta omite o media_url de publicação com material protegido (ex.: Reel com música)
+  media_url?: string;
+  // Capa do vídeo (só VIDEO)
+  thumbnail_url?: string;
   permalink?: string;
   timestamp: string;
+}
+
+export interface InstagramMediaPage {
+  data?: InstagramMedia[];
+  paging?: { next?: string };
 }
 
 export interface InstagramCommentReply {
@@ -26,8 +34,24 @@ export interface InstagramComment {
   replies?: { data?: Array<{ id: string }> };
 }
 
-export async function listMedia(whatsappId: number) {
-  return api.get<InstagramMedia[]>(`/instagramMetaMedia/${whatsappId}`);
+// Campos e tamanho da página vão explícitos: o backend anterior a esta versão não pedia a
+// capa do vídeo por padrão. Com nextUrl (paging.next da Meta) o backend segue o link, que
+// já carrega os mesmos campos e tamanho da 1ª página.
+const MEDIA_FIELDS = "id,caption,timestamp,media_type,media_url,permalink,thumbnail_url";
+const MEDIA_PAGE_SIZE = 50;
+
+export async function listMedia(whatsappId: number, nextUrl?: string) {
+  return api.get<InstagramMediaPage | InstagramMedia[]>(`/instagramMetaMedia/${whatsappId}`, {
+    params: nextUrl ? { nextUrl } : { fields: MEDIA_FIELDS, limit: MEDIA_PAGE_SIZE },
+  });
+}
+
+export function readInstagramMediaPage(raw: InstagramMediaPage | InstagramMedia[] | null | undefined) {
+  if (Array.isArray(raw)) return { items: raw, next: null as string | null };
+  return {
+    items: Array.isArray(raw?.data) ? raw!.data! : [],
+    next: (typeof raw?.paging?.next === "string" && raw.paging.next) || null,
+  };
 }
 
 export async function getMediaComments(mediaId: string, whatsappId: number, nextUrl?: string) {

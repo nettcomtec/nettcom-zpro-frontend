@@ -234,3 +234,18 @@
     animation: msg-highlight-fade 1.8s ease-out forwards;
   }
 }
+
+/* iPhone/iPad: o WebKit amplia a página inteira ao tocar num campo com fonte menor que
+   16px e não desfaz o zoom ao sair dele (o painel troca de tela sem recarregar, então o
+   zoom seguia para as outras telas). Só iOS (`-webkit-touch-callout` não existe em
+   outro navegador): computador e Android ficam como estão. Campo com fonte maior (código
+   do 2 fatores) fica de fora; a altura da linha que vem de text-xs/text-sm não muda. O app do iPhone injeta a MESMA
+   regra (`apps/ios/App/App/MainViewController.swift`, `inputZoomStyleScript`) para valer
+   também em painel antigo: mudar um exige o outro. */
+@supports (-webkit-touch-callout: none) {
+  input:not([type=checkbox], [type=radio], [type=range], [type=color], [type=file], [type=button], [type=submit], [type=reset], [type=image], [type=hidden], .text-lg, .text-xl, .text-2xl, .text-3xl, .text-4xl, .text-5xl, .text-6xl, .text-7xl, .text-8xl, .text-9xl),
+  textarea:not(.text-lg, .text-xl, .text-2xl, .text-3xl, .text-4xl, .text-5xl, .text-6xl, .text-7xl, .text-8xl, .text-9xl),
+  select:not(.text-lg, .text-xl, .text-2xl, .text-3xl, .text-4xl, .text-5xl, .text-6xl, .text-7xl, .text-8xl, .text-9xl) {
+    font-size: 16px !important;
+  }
+}

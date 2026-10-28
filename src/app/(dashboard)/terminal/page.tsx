@@ -43,7 +43,7 @@ export default function TerminalPage() {
       const msg =
         code === "ERR_TERMINAL_DISABLED"
           ? t("disabledByServer")
-          : code ?? "Erro ao executar comando.";
+          : code ?? t("commandError");
       setHistory((h) => [...h, { command: cmd, output: msg, error: true }]);
     } finally {
       setLoading(false);
@@ -120,7 +120,7 @@ export default function TerminalPage() {
             {loading && (
               <div className="flex gap-2 animate-pulse">
                 <span className="text-green-600 select-none">$</span>
-                <span className="text-white">executando...</span>
+                <span className="text-white">{t("running")}</span>
               </div>
             )}
 

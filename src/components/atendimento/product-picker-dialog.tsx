@@ -22,18 +22,23 @@ import {
   fetchNuvemshopStores
 } from "@/services/nuvemshopProdutosService";
 import {
-  pickInternalProducts,
+  pickInternalProductsPage,
   fetchInternalStores,
   sendInternalProduct
 } from "@/services/internalProdutosService";
 import { toast } from "sonner";
+import { useRegion, type UseRegionResult } from "@/hooks/use-region";
 
 type Format = "text" | "link";
 type Mode = "insert" | "send";
 type Source = "woocommerce" | "nuvemshop" | "internal";
 
 // Ambas as fontes normalizam para o mesmo shape (WooProduct). Loja minima comum.
-type PickerProduct = WooProduct;
+// `_currency`: moeda da loja (ISO) devolvida pelo backend; null/ausente = moeda da empresa.
+type PickerProduct = WooProduct & { _currency?: string | null };
+
+// Região da empresa para montar o texto que vai ao cliente (dinheiro + rótulos).
+type PickerRegion = Pick<UseRegionResult, "formatMoney" | "text">;
 interface PickerStore {
   id: number;
   description: string | null;
@@ -60,32 +65,33 @@ interface Props {
   onStageMedia?: (imageUrl: string, caption: string) => void;
 }
 
-function formatPrice(value: string | number | null | undefined): string {
+// Moeda da loja (`_currency`) vence; sem ela, a da empresa. Formato do país da empresa.
+function formatPrice(value: string | number | null | undefined, p: PickerProduct, region: PickerRegion): string {
   if (value === null || value === undefined || value === "") return "";
   const n = Number(value);
   if (!Number.isFinite(n)) return String(value);
-  return `R$ ${n.toFixed(2).replace(".", ",")}`;
+  return region.formatMoney(n, { currency: p._currency || undefined });
 }
 
-function buildPayload(p: PickerProduct, format: Format): string {
-  const price = formatPrice(p.price || p.regular_price);
+function buildPayload(p: PickerProduct, format: Format, region: PickerRegion): string {
+  const price = formatPrice(p.price || p.regular_price, p, region);
   const link = p.permalink || "";
   if (format === "link") return link || `${p.name}${p.sku ? " (SKU: " + p.sku + ")" : ""}`;
   const lines: string[] = [`📦 *${p.name}*`];
   if (p.sku) lines.push(`SKU: \`${p.sku}\``);
-  if (price) lines.push(`Preço: ${price}`);
+  if (price) lines.push(`${region.text("product.priceLabel", undefined, "Preço:")} ${price}`);
   if (link) lines.push(link);
   return lines.join("\n");
 }
 
 // Ficha textual do produto interno (sem marca). Usada na legenda da imagem (Inserir)
 // e como fallback de texto. Espelha o buildProductCaption do backend.
-function buildInternalCaption(p: PickerProduct): string {
+function buildInternalCaption(p: PickerProduct, region: PickerRegion): string {
   const d: any = (p as any)._internal || {};
-  const original = d.priceOriginal ? formatPrice(d.priceOriginal) : "";
-  const promo = d.pricePromo ? formatPrice(d.pricePromo) : "";
+  const original = d.priceOriginal ? formatPrice(d.priceOriginal, p, region) : "";
+  const promo = d.pricePromo ? formatPrice(d.pricePromo, p, region) : "";
   const lines: string[] = [`🛍️ *${p.name}*`];
-  if (promo && original && promo !== original) lines.push(`~De ${original}~ por *${promo}*`);
+  if (promo && original && promo !== original) lines.push(region.text("product.fromTo", { original, promo }, "~De {original}~ por *{promo}*"));
   else if (promo) lines.push(`💰 *${promo}*`);
   else if (original) lines.push(`💰 *${original}*`);
   if (p.description) { lines.push(""); lines.push(p.description); }
@@ -94,9 +100,15 @@ function buildInternalCaption(p: PickerProduct): string {
     .filter((v) => v && v.name && Array.isArray(v.options) && v.options.length)
     .map((v) => `${v.name}: ${v.options.join(", ")}`);
   if (vl.length) { lines.push(""); lines.push(...vl); }
-  if (d.hasFreight) lines.push("🚚 Frete disponível");
+  if (d.hasFreight) lines.push(`🚚 ${region.text("product.freeShipping", undefined, "Frete disponível")}`);
   if (d.videoUrl) lines.push(`▶️ ${d.videoUrl}`);
   return lines.join("\n");
+}
+
+// Junta a página nova sem repetir produto (lista mudou entre uma página e outra).
+function appendNewProducts(prev: PickerProduct[], next: PickerProduct[]): PickerProduct[] {
+  const seen = new Set(prev.map((p) => String(p.id)));
+  return [...prev, ...next.filter((p) => !seen.has(String(p.id)))];
 }
 
 function storeLabel(s: PickerStore): string {
@@ -105,6 +117,7 @@ function storeLabel(s: PickerStore): string {
 
 export function ProductPickerDialog({ open, onOpenChange, onInsert, whatsappId, ticketId, onStageMedia }: Props) {
   const t = useTranslations("messageInput");
+  const region = useRegion();
   const [q, setQ] = useState("");
   const [products, setProducts] = useState<PickerProduct[]>([]);
   const [loading, setLoading] = useState(false);
@@ -112,6 +125,13 @@ export function ProductPickerDialog({ open, onOpenChange, onInsert, whatsappId, 
   const [format, setFormat] = useState<Format>("text");
   const [mode, setMode] = useState<Mode>("insert");
   const [lastError, setLastError] = useState<string | null>(null);
+  // "Carregar mais" (só catálogo interno): página atual, busca que gerou a lista e se há mais.
+  const [hasMore, setHasMore] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const pageRef = useRef(1);
+  const loadedSearchRef = useRef("");
+  const loadingMoreRef = useRef(false);
+  const requestIdRef = useRef(0);
 
   const [source, setSource] = useState<Source>("woocommerce");
   const [availableSources, setAvailableSources] = useState<Source[]>([]);
@@ -152,6 +172,12 @@ export function ProductPickerDialog({ open, onOpenChange, onInsert, whatsappId, 
     // 3) primeira disponivel
     setSelectedStoreId(list[0].id);
   }, [whatsappId]);
+
+  // Textos ao cliente no idioma da empresa (só busca com idioma configurado).
+  const { ensureTexts } = region;
+  useEffect(() => {
+    if (open) void ensureTexts();
+  }, [open, ensureTexts]);
 
   // Carrega lojas de AMBAS as fontes ao abrir
   useEffect(() => {
@@ -205,16 +231,29 @@ export function ProductPickerDialog({ open, onOpenChange, onInsert, whatsappId, 
   }, [selectedStoreId, source]);
 
   const load = async (search: string, force = false) => {
+    // Resposta de busca anterior que chega depois da nova é descartada.
+    const reqId = ++requestIdRef.current;
     if (force) setSyncing(true); else setLoading(true);
     setLastError(null);
+    setHasMore(false);
+    setLoadingMore(false);
+    loadingMoreRef.current = false;
     try {
-      const picker =
-        source === "internal" ? pickInternalProducts
-        : source === "nuvemshop" ? pickNuvemshopProducts
-        : pickWooProducts;
+      if (source === "internal") {
+        const page = await pickInternalProductsPage(search, 1);
+        if (reqId !== requestIdRef.current) return;
+        setProducts(page.products as PickerProduct[]);
+        setHasMore(page.hasMore);
+        pageRef.current = 1;
+        loadedSearchRef.current = search;
+        return;
+      }
+      const picker = source === "nuvemshop" ? pickNuvemshopProducts : pickWooProducts;
       const { data } = await picker(search, force, selectedStoreId, whatsappId || null);
+      if (reqId !== requestIdRef.current) return;
       setProducts((data || []) as PickerProduct[]);
     } catch (err: any) {
+      if (reqId !== requestIdRef.current) return;
       setProducts([]);
       const status = err?.response?.status;
       const serverMsg = err?.response?.data?.message;
@@ -225,8 +264,33 @@ export function ProductPickerDialog({ open, onOpenChange, onInsert, whatsappId, 
       setLastError(msg);
       toast.error(msg);
     } finally {
-      setLoading(false);
-      setSyncing(false);
+      if (reqId === requestIdRef.current) {
+        setLoading(false);
+        setSyncing(false);
+      }
+    }
+  };
+
+  const loadMore = async () => {
+    if (source !== "internal" || loadingMoreRef.current) return;
+    const reqId = requestIdRef.current;
+    const nextPage = pageRef.current + 1;
+    loadingMoreRef.current = true;
+    setLoadingMore(true);
+    try {
+      // Mesma busca que montou a lista (o campo pode ter mudado e a nova busca ainda não rodou).
+      const page = await pickInternalProductsPage(loadedSearchRef.current, nextPage);
+      if (reqId !== requestIdRef.current) return;
+      setProducts((prev) => appendNewProducts(prev, page.products as PickerProduct[]));
+      setHasMore(page.hasMore);
+      pageRef.current = nextPage;
+    } catch {
+      if (reqId === requestIdRef.current) toast.error(t("productPickerError"));
+    } finally {
+      if (reqId === requestIdRef.current) {
+        loadingMoreRef.current = false;
+        setLoadingMore(false);
+      }
     }
   };
 
@@ -243,15 +307,22 @@ export function ProductPickerDialog({ open, onOpenChange, onInsert, whatsappId, 
 
   useEffect(() => {
     if (!open) {
+      // Descarta busca em andamento: ao reabrir, a lista recomeça da 1ª página.
+      requestIdRef.current += 1;
+      setLoading(false);
+      setSyncing(false);
       setQ("");
       setProducts([]);
+      setHasMore(false);
+      setLoadingMore(false);
+      loadingMoreRef.current = false;
     }
   }, [open]);
 
   const handlePick = async (p: PickerProduct) => {
     if (source === "internal") {
       const d: any = (p as any)._internal || {};
-      const caption = buildInternalCaption(p);
+      const caption = buildInternalCaption(p, region);
       if (mode === "send") {
         if (!ticketId) { toast.error(t("productPickerNoTicket")); return; }
         try {
@@ -272,7 +343,7 @@ export function ProductPickerDialog({ open, onOpenChange, onInsert, whatsappId, 
       toast.success(t("productInsertedToast"));
       return;
     }
-    onInsert(buildPayload(p, format));
+    onInsert(buildPayload(p, format, region));
     onOpenChange(false);
     toast.success(t("productInsertedToast"));
   };
@@ -433,7 +504,7 @@ export function ProductPickerDialog({ open, onOpenChange, onInsert, whatsappId, 
               <div className="p-1">
                 {products.map((p) => {
                   const img = p.images?.[0]?.src;
-                  const price = formatPrice(p.price || p.regular_price);
+                  const price = formatPrice(p.price || p.regular_price, p, region);
                   return (
                     <button
                       key={p.id}
@@ -466,6 +537,20 @@ export function ProductPickerDialog({ open, onOpenChange, onInsert, whatsappId, 
                     </button>
                   );
                 })}
+                {hasMore && (
+                  <div className="flex justify-center p-2">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={loadMore}
+                      disabled={loadingMore}
+                      className="border-border gap-2"
+                    >
+                      {loadingMore && <RefreshCw className="h-3.5 w-3.5 animate-spin" />}
+                      {t("loadMore")}
+                    </Button>
+                  </div>
+                )}
               </div>
             )}
           </div>

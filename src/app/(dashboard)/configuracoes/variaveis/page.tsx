@@ -28,6 +28,7 @@ import {
 } from "@/services/tenant-variables";
 
 function VarRef({ vars }: { vars: Record<string, string> }) {
+  const t = useTranslations("variaveisPage");
   const [copied, setCopied] = useState<string | null>(null);
 
   const copy = (key: string) => {
@@ -43,7 +44,7 @@ function VarRef({ vars }: { vars: Record<string, string> }) {
           <button
             onClick={() => copy(key)}
             className="flex items-center gap-1.5 group"
-            title="Copiar"
+            title={t("copyTitle")}
             type="button"
           >
             <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-xs text-primary group-hover:bg-primary group-hover:text-primary-foreground transition-colors">
@@ -169,6 +170,7 @@ export default function VariaveisPage() {
     firstName: t("varFirstName"),
     lastName: t("varLastName"),
     businessName: t("varBusiness"),
+    linkAvaliacaoGoogle: t("varLinkAvaliacaoGoogle"),
   };
 
   const TYPEBOT_VARS: Record<string, string> = {
